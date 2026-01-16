@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Tasks - Magickit{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Tasks</h1>
+    <p class="subtitle">Task queue and execution history</p>
+</div>
+
+<!-- Filters -->
+<div class="toolbar">
+    <select id="project-filter" class="select" name="project_id"
+            hx-get="/dashboard/tasks"
+            hx-target="#tasks-list"
+            hx-include="[name='status']">
+        <option value="">All Projects</option>
+        {% for project in projects %}
+        <option value="{{ project.id }}"
+                {% if project.id == selected_project %}selected{% endif %}>
+            {{ project.name }}
+        </option>
+        {% endfor %}
+    </select>
+
+    <select id="status-filter" class="select" name="status"
+            hx-get="/dashboard/tasks"
+            hx-target="#tasks-list"
+            hx-include="[name='project_id']">
+        <option value="">All Statuses</option>
+        <option value="pending">Pending</option>
+        <option value="queued">Queued</option>
+        <option value="running">Running</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="cancelled">Cancelled</option>
+    </select>
+
+    <button class="btn"
+            hx-get="/dashboard/tasks"
+            hx-target="#tasks-list"
+            hx-include="#project-filter, #status-filter">
+        Refresh
+    </button>
+</div>
+
+<!-- Task Stats -->
+<div class="task-stats"
+     hx-get="/dashboard/task-stats"
+     hx-trigger="load, every 10s"
+     hx-swap="innerHTML">
+    <div class="stat-pill pending">
+        <span class="count">-</span>
+        <span class="label">Pending</span>
+    </div>
+    <div class="stat-pill running">
+        <span class="count">-</span>
+        <span class="label">Running</span>
+    </div>
+    <div class="stat-pill completed">
+        <span class="count">-</span>
+        <span class="label">Completed</span>
+    </div>
+    <div class="stat-pill failed">
+        <span class="count">-</span>
+        <span class="label">Failed</span>
+    </div>
+</div>
+
+<!-- Tasks List -->
+<div class="card">
+    <div class="card-body">
+        <table class="table" id="tasks-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Service</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="tasks-list"
+                   hx-get="/dashboard/tasks"
+                   hx-trigger="load, every 5s"
+                   hx-swap="innerHTML">
+                <tr>
+                    <td colspan="7" class="loading">Loading tasks...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Task Detail Modal -->
+<div id="task-detail-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3>Task Details</h3>
+            <button class="close-btn" onclick="hideModal('task-detail-modal')">&times;</button>
+        </div>
+        <div class="modal-body" id="task-detail-content">
+            <p class="loading">Loading...</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showTaskDetail(taskId) {
+    showModal('task-detail-modal');
+    htmx.ajax('GET', '/dashboard/tasks/' + taskId, '#task-detail-content');
+}
+
+// WebSocket for real-time task updates
+document.addEventListener('DOMContentLoaded', function() {
+    var projectId = document.getElementById('project-filter').value;
+    if (projectId) {
+        connectProjectWebSocket(projectId);
+    }
+
+    document.getElementById('project-filter').addEventListener('change', function() {
+        if (this.value) {
+            connectProjectWebSocket(this.value);
+        }
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Magickit Dashboard{% endblock %}</title>
+
+    <!-- HTMX for dynamic updates -->
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+
+    <!-- Custom styles -->
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/dashboard">Magickit</a>
+        </div>
+        <div class="nav-links">
+            <a href="/dashboard" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/dashboard/projects" class="{% if active_page == 'projects' %}active{% endif %}">Projects</a>
+            <a href="/dashboard/tasks" class="{% if active_page == 'tasks' %}active{% endif %}">Tasks</a>
+        </div>
+        <div class="nav-user">
+            {% if user %}
+            <span class="user-name">{{ user.email }}</span>
+            <a href="/auth/logout" class="btn btn-sm">Logout</a>
+            {% else %}
+            <a href="/auth/login" class="btn btn-sm">Login</a>
+            {% endif %}
+        </div>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <p>Magickit v0.2.0 - Task Orchestration Platform</p>
+    </footer>
+
+    <!-- Custom scripts -->
+    <script src="/static/js/dashboard.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Magickit{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <p class="subtitle">System overview and statistics</p>
+</div>
+
+<!-- Stats Cards -->
+<div class="stats-grid"
+     hx-get="/dashboard/stats"
+     hx-trigger="load, every 30s"
+     hx-swap="innerHTML">
+    <div class="stat-card">
+        <div class="stat-value">-</div>
+        <div class="stat-label">Loading...</div>
+    </div>
+</div>
+
+<!-- Two Column Layout -->
+<div class="dashboard-grid">
+    <!-- Recent Events -->
+    <section class="card">
+        <div class="card-header">
+            <h2>Recent Events</h2>
+            <button class="btn btn-sm"
+                    hx-get="/dashboard/events"
+                    hx-target="#events-list"
+                    hx-swap="innerHTML">
+                Refresh
+            </button>
+        </div>
+        <div class="card-body" id="events-list"
+             hx-get="/dashboard/events"
+             hx-trigger="load, every 10s"
+             hx-swap="innerHTML">
+            <p class="loading">Loading events...</p>
+        </div>
+    </section>
+
+    <!-- Active Locks -->
+    <section class="card">
+        <div class="card-header">
+            <h2>Active Locks</h2>
+            <button class="btn btn-sm"
+                    hx-get="/dashboard/locks"
+                    hx-target="#locks-list"
+                    hx-swap="innerHTML">
+                Refresh
+            </button>
+        </div>
+        <div class="card-body" id="locks-list"
+             hx-get="/dashboard/locks"
+             hx-trigger="load, every 15s"
+             hx-swap="innerHTML">
+            <p class="loading">Loading locks...</p>
+        </div>
+    </section>
+</div>
+
+<!-- Task Queue Status -->
+<section class="card">
+    <div class="card-header">
+        <h2>Task Queue</h2>
+    </div>
+    <div class="card-body" id="task-queue"
+         hx-get="/dashboard/queue"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML">
+        <p class="loading">Loading task queue...</p>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// WebSocket connection for real-time updates
+document.addEventListener('DOMContentLoaded', function() {
+    connectWebSocket();
+});
+</script>
+{% endblock %}

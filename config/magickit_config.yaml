@@ -1,0 +1,33 @@
+# Spirrow-Magickit Configuration
+# Override with environment variables: MAGICKIT_<KEY>
+
+server:
+  host: "0.0.0.0"
+  port: 8004
+  debug: false
+
+services:
+  lexora:
+    url: "http://localhost:8001"
+    timeout: 30.0
+  cognilens:
+    url: "http://localhost:8003"
+    timeout: 30.0
+  prismind:
+    url: "http://localhost:8002"
+    timeout: 30.0
+  unrealwise:
+    url: "http://localhost:8005"
+    timeout: 60.0
+
+database:
+  path: "data/magickit.db"
+
+logging:
+  level: "INFO"
+  format: "json"
+
+task_queue:
+  max_concurrent: 5
+  default_priority: 5
+  max_retries: 3
