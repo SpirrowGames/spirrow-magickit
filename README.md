@@ -246,9 +246,10 @@ src/magickit/
 │   └── event_publisher.py     # イベント発行 (Phase 2)
 ├── adapters/
 │   ├── base.py                # Adapter ABC
+│   ├── mcp_base.py            # MCP Adapter 基底クラス
 │   ├── lexora.py              # LLM呼び出し
-│   ├── cognilens.py           # 圧縮
-│   ├── prismind.py            # RAG検索
+│   ├── cognilens.py           # 圧縮 (MCP)
+│   ├── prismind.py            # RAG検索 (MCP)
 │   ├── slack.py               # Slack Webhook (Phase 2)
 │   └── discord.py             # Discord Webhook (Phase 2)
 ├── templates/                 # Jinja2テンプレート (Phase 2)
@@ -267,9 +268,68 @@ tests/
 │   ├── test_workspace_manager.py
 │   ├── test_project_manager.py
 │   ├── test_lock_manager.py
-│   └── test_notification.py
+│   ├── test_notification.py
+│   └── test_mcp_adapters.py
 └── integration/
-    └── test_api_integration.py
+    ├── test_api_integration.py
+    └── test_prismind_adapter.py
+```
+
+## MCP Adapter API
+
+MCPサーバとの通信を抽象化する `MCPBaseAdapter` クラスを提供。
+
+### 基本的な使い方
+
+```python
+from magickit.adapters.prismind import PrismindAdapter
+
+adapter = PrismindAdapter(sse_url="http://localhost:8112/sse")
+
+# 方法1: call() メソッド
+result = await adapter.call("list_projects")
+result = await adapter.call("search_knowledge", query="test", limit=5)
+
+# 方法2: 動的メソッドディスパッチ（推奨）
+result = await adapter.list_projects()
+result = await adapter.search_knowledge(query="test", limit=5)
+```
+
+### 利用可能なメソッド
+
+| メソッド | 説明 |
+|---------|------|
+| `call(tool_name, **kwargs)` | 任意のMCPツールを呼び出し |
+| `list_tools()` | 利用可能なツール名一覧を取得 |
+| `get_tool_schemas()` | ツールスキーマ（名前・説明・入力スキーマ）を取得 |
+| `batch_call(operations, parallel=True)` | 複数ツールを一括実行（並列/逐次） |
+| `health_check()` | サービスの疎通確認 |
+
+### 動的メソッドディスパッチ
+
+`__getattr__` により、任意のMCPツールをメソッドとして呼び出し可能:
+
+```python
+# これらは等価
+await adapter.call("start_session", project="foo")
+await adapter.start_session(project="foo")
+
+await adapter.call("update_task_status", task_id="T01", status="done")
+await adapter.update_task_status(task_id="T01", status="done")
+```
+
+### バッチ実行
+
+```python
+# 並列実行（デフォルト）
+results = await adapter.batch_call([
+    ("list_projects", {}),
+    ("get_setup_status", {}),
+    ("search_knowledge", {"query": "test", "limit": 3}),
+], parallel=True)
+
+# 逐次実行
+results = await adapter.batch_call(operations, parallel=False)
 ```
 
 ## ライセンス
