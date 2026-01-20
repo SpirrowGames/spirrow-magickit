@@ -123,3 +123,34 @@ class LexoraAdapter(BaseAdapter):
         response = await self._post("/analyze/intent", json=payload)
 
         return response.json()
+
+    async def get_model_capabilities(self) -> dict[str, Any]:
+        """Get all available models and their capabilities from Lexora.
+
+        Returns:
+            Dict with models, available_capabilities, and default_model_for_unknown_task.
+
+        Raises:
+            httpx.HTTPError: If the request fails.
+        """
+        logger.info("Fetching model capabilities")
+        response = await self._get("/v1/models/capabilities")
+        return response.json()
+
+    async def classify_task(self, task_description: str) -> dict[str, Any]:
+        """Classify a task and get recommended model using LLM.
+
+        Args:
+            task_description: The task to classify.
+
+        Returns:
+            Dict with recommended_model, task_type, confidence, reasoning, alternatives.
+
+        Raises:
+            httpx.HTTPError: If the request fails.
+        """
+        payload = {"task_description": task_description}
+
+        logger.info("Classifying task", task_length=len(task_description))
+        response = await self._post("/v1/classify-task", json=payload)
+        return response.json()

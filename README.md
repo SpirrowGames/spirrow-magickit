@@ -67,7 +67,7 @@ Lexora Cognilens Prismind UnrealWise
 | タスクキュー | 優先度・依存関係を考慮したタスク管理 |
 | 依存関係グラフ | DAGによるタスク依存関係解決 |
 | コンテキスト最適化 | Cognilens連携による圧縮・最適化 |
-| サービスルーティング | 適切なMCPサーバへの自動振り分け |
+| サービスルーティング | LLMベースのタスク分類による知的ルーティング |
 
 ### Phase 2 (拡張機能)
 | 機能 | 説明 |
@@ -136,6 +136,12 @@ MAGICKIT_WEBHOOK_MAX_RETRIES=3
 | POST | `/tasks/{id}/complete` | タスク完了 |
 | POST | `/tasks/{id}/fail` | タスク失敗 |
 | GET | `/tasks/{id}/events` | タスクイベント取得 |
+
+### ルーティング
+| Method | Path | 説明 |
+|--------|------|------|
+| POST | `/route` | LLMベースのタスク分類とサービスルーティング |
+| POST | `/orchestrate` | 複合タスクのオーケストレーション |
 
 ### 認証 (Phase 2)
 | Method | Path | 説明 |
@@ -330,6 +336,64 @@ results = await adapter.batch_call([
 
 # 逐次実行
 results = await adapter.batch_call(operations, parallel=False)
+```
+
+## LLMベースルーティング
+
+Lexoraの新しいタスク分類API (`/v1/classify-task`) を使用して、キーワードマッチングではなくLLMベースの知的ルーティングを実現。
+
+### タスク分類フロー
+
+```
+ユーザークエリ
+      │
+      ▼
+  Lexora API (/v1/classify-task)
+      │
+      ├─► task_type: code, reasoning, analysis → Lexora
+      ├─► task_type: summarization → Cognilens
+      ├─► task_type: search, retrieval → Prismind
+      │
+      ▼
+  サービス実行
+```
+
+### タスクタイプとサービスマッピング
+
+| task_type | サービス | 説明 |
+|-----------|---------|------|
+| `code` | Lexora | コード生成・修正 |
+| `reasoning` | Lexora | 論理的推論 |
+| `analysis` | Lexora | 分析タスク |
+| `summarization` | Cognilens | 要約・圧縮 |
+| `translation` | Lexora | 翻訳 |
+| `simple_qa` | Lexora | 簡単な質問応答 |
+| `general` | Lexora | 一般タスク |
+| `search` | Prismind | 検索 |
+| `retrieval` | Prismind | 情報取得 |
+
+### フォールバック
+
+LexoraのAPIが利用できない場合、従来のキーワードベースヒューリスティクスにフォールバック:
+
+- `search`, `find`, `lookup` → Prismind
+- `compress`, `summarize`, `shorten` → Cognilens
+- `unreal`, `blueprint`, `actor` → UnrealWise
+- その他 → Lexora (デフォルト)
+
+### LexoraAdapter API
+
+```python
+from magickit.adapters.lexora import LexoraAdapter
+
+async with LexoraAdapter(base_url, timeout) as adapter:
+    # モデル能力情報取得
+    capabilities = await adapter.get_model_capabilities()
+    # → {"models": [...], "available_capabilities": [...], ...}
+
+    # タスク分類
+    classification = await adapter.classify_task("Pythonでクイックソートを実装して")
+    # → {"recommended_model": "...", "task_type": "code", "confidence": 0.95, ...}
 ```
 
 ## ライセンス

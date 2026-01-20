@@ -324,54 +324,47 @@ async def orchestrate(request: OrchestrateRequest) -> OrchestrateResponse:
 async def route(request: RouteRequest) -> RouteResponse:
     """Determine the best service for a query.
 
+    Uses Lexora's LLM-based task classification with fallback to heuristics.
+
     Args:
         request: Routing request.
 
     Returns:
         Routing decision with confidence.
     """
-    # Simple rule-based routing
-    # In a full implementation, this would use Lexora for intent classification
-    query_lower = request.query.lower()
+    settings = get_settings()
 
-    alternatives: list[dict[str, Any]] = []
+    # Try Lexora's task classification first
+    try:
+        async with LexoraAdapter(settings.lexora_url, settings.lexora_timeout) as adapter:
+            classification = await adapter.classify_task(request.query)
 
-    # Heuristics for service selection
-    if any(kw in query_lower for kw in ["search", "find", "lookup", "retrieve"]):
-        service = ServiceType.PRISMIND
-        confidence = 0.85
-        reasoning = "Query appears to be a search/retrieval task"
+        # Map task_type to ServiceType
+        service = _map_task_type_to_service(classification["task_type"])
+        confidence = classification["confidence"]
+        reasoning = classification["reasoning"]
         alternatives = [
-            {"service": ServiceType.LEXORA, "score": 0.15},
-        ]
-    elif any(kw in query_lower for kw in ["compress", "summarize", "shorten", "condense"]):
-        service = ServiceType.COGNILENS
-        confidence = 0.90
-        reasoning = "Query requests text compression or summarization"
-        alternatives = [
-            {"service": ServiceType.LEXORA, "score": 0.10},
-        ]
-    elif any(kw in query_lower for kw in ["unreal", "blueprint", "actor", "component"]):
-        service = ServiceType.UNREALWISE
-        confidence = 0.85
-        reasoning = "Query relates to Unreal Engine operations"
-        alternatives = [
-            {"service": ServiceType.LEXORA, "score": 0.15},
-        ]
-    else:
-        service = ServiceType.LEXORA
-        confidence = 0.70
-        reasoning = "Default routing to LLM for general queries"
-        alternatives = [
-            {"service": ServiceType.PRISMIND, "score": 0.20},
-            {"service": ServiceType.COGNILENS, "score": 0.10},
+            {"service": alt["model"], "score": alt["score"]}
+            for alt in classification.get("alternatives", [])
         ]
 
-    logger.info(
-        "Routing decision",
-        service=service,
-        confidence=confidence,
-    )
+        logger.info(
+            "Routing decision (LLM)",
+            service=service,
+            task_type=classification["task_type"],
+            confidence=confidence,
+        )
+
+    except Exception as e:
+        logger.warning("Task classification failed, using heuristics", error=str(e))
+        # Fallback to keyword-based heuristics
+        service, confidence, reasoning, alternatives = _heuristic_route(request.query)
+
+        logger.info(
+            "Routing decision (heuristic)",
+            service=service,
+            confidence=confidence,
+        )
 
     return RouteResponse(
         service=service,
@@ -379,6 +372,75 @@ async def route(request: RouteRequest) -> RouteResponse:
         reasoning=reasoning,
         alternatives=alternatives,
     )
+
+
+def _map_task_type_to_service(task_type: str) -> ServiceType:
+    """Map Lexora task_type to MagicKit ServiceType.
+
+    Args:
+        task_type: Task type from Lexora classification.
+
+    Returns:
+        Corresponding ServiceType.
+    """
+    mapping = {
+        "code": ServiceType.LEXORA,
+        "reasoning": ServiceType.LEXORA,
+        "analysis": ServiceType.LEXORA,
+        "summarization": ServiceType.COGNILENS,
+        "translation": ServiceType.LEXORA,
+        "simple_qa": ServiceType.LEXORA,
+        "general": ServiceType.LEXORA,
+        "search": ServiceType.PRISMIND,
+        "retrieval": ServiceType.PRISMIND,
+    }
+    return mapping.get(task_type, ServiceType.LEXORA)
+
+
+def _heuristic_route(
+    query: str,
+) -> tuple[ServiceType, float, str, list[dict[str, Any]]]:
+    """Fallback heuristic routing based on keywords.
+
+    Args:
+        query: User query to route.
+
+    Returns:
+        Tuple of (service, confidence, reasoning, alternatives).
+    """
+    query_lower = query.lower()
+
+    if any(kw in query_lower for kw in ["search", "find", "lookup", "retrieve"]):
+        return (
+            ServiceType.PRISMIND,
+            0.85,
+            "Query appears to be a search/retrieval task",
+            [{"service": ServiceType.LEXORA, "score": 0.15}],
+        )
+    elif any(kw in query_lower for kw in ["compress", "summarize", "shorten", "condense"]):
+        return (
+            ServiceType.COGNILENS,
+            0.90,
+            "Query requests text compression or summarization",
+            [{"service": ServiceType.LEXORA, "score": 0.10}],
+        )
+    elif any(kw in query_lower for kw in ["unreal", "blueprint", "actor", "component"]):
+        return (
+            ServiceType.UNREALWISE,
+            0.85,
+            "Query relates to Unreal Engine operations",
+            [{"service": ServiceType.LEXORA, "score": 0.15}],
+        )
+    else:
+        return (
+            ServiceType.LEXORA,
+            0.70,
+            "Default routing to LLM for general queries",
+            [
+                {"service": ServiceType.PRISMIND, "score": 0.20},
+                {"service": ServiceType.COGNILENS, "score": 0.10},
+            ],
+        )
 
 
 # === Health & Stats Endpoints ===

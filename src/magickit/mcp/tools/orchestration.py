@@ -64,7 +64,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         USE THIS WHEN: you're uncertain which Spirrow service to use, or need
         guidance on the best approach for a complex task. This tool:
-        - Analyzes the request intent
+        - Analyzes the request intent using LLM-based classification
         - Considers available services and their capabilities
         - Recommends a routing strategy with rationale
 
@@ -86,6 +86,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - workflow: For complex tasks, a suggested multi-step workflow
             - rationale: Explanation of the recommendation
             - alternatives: Other viable approaches
+            - confidence: Confidence score for the recommendation
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
@@ -94,17 +95,45 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if available_services is None:
             available_services = ["prismind", "cognilens", "lexora", "magickit"]
 
-        # Analyze request keywords and patterns
-        request_lower = request.lower()
+        # Try Lexora's LLM-based task classification
+        try:
+            adapter = LexoraAdapter(_settings.lexora_url, _settings.lexora_timeout)
+            async with adapter:
+                classification = await adapter.classify_task(request)
 
-        # Routing logic based on keywords and patterns
-        recommendations = _analyze_request(request_lower, context, available_services)
+            recommended_service = _map_classification_to_service(
+                classification["task_type"],
+                available_services,
+            )
 
-        logger.info(
-            "Routing analysis complete",
-            request_preview=request[:50],
-            recommended=recommendations["recommended_service"],
-        )
+            recommendations = {
+                "recommended_service": recommended_service,
+                "recommended_action": classification["task_type"],
+                "confidence": classification["confidence"],
+                "rationale": classification["reasoning"],
+                "alternatives": classification.get("alternatives", []),
+                "workflow": None,  # Single-step task
+            }
+
+            logger.info(
+                "Routing analysis complete (LLM)",
+                request_preview=request[:50],
+                recommended=recommended_service,
+                task_type=classification["task_type"],
+            )
+
+        except Exception as e:
+            logger.warning("LLM classification failed, using heuristics", error=str(e))
+
+            # Fallback to keyword-based heuristics
+            request_lower = request.lower()
+            recommendations = _analyze_request(request_lower, context, available_services)
+
+            logger.info(
+                "Routing analysis complete (heuristic)",
+                request_preview=request[:50],
+                recommended=recommendations["recommended_service"],
+            )
 
         return recommendations
 
@@ -247,12 +276,48 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         }
 
 
+def _map_classification_to_service(
+    task_type: str,
+    available_services: list[str],
+) -> str:
+    """Map Lexora task_type to service name.
+
+    Args:
+        task_type: Task type from Lexora classification.
+        available_services: List of available services.
+
+    Returns:
+        Recommended service name.
+    """
+    mapping = {
+        "code": "lexora",
+        "reasoning": "lexora",
+        "analysis": "lexora",
+        "summarization": "cognilens",
+        "translation": "lexora",
+        "simple_qa": "lexora",
+        "general": "lexora",
+        "search": "prismind",
+        "retrieval": "prismind",
+    }
+    service = mapping.get(task_type, "lexora")
+
+    # Ensure the service is available
+    if service not in available_services:
+        # Fall back to lexora if available, otherwise first available
+        if "lexora" in available_services:
+            return "lexora"
+        return available_services[0] if available_services else "lexora"
+
+    return service
+
+
 def _analyze_request(
     request: str,
     context: str,
     available_services: list[str],
 ) -> dict[str, Any]:
-    """Analyze a request and determine routing recommendations."""
+    """Analyze a request and determine routing recommendations (heuristic fallback)."""
 
     # Keyword patterns for each service/action
     search_keywords = ["search", "find", "look for", "query", "retrieve", "knowledge"]
