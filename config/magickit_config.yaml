@@ -1,27 +1,27 @@
-# Spirrow-Magickit Configuration
-# Override with environment variables: MAGICKIT_<KEY>
+# Magickit Configuration for AIサーバー
 
 server:
   host: "0.0.0.0"
-  port: 8004
+  port: 8113
   debug: false
+
+# MCP Server Configuration
+mcp:
+  port: 8114
 
 services:
   lexora:
-    url: "http://localhost:8001"
+    url: "http://localhost:8110"
     timeout: 30.0
   cognilens:
-    url: "http://localhost:8003"
+    url: "http://localhost:8111"
     timeout: 30.0
   prismind:
-    url: "http://localhost:8002"
+    url: "http://localhost:8112"
     timeout: 30.0
-  unrealwise:
-    url: "http://localhost:8005"
-    timeout: 60.0
 
 database:
-  path: "data/magickit.db"
+  path: "/home/sgadmin/services/spirrow/spirrow-magickit/data/magickit.db"
 
 logging:
   level: "INFO"
@@ -31,3 +31,9 @@ task_queue:
   max_concurrent: 5
   default_priority: 5
   max_retries: 3
+
+# Phase 2 機能
+auth:
+  enabled: false
+  jwt_secret: "change-this-in-production"
+  jwt_expire_minutes: 60

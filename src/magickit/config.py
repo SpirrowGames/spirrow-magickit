@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     # Phase 2: WebSocket settings
     ws_heartbeat_interval: int = Field(default=30)
 
+    # MCP Server settings
+    mcp_port: int = Field(default=8114)
+
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Settings":
         """Load settings from a YAML config file.
@@ -153,6 +156,10 @@ class Settings(BaseSettings):
         # Phase 2: WebSocket settings
         if websocket := yaml_config.get("websocket"):
             flat_config["ws_heartbeat_interval"] = websocket.get("heartbeat_interval")
+
+        # MCP Server settings
+        if mcp := yaml_config.get("mcp"):
+            flat_config["mcp_port"] = mcp.get("port")
 
         # Remove None values
         flat_config = {k: v for k, v in flat_config.items() if v is not None}

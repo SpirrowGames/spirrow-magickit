@@ -1,0 +1,29 @@
+[Unit]
+Description=Spirrow Magickit MCP Server
+Documentation=https://github.com/spirrow/spirrow-magickit
+After=network.target
+After=spirrow-magickit.service
+Wants=spirrow-cognilens.service spirrow-prismind.service spirrow-lexora.service
+
+[Service]
+Type=simple
+User=sgadmin
+Group=sgadmin
+WorkingDirectory=/home/sgadmin/services/spirrow/spirrow-magickit
+ExecStart=/home/sgadmin/services/spirrow/spirrow-magickit/venv/bin/python -m magickit.mcp_server
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=PYTHONPATH=/home/sgadmin/services/spirrow/spirrow-magickit/src
+Environment=MAGICKIT_LOG_LEVEL=INFO
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/sgadmin/services/spirrow/spirrow-magickit/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
