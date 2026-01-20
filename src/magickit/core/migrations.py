@@ -6,13 +6,11 @@ Handles versioned database schema changes with forward migration support.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import Any
 
 import aiosqlite
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
 
 from magickit.utils.logging import get_logger
 
