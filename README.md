@@ -91,9 +91,23 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 # 依存関係インストール
 pip install -e ".[dev]"
 
+# 環境変数設定
+cp .env.example .env
+# .env を編集して必要な値を設定（特に MAGICKIT_JWT_SECRET）
+
 # 開発サーバー起動
 uvicorn magickit.main:app --reload --port 8004
 ```
+
+## セキュリティに関する注意
+
+- **JWT_SECRET**: 本番環境では必ず強力なランダム文字列を設定してください
+  ```bash
+  # シークレットキー生成例
+  openssl rand -hex 32
+  ```
+- **環境変数**: 機密情報は `.env` ファイルまたは環境変数で管理し、コードにハードコードしないでください
+- **データベース**: `data/magickit.db` は `.gitignore` に含まれています。本番データをリポジトリにコミットしないでください
 
 ## 設定
 
@@ -111,7 +125,7 @@ MAGICKIT_DB_PATH=./data/magickit.db
 
 # 認証 (Phase 2)
 MAGICKIT_AUTH_ENABLED=true
-MAGICKIT_JWT_SECRET=your-secret-key-change-in-production
+MAGICKIT_JWT_SECRET=<YOUR_SECRET_KEY>  # 必須: 本番環境では強力なランダム文字列を設定
 MAGICKIT_JWT_EXPIRE_MINUTES=60
 
 # Webhook (Phase 2)
@@ -398,4 +412,4 @@ async with LexoraAdapter(base_url, timeout) as adapter:
 
 ## ライセンス
 
-Private
+[MIT License](LICENSE)

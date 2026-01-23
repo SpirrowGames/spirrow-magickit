@@ -35,5 +35,5 @@ task_queue:
 # Phase 2 機能
 auth:
   enabled: false
-  jwt_secret: "change-this-in-production"
+  # jwt_secret: 環境変数 MAGICKIT_JWT_SECRET で設定してください
   jwt_expire_minutes: 60
