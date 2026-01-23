@@ -1,28 +1,41 @@
+# Systemd service file for Spirrow Magickit MCP Server
+# Copy to /etc/systemd/system/ and modify paths as needed
+#
+# Usage:
+#   sudo cp spirrow-magickit-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable spirrow-magickit-mcp
+#   sudo systemctl start spirrow-magickit-mcp
+
 [Unit]
 Description=Spirrow Magickit MCP Server
-Documentation=https://github.com/spirrow/spirrow-magickit
+Documentation=https://github.com/SpirrowGames/spirrow-magickit
 After=network.target
 After=spirrow-magickit.service
 Wants=spirrow-cognilens.service spirrow-prismind.service spirrow-lexora.service
 
 [Service]
 Type=simple
-User=sgadmin
-Group=sgadmin
-WorkingDirectory=/home/sgadmin/services/spirrow/spirrow-magickit
-ExecStart=/home/sgadmin/services/spirrow/spirrow-magickit/venv/bin/python -m magickit.mcp_server
+# TODO: Change to your user/group
+User=YOUR_USER
+Group=YOUR_GROUP
+# TODO: Change to your installation path
+WorkingDirectory=/path/to/spirrow-magickit
+ExecStart=/path/to/spirrow-magickit/venv/bin/python -m magickit.mcp_server
 Restart=always
 RestartSec=5
 
 # Environment
-Environment=PYTHONPATH=/home/sgadmin/services/spirrow/spirrow-magickit/src
+# TODO: Change to your installation path
+Environment=PYTHONPATH=/path/to/spirrow-magickit/src
 Environment=MAGICKIT_LOG_LEVEL=INFO
 
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/sgadmin/services/spirrow/spirrow-magickit/data
+# TODO: Change to your installation path
+ReadWritePaths=/path/to/spirrow-magickit/data
 PrivateTmp=true
 
 [Install]

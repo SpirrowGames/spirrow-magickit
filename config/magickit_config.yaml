@@ -21,7 +21,7 @@ services:
     timeout: 30.0
 
 database:
-  path: "/home/sgadmin/services/spirrow/spirrow-magickit/data/magickit.db"
+  path: "data/magickit.db"
 
 logging:
   level: "INFO"
