@@ -24,7 +24,7 @@ required_bearer = HTTPBearer(auto_error=True)
 async def get_current_user(
     request: Request,
     credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(required_bearer)
+        HTTPAuthorizationCredentials | None, Depends(optional_bearer)
     ] = None,
 ) -> dict[str, Any]:
     """Get the current authenticated user.
@@ -54,7 +54,15 @@ async def get_current_user(
     if hasattr(request.state, "user") and request.state.user:
         return request.state.user
 
-    # No user found
+    # Check if credentials were provided
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # No user found (credentials exist but no user in state)
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Not authenticated",

@@ -4,7 +4,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
-from magickit.main import app, create_app
+from magickit.main import app, create_app, lifespan
 
 
 @pytest_asyncio.fixture
@@ -18,9 +18,11 @@ async def client(tmp_path, monkeypatch):
     # Create fresh app
     test_app = create_app()
 
-    transport = ASGITransport(app=test_app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+    # Manually run lifespan to initialize dependencies
+    async with lifespan(test_app):
+        transport = ASGITransport(app=test_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
 
 
 @pytest_asyncio.fixture
@@ -33,9 +35,11 @@ async def authenticated_client(tmp_path, monkeypatch):
 
     test_app = create_app()
 
-    transport = ASGITransport(app=test_app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+    # Manually run lifespan to initialize dependencies
+    async with lifespan(test_app):
+        transport = ASGITransport(app=test_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
 
 
 class TestHealthEndpoint:

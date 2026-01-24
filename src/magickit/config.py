@@ -146,7 +146,11 @@ class Settings(BaseSettings):
             flat_config["jwt_algorithm"] = auth.get("jwt_algorithm")
             flat_config["jwt_expire_minutes"] = auth.get("jwt_expire_minutes")
             flat_config["jwt_refresh_expire_days"] = auth.get("jwt_refresh_expire_days")
-            flat_config["auth_enabled"] = auth.get("auth_enabled")
+            # Support both "enabled" (YAML style) and "auth_enabled" (flat style)
+            if "enabled" in auth:
+                flat_config["auth_enabled"] = auth.get("enabled")
+            elif "auth_enabled" in auth:
+                flat_config["auth_enabled"] = auth.get("auth_enabled")
 
         # Phase 2: Webhook settings
         if webhook := yaml_config.get("webhook"):
