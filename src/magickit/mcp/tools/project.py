@@ -364,7 +364,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             if clone_name == source_project:
                 clone_name = new_project  # Avoid duplicate names
 
-            setup_result = await prismind.setup_project(project=new_project, name=clone_name)
+            setup_result = await prismind.setup_project(project=new_project, name=clone_name, force=True)
             setup_parsed = _parse_result(setup_result)
 
             # Check for error in result
@@ -489,13 +489,25 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         try:
             if mode == "archive":
                 # Just mark as archived
-                await prismind.update_project(
+                update_result = await prismind.update_project(
                     project=project,
                     status="archived",
-                    archived_at=datetime.now().isoformat(),
                 )
+                update_parsed = _parse_result(update_result)
 
-                logger.info("Project archived", project=project)
+                # Check for error
+                if update_parsed.get("success") is False:
+                    error_msg = update_parsed.get("message", "Unknown error")
+                    logger.error("Failed to archive project", project=project, error=error_msg)
+                    return {
+                        "success": False,
+                        "project": project,
+                        "mode": mode,
+                        "export_path": None,
+                        "message": f"Failed to archive project: {error_msg}",
+                    }
+
+                logger.info("Project archived", project=project, result=update_parsed)
                 return {
                     "success": True,
                     "project": project,
@@ -735,8 +747,8 @@ async def _import_project_impl(
     # Get display name from export data or use project ID
     display_name = project_data.get("name", project)
 
-    # Create project and verify success
-    setup_result = await prismind.setup_project(project=project, name=display_name)
+    # Create project and verify success (force=True to skip similar project check)
+    setup_result = await prismind.setup_project(project=project, name=display_name, force=True)
     setup_parsed = _parse_result(setup_result)
 
     # Check for error in result (including validation errors)
