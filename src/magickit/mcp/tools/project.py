@@ -168,10 +168,25 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         try:
             # Step 1: Create project in Prismind
-            await prismind.setup_project(project=project)
+            setup_result = await prismind.setup_project(project=project, name=display_name)
+            setup_parsed = _parse_result(setup_result)
+
+            # Check for error in result
+            result_str = str(setup_parsed.get("result", ""))
+            has_error = (
+                setup_parsed.get("error")
+                or setup_parsed.get("success") is False
+                or "error" in result_str.lower()
+            )
+            if has_error:
+                error_msg = setup_parsed.get("error", setup_parsed.get("message", result_str or "Unknown error"))
+                logger.error("Prismind setup_project failed", project=project, result=setup_parsed)
+                raise RuntimeError(f"Failed to create project in Prismind: {error_msg}")
+
+            logger.info("Prismind setup_project succeeded", project=project, result=setup_parsed)
 
             # Step 2: Update project with template metadata
-            await prismind.update_project(
+            update_result = await prismind.update_project(
                 project=project,
                 name=display_name,
                 categories=categories,
@@ -181,6 +196,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 status="active",
                 created_at=datetime.now().isoformat(),
             )
+            update_parsed = _parse_result(update_result)
+            logger.info("Prismind update_project result", project=project, result=update_parsed)
 
             logger.info(
                 "Project initialized",
@@ -342,9 +359,31 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             template_config = PROJECT_TEMPLATES.get(template, PROJECT_TEMPLATES["game"])
 
             # Step 3: Create new project
-            await prismind.setup_project(project=new_project)
+            # Use source project name with suffix, or just new_project ID
+            clone_name = source_info.get("name", new_project)
+            if clone_name == source_project:
+                clone_name = new_project  # Avoid duplicate names
+
+            setup_result = await prismind.setup_project(project=new_project, name=clone_name)
+            setup_parsed = _parse_result(setup_result)
+
+            # Check for error in result
+            result_str = str(setup_parsed.get("result", ""))
+            has_error = (
+                setup_parsed.get("error")
+                or setup_parsed.get("success") is False
+                or "error" in result_str.lower()
+            )
+            if has_error:
+                error_msg = setup_parsed.get("error", setup_parsed.get("message", result_str or "Unknown error"))
+                logger.error("Prismind setup_project failed", project=new_project, result=setup_parsed)
+                raise RuntimeError(f"Failed to create project in Prismind: {error_msg}")
+
+            logger.info("Prismind setup_project succeeded", project=new_project, result=setup_parsed)
+
             await prismind.update_project(
                 project=new_project,
+                name=clone_name,
                 categories=source_info.get("categories", template_config["categories"]),
                 phases=source_info.get("phases", template_config["default_phases"]),
                 template=template,
@@ -693,13 +732,22 @@ async def _import_project_impl(
     else:
         project_data = {}
 
+    # Get display name from export data or use project ID
+    display_name = project_data.get("name", project)
+
     # Create project and verify success
-    setup_result = await prismind.setup_project(project=project)
+    setup_result = await prismind.setup_project(project=project, name=display_name)
     setup_parsed = _parse_result(setup_result)
 
-    # Check for error in result
-    if setup_parsed.get("error") or setup_parsed.get("success") is False:
-        error_msg = setup_parsed.get("error", setup_parsed.get("message", "Unknown error"))
+    # Check for error in result (including validation errors)
+    result_str = str(setup_parsed.get("result", ""))
+    has_error = (
+        setup_parsed.get("error")
+        or setup_parsed.get("success") is False
+        or "error" in result_str.lower()
+    )
+    if has_error:
+        error_msg = setup_parsed.get("error", setup_parsed.get("message", result_str or "Unknown error"))
         logger.error("Failed to create project in Prismind", project=project, error=error_msg)
         raise RuntimeError(f"Failed to create project '{project}' in Prismind: {error_msg}")
 
