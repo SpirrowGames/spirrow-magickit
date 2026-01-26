@@ -447,6 +447,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         project: str,
         mode: str = "archive",
         confirm: bool = False,
+        delete_drive_folder: bool = False,
     ) -> dict[str, Any]:
         """Delete a project with specified mode.
 
@@ -461,6 +462,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project: Project identifier.
             mode: Deletion mode ("archive", "archive_and_delete", "permanent").
             confirm: Required for permanent deletion.
+            delete_drive_folder: If True, also permanently delete Google Drive folder (irreversible).
 
         Returns:
             Dict containing:
@@ -468,6 +470,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - project: Project name
             - mode: Deletion mode used
             - export_path: Path to export (for archive_and_delete mode)
+            - drive_folder_deleted: Whether Drive folder was deleted
             - message: Status message
         """
         if _settings is None:
@@ -504,6 +507,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                         "project": project,
                         "mode": mode,
                         "export_path": None,
+                        "drive_folder_deleted": False,
                         "message": f"Failed to archive project: {error_msg}",
                     }
 
@@ -513,25 +517,38 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                     "project": project,
                     "mode": mode,
                     "export_path": None,
+                    "drive_folder_deleted": False,
                     "message": f"Project '{project}' archived (data preserved)",
                 }
 
             elif mode == "archive_and_delete":
                 # Export then delete
                 export_path = await _export_project_impl(project, prismind)
-                await prismind.delete_project(project=project, confirm=True)
+                delete_result = await prismind.delete_project(
+                    project=project,
+                    confirm=True,
+                    delete_drive_folder=delete_drive_folder,
+                )
+                delete_parsed = _parse_result(delete_result)
+                drive_folder_deleted = delete_parsed.get("drive_folder_deleted", False)
+
+                msg = f"Project '{project}' exported to {export_path} and deleted"
+                if drive_folder_deleted:
+                    msg += " (Drive folder also deleted)"
 
                 logger.info(
                     "Project archived and deleted",
                     project=project,
                     export_path=str(export_path),
+                    drive_folder_deleted=drive_folder_deleted,
                 )
                 return {
                     "success": True,
                     "project": project,
                     "mode": mode,
                     "export_path": str(export_path),
-                    "message": f"Project '{project}' exported to {export_path} and deleted",
+                    "drive_folder_deleted": drive_folder_deleted,
+                    "message": msg,
                 }
 
             elif mode == "permanent":
@@ -541,18 +558,34 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                         "project": project,
                         "mode": mode,
                         "export_path": None,
+                        "drive_folder_deleted": False,
                         "message": "Permanent deletion requires confirm=True. This action cannot be undone.",
                     }
 
-                await prismind.delete_project(project=project, confirm=True)
+                delete_result = await prismind.delete_project(
+                    project=project,
+                    confirm=True,
+                    delete_drive_folder=delete_drive_folder,
+                )
+                delete_parsed = _parse_result(delete_result)
+                drive_folder_deleted = delete_parsed.get("drive_folder_deleted", False)
 
-                logger.info("Project permanently deleted", project=project)
+                msg = f"Project '{project}' permanently deleted"
+                if drive_folder_deleted:
+                    msg += " (Drive folder also deleted)"
+
+                logger.info(
+                    "Project permanently deleted",
+                    project=project,
+                    drive_folder_deleted=drive_folder_deleted,
+                )
                 return {
                     "success": True,
                     "project": project,
                     "mode": mode,
                     "export_path": None,
-                    "message": f"Project '{project}' permanently deleted",
+                    "drive_folder_deleted": drive_folder_deleted,
+                    "message": msg,
                 }
 
             else:
@@ -561,6 +594,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                     "project": project,
                     "mode": mode,
                     "export_path": None,
+                    "drive_folder_deleted": False,
                     "message": f"Invalid mode: {mode}. Use 'archive', 'archive_and_delete', or 'permanent'.",
                 }
 
@@ -571,6 +605,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "project": project,
                 "mode": mode,
                 "export_path": str(export_path) if export_path else None,
+                "drive_folder_deleted": False,
                 "message": f"Failed to delete project: {e}",
             }
 
