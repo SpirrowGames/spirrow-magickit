@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 
-from magickit.api.models import ProjectStatus
+from magickit.api.models import ProjectStatus, UserRole
 from magickit.core.project_manager import (
     ProjectAccessDeniedError,
     ProjectError,
@@ -195,8 +195,15 @@ async def test_delete_project(project_manager, test_workspace, test_user):
 
 
 @pytest.mark.asyncio
-async def test_cannot_delete_default_project(project_manager, test_user):
+async def test_cannot_delete_default_project(project_manager, state_manager, test_user):
     """Test that default project cannot be deleted."""
+    # Migration creates default workspace/project, add test user as member
+    await state_manager.add_workspace_member(
+        workspace_id="default",
+        user_id=test_user.id,
+        role=UserRole.ADMIN,
+    )
+
     with pytest.raises(ProjectError, match="Cannot delete the default project"):
         await project_manager.delete_project("default", test_user.id)
 

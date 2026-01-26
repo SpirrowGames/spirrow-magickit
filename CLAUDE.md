@@ -34,6 +34,7 @@ Lexora Cognilens Prismind UnrealWise
 ```
 src/magickit/
 ├── main.py              # FastAPIアプリ
+├── mcp_server.py        # MCPサーバエントリポイント
 ├── config.py            # 設定 (Pydantic Settings)
 ├── api/
 │   ├── routes.py        # エンドポイント
@@ -45,6 +46,13 @@ src/magickit/
 │   ├── context_manager.py   # コンテキスト最適化
 │   ├── project_manager.py   # プロジェクト管理
 │   └── scheduler.py     # スケジューラ
+├── mcp/
+│   └── tools/           # MCPツール
+│       ├── health.py    # ヘルスチェック
+│       ├── research.py  # 知識検索・要約
+│       ├── orchestration.py  # ルーティング
+│       ├── generation.py     # コンテンツ生成
+│       └── session.py   # セッション管理
 ├── adapters/
 │   ├── base.py          # Adapter ABC
 │   ├── lexora.py        # LLM呼び出し
@@ -147,6 +155,44 @@ POST /route              # ルーティング判断
 GET  /health
 GET  /stats
 ```
+
+## MCPツール
+
+MCPサーバ経由で提供されるツール群。`src/magickit/mcp/tools/`に実装。
+
+### セッション管理 (`session.py`)
+
+Claudeセッション間でコンテキストを維持するためのツール。
+
+| ツール | 用途 |
+|--------|------|
+| `begin_task` | タスク開始時にPrismindからコンテキストを復元 |
+| `checkpoint` | 作業中の中間保存、決定事項をknowledgeとして保存 |
+| `handoff` | セッション終了と次回への引き継ぎ情報保存 |
+| `resume` | `begin_task`のエイリアス（detail_levelプリセット付き） |
+
+```python
+# 使用例
+begin_task(project="trapxtrap", task_description="射撃システム実装")
+checkpoint(summary="基本実装完了", decisions=["弾丸はプールで管理"])
+handoff(next_action="ダメージ計算の実装", notes="...")
+resume(project="trapxtrap", detail_level="standard")
+```
+
+### リサーチ (`research.py`)
+
+知識検索と要約を組み合わせたツール。
+
+| ツール | 用途 |
+|--------|------|
+| `research_and_summarize` | Prismind検索 + Cognilens圧縮 |
+| `analyze_documents` | ドキュメント検索 + エッセンス抽出 |
+
+### その他
+
+- `health.py` - サービスヘルスチェック
+- `orchestration.py` - インテリジェントルーティング
+- `generation.py` - RAG強化コンテンツ生成
 
 ## 設定
 
