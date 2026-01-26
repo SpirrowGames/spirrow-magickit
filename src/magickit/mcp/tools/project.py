@@ -507,7 +507,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             elif mode == "archive_and_delete":
                 # Export then delete
                 export_path = await _export_project_impl(project, prismind)
-                await prismind.delete_project(project=project)
+                await prismind.delete_project(project=project, confirm=True)
 
                 logger.info(
                     "Project archived and deleted",
@@ -532,7 +532,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                         "message": "Permanent deletion requires confirm=True. This action cannot be undone.",
                     }
 
-                await prismind.delete_project(project=project)
+                await prismind.delete_project(project=project, confirm=True)
 
                 logger.info("Project permanently deleted", project=project)
                 return {
