@@ -6,8 +6,9 @@ This package contains tool implementations for the Magickit MCP server:
 - orchestration: Intelligent routing and workflow orchestration
 - generation: RAG-enhanced content generation (all services)
 - session: Session management for cross-session context persistence
+- project: Project management (init, status, clone, archive, restore)
 """
 
-from magickit.mcp.tools import health, research, orchestration, generation, session
+from magickit.mcp.tools import health, research, orchestration, generation, session, project
 
-__all__ = ["health", "research", "orchestration", "generation", "session"]
+__all__ = ["health", "research", "orchestration", "generation", "session", "project"]
