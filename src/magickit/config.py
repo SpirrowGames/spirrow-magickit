@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     # MCP Server settings
     mcp_port: int = Field(default=8114)
 
+    # Project archive settings
+    archive_path: str = Field(default="data/archives")
+
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Settings":
         """Load settings from a YAML config file.
@@ -164,6 +167,10 @@ class Settings(BaseSettings):
         # MCP Server settings
         if mcp := yaml_config.get("mcp"):
             flat_config["mcp_port"] = mcp.get("port")
+
+        # Archive settings
+        if archive := yaml_config.get("archive"):
+            flat_config["archive_path"] = archive.get("path")
 
         # Remove None values
         flat_config = {k: v for k, v in flat_config.items() if v is not None}
