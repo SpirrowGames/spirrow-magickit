@@ -28,6 +28,131 @@ DETAIL_LEVEL_TOKENS = {
 }
 
 
+async def _begin_task_impl(
+    project: str,
+    task_description: str = "",
+    max_tokens: int = 2000,
+) -> dict[str, Any]:
+    """Internal implementation for begin_task logic.
+
+    This function contains the actual implementation that both begin_task
+    and resume tools delegate to.
+    """
+    if _settings is None:
+        raise RuntimeError("Settings not initialized")
+
+    prismind = PrismindAdapter(
+        sse_url=_settings.prismind_url,
+        timeout=_settings.prismind_timeout,
+    )
+
+    logger.info(
+        "Starting task session",
+        project=project,
+        task_description=task_description[:50] if task_description else "",
+    )
+
+    # Step 1: Start session in Prismind
+    try:
+        session_result = await prismind.start_session(project=project)
+        session_data = _parse_result(session_result)
+    except Exception as e:
+        logger.error("Failed to start session", project=project, error=str(e))
+        raise RuntimeError(f"Failed to start session for project {project}: {e}")
+
+    # Step 2: Search for relevant knowledge
+    query = task_description or f"project {project} context decisions blockers"
+    try:
+        knowledge_results = await prismind.search_knowledge(
+            query=query,
+            project=project,
+            limit=10,
+        )
+        knowledge_list = _parse_list_result(knowledge_results)
+    except Exception as e:
+        logger.warning("Failed to search knowledge", error=str(e))
+        knowledge_list = []
+
+    # Step 3: Build context string
+    context_parts = []
+
+    # Add session state
+    if isinstance(session_data, dict):
+        if session_data.get("current_phase"):
+            context_parts.append(f"Current Phase: {session_data.get('current_phase')}")
+        if session_data.get("current_task"):
+            context_parts.append(f"Current Task: {session_data.get('current_task')}")
+        if session_data.get("last_completed"):
+            context_parts.append(f"Last Completed: {session_data.get('last_completed')}")
+        if session_data.get("blockers"):
+            blockers = session_data.get("blockers", [])
+            if blockers:
+                context_parts.append(f"Blockers: {', '.join(blockers)}")
+        if session_data.get("notes"):
+            context_parts.append(f"Notes: {session_data.get('notes')}")
+
+    # Add knowledge entries
+    if knowledge_list:
+        context_parts.append("\n--- Relevant Knowledge ---")
+        for entry in knowledge_list:
+            if isinstance(entry, dict):
+                content = entry.get("content", "")
+                category = entry.get("category", "")
+                if content:
+                    prefix = f"[{category}] " if category else ""
+                    context_parts.append(f"{prefix}{content}")
+
+    combined_context = "\n\n".join(context_parts)
+    estimated_tokens = len(combined_context) // 4
+
+    # Step 4: Compress if needed
+    if estimated_tokens > max_tokens and combined_context:
+        cognilens = CognilensAdapter(
+            sse_url=_settings.cognilens_url,
+            timeout=_settings.cognilens_timeout,
+        )
+
+        logger.info(
+            "Compressing context",
+            original_tokens=estimated_tokens,
+            target_tokens=max_tokens,
+        )
+
+        try:
+            combined_context = await cognilens.optimize_context(
+                context=combined_context,
+                task_description=f"Restore context for: {task_description or project}",
+                target_tokens=max_tokens,
+            )
+        except Exception as e:
+            logger.warning("Context compression failed", error=str(e))
+            # Truncate as fallback
+            max_chars = max_tokens * 4
+            combined_context = combined_context[:max_chars] + "..."
+
+    # Build response
+    response: dict[str, Any] = {
+        "project": project,
+        "session_id": session_data.get("session_id", "") if isinstance(session_data, dict) else "",
+        "current_phase": session_data.get("current_phase", "") if isinstance(session_data, dict) else "",
+        "current_task": session_data.get("current_task", "") if isinstance(session_data, dict) else "",
+        "last_completed": session_data.get("last_completed", "") if isinstance(session_data, dict) else "",
+        "blockers": session_data.get("blockers", []) if isinstance(session_data, dict) else [],
+        "context": combined_context,
+        "recommended_docs": session_data.get("recommended_docs", []) if isinstance(session_data, dict) else [],
+        "knowledge_count": len(knowledge_list),
+        "notes": session_data.get("notes", "") if isinstance(session_data, dict) else "",
+    }
+
+    logger.info(
+        "Task session started",
+        project=project,
+        knowledge_count=len(knowledge_list),
+    )
+
+    return response
+
+
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
     """Register session management tools with the MCP server.
 
@@ -74,119 +199,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - knowledge_count: Number of relevant knowledge entries found
             - notes: Session notes from prior work
         """
-        if _settings is None:
-            raise RuntimeError("Settings not initialized")
-
-        prismind = PrismindAdapter(
-            sse_url=_settings.prismind_url,
-            timeout=_settings.prismind_timeout,
-        )
-
-        logger.info(
-            "Starting task session",
-            project=project,
-            task_description=task_description[:50] if task_description else "",
-        )
-
-        # Step 1: Start session in Prismind
-        try:
-            session_result = await prismind.start_session(project=project)
-            session_data = _parse_result(session_result)
-        except Exception as e:
-            logger.error("Failed to start session", project=project, error=str(e))
-            raise RuntimeError(f"Failed to start session for project {project}: {e}")
-
-        # Step 2: Search for relevant knowledge
-        query = task_description or f"project {project} context decisions blockers"
-        try:
-            knowledge_results = await prismind.search_knowledge(
-                query=query,
-                project=project,
-                limit=10,
-            )
-            knowledge_list = _parse_list_result(knowledge_results)
-        except Exception as e:
-            logger.warning("Failed to search knowledge", error=str(e))
-            knowledge_list = []
-
-        # Step 3: Build context string
-        context_parts = []
-
-        # Add session state
-        if isinstance(session_data, dict):
-            if session_data.get("current_phase"):
-                context_parts.append(f"Current Phase: {session_data.get('current_phase')}")
-            if session_data.get("current_task"):
-                context_parts.append(f"Current Task: {session_data.get('current_task')}")
-            if session_data.get("last_completed"):
-                context_parts.append(f"Last Completed: {session_data.get('last_completed')}")
-            if session_data.get("blockers"):
-                blockers = session_data.get("blockers", [])
-                if blockers:
-                    context_parts.append(f"Blockers: {', '.join(blockers)}")
-            if session_data.get("notes"):
-                context_parts.append(f"Notes: {session_data.get('notes')}")
-
-        # Add knowledge entries
-        if knowledge_list:
-            context_parts.append("\n--- Relevant Knowledge ---")
-            for entry in knowledge_list:
-                if isinstance(entry, dict):
-                    content = entry.get("content", "")
-                    category = entry.get("category", "")
-                    if content:
-                        prefix = f"[{category}] " if category else ""
-                        context_parts.append(f"{prefix}{content}")
-
-        combined_context = "\n\n".join(context_parts)
-        estimated_tokens = len(combined_context) // 4
-
-        # Step 4: Compress if needed
-        if estimated_tokens > max_tokens and combined_context:
-            cognilens = CognilensAdapter(
-                sse_url=_settings.cognilens_url,
-                timeout=_settings.cognilens_timeout,
-            )
-
-            logger.info(
-                "Compressing context",
-                original_tokens=estimated_tokens,
-                target_tokens=max_tokens,
-            )
-
-            try:
-                combined_context = await cognilens.optimize_context(
-                    context=combined_context,
-                    task_description=f"Restore context for: {task_description or project}",
-                    target_tokens=max_tokens,
-                )
-            except Exception as e:
-                logger.warning("Context compression failed", error=str(e))
-                # Truncate as fallback
-                max_chars = max_tokens * 4
-                combined_context = combined_context[:max_chars] + "..."
-
-        # Build response
-        response: dict[str, Any] = {
-            "project": project,
-            "session_id": session_data.get("session_id", "") if isinstance(session_data, dict) else "",
-            "current_phase": session_data.get("current_phase", "") if isinstance(session_data, dict) else "",
-            "current_task": session_data.get("current_task", "") if isinstance(session_data, dict) else "",
-            "last_completed": session_data.get("last_completed", "") if isinstance(session_data, dict) else "",
-            "blockers": session_data.get("blockers", []) if isinstance(session_data, dict) else [],
-            "context": combined_context,
-            "recommended_docs": session_data.get("recommended_docs", []) if isinstance(session_data, dict) else [],
-            "knowledge_count": len(knowledge_list),
-            "notes": session_data.get("notes", "") if isinstance(session_data, dict) else "",
-        }
-
-        logger.info(
-            "Task session started",
-            project=project,
-            knowledge_count=len(knowledge_list),
-        )
-
-        return response
+        return await _begin_task_impl(project, task_description, max_tokens)
 
     @mcp.tool()
     async def checkpoint(
@@ -479,8 +492,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             max_tokens=max_tokens,
         )
 
-        # Delegate to begin_task
-        return await begin_task(
+        # Delegate to internal implementation
+        return await _begin_task_impl(
             project=project,
             task_description=task_description,
             max_tokens=max_tokens,
