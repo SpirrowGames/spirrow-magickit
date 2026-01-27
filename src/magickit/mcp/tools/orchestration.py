@@ -494,23 +494,27 @@ async def _call_service(
         )
 
         if action == "search":
-            results = await adapter.search_knowledge(
-                query=params.get("query", ""),
-                category=params.get("category", ""),
-                project=params.get("project", ""),
-                tags=params.get("tags"),
-                limit=params.get("limit", 10),
-            )
+            kwargs: dict[str, Any] = {
+                "query": params.get("query", ""),
+                "category": params.get("category", ""),
+                "project": params.get("project", ""),
+                "limit": params.get("limit", 10),
+            }
+            if params.get("tags") is not None:
+                kwargs["tags"] = params["tags"]
+            results = await adapter.search_knowledge(**kwargs)
             return "\n\n".join(r.get("content", "") for r in results)
 
         elif action == "add" or action == "store":
-            return await adapter.add_knowledge(
-                content=params.get("content", ""),
-                category=params.get("category", ""),
-                project=params.get("project", ""),
-                tags=params.get("tags"),
-                source=params.get("source", ""),
-            )
+            kwargs: dict[str, Any] = {
+                "content": params.get("content", ""),
+                "category": params.get("category", ""),
+                "project": params.get("project", ""),
+                "source": params.get("source", ""),
+            }
+            if params.get("tags") is not None:
+                kwargs["tags"] = params["tags"]
+            return await adapter.add_knowledge(**kwargs)
 
         elif action == "get_document":
             return await adapter.get_document(
@@ -570,13 +574,16 @@ async def _call_service(
 
         # Project management actions
         elif action == "setup_project":
-            return await adapter.setup_project(
-                project=params.get("project", ""),
-                name=params.get("name", ""),
-                description=params.get("description", ""),
-                phases=params.get("phases"),
-                categories=params.get("categories"),
-            )
+            kwargs: dict[str, Any] = {
+                "project": params.get("project", ""),
+                "name": params.get("name", ""),
+                "description": params.get("description", ""),
+            }
+            if params.get("phases") is not None:
+                kwargs["phases"] = params["phases"]
+            if params.get("categories") is not None:
+                kwargs["categories"] = params["categories"]
+            return await adapter.setup_project(**kwargs)
 
         elif action == "list_projects":
             return await adapter.list_projects(
@@ -584,9 +591,9 @@ async def _call_service(
             )
 
         elif action == "update_project":
-            # Extract project and pass remaining params
+            # Extract project and pass remaining params, excluding None values
             project = params.get("project", "")
-            update_params = {k: v for k, v in params.items() if k != "project"}
+            update_params = {k: v for k, v in params.items() if k != "project" and v is not None}
             return await adapter.update_project(
                 project=project,
                 **update_params,
@@ -671,11 +678,13 @@ async def _call_service(
         )
 
         if action == "compress":
-            return await adapter.compress(
-                text=params.get("text", ""),
-                ratio=params.get("ratio", 0.5),
-                preserve=params.get("preserve"),
-            )
+            kwargs: dict[str, Any] = {
+                "text": params.get("text", ""),
+                "ratio": params.get("ratio", 0.5),
+            }
+            if params.get("preserve") is not None:
+                kwargs["preserve"] = params["preserve"]
+            return await adapter.compress(**kwargs)
 
         elif action == "summarize":
             return await adapter.summarize(
@@ -685,10 +694,12 @@ async def _call_service(
             )
 
         elif action == "extract_essence":
-            return await adapter.extract_essence(
-                document=params.get("document", ""),
-                focus_areas=params.get("focus_areas"),
-            )
+            kwargs: dict[str, Any] = {
+                "document": params.get("document", ""),
+            }
+            if params.get("focus_areas") is not None:
+                kwargs["focus_areas"] = params["focus_areas"]
+            return await adapter.extract_essence(**kwargs)
 
         elif action == "optimize":
             return await adapter.optimize_context(
