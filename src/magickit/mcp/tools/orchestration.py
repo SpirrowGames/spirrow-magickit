@@ -622,27 +622,41 @@ async def _call_service(
         # Document actions
         elif action == "create_document":
             # Prismind uses: doc_type, name, content, phase_task, feature, keywords
-            # Extract feature/keywords from metadata if provided
+            # Build kwargs, excluding None values to avoid validation errors
             metadata = params.get("metadata") or {}
-            return await adapter.create_document(
-                doc_type=params.get("doc_type", ""),
-                name=params.get("name", params.get("title", "")),
-                content=params.get("content", ""),
-                phase_task=params.get("phase_task", ""),
-                feature=params.get("feature", metadata.get("feature", "")),
-                keywords=params.get("keywords", metadata.get("keywords")),
-            )
+            kwargs: dict[str, Any] = {
+                "doc_type": params.get("doc_type", ""),
+                "name": params.get("name", params.get("title", "")),
+                "content": params.get("content", ""),
+                "phase_task": params.get("phase_task", ""),
+            }
+            feature = params.get("feature", metadata.get("feature"))
+            if feature:
+                kwargs["feature"] = feature
+            keywords = params.get("keywords", metadata.get("keywords"))
+            if keywords is not None:
+                kwargs["keywords"] = keywords
+            return await adapter.create_document(**kwargs)
 
         elif action == "update_document":
             # Prismind uses: doc_id, content, name, feature, keywords
+            # Build kwargs, excluding None values to avoid validation errors
             metadata = params.get("metadata") or {}
-            return await adapter.update_document(
-                doc_id=params.get("doc_id", ""),
-                content=params.get("content"),
-                name=params.get("name", params.get("title")),
-                feature=params.get("feature", metadata.get("feature")),
-                keywords=params.get("keywords", metadata.get("keywords")),
-            )
+            kwargs: dict[str, Any] = {
+                "doc_id": params.get("doc_id", ""),
+            }
+            if params.get("content") is not None:
+                kwargs["content"] = params["content"]
+            name = params.get("name", params.get("title"))
+            if name is not None:
+                kwargs["name"] = name
+            feature = params.get("feature", metadata.get("feature"))
+            if feature:
+                kwargs["feature"] = feature
+            keywords = params.get("keywords", metadata.get("keywords"))
+            if keywords is not None:
+                kwargs["keywords"] = keywords
+            return await adapter.update_document(**kwargs)
 
         else:
             raise ValueError(
