@@ -50,9 +50,11 @@ src/magickit/
 │   └── tools/           # MCPツール
 │       ├── health.py    # ヘルスチェック
 │       ├── research.py  # 知識検索・要約
-│       ├── orchestration.py  # ルーティング
-│       ├── generation.py     # コンテンツ生成
-│       └── session.py   # セッション管理
+│       ├── orchestration.py  # ルーティング・ワークフロー
+│       ├── generation.py     # RAG強化コンテンツ生成
+│       ├── session.py   # セッション管理
+│       ├── project.py   # プロジェクト管理
+│       └── document.py  # スマートドキュメント作成
 ├── adapters/
 │   ├── base.py          # Adapter ABC
 │   ├── lexora.py        # LLM呼び出し
@@ -211,7 +213,7 @@ resume(project="trapxtrap", detail_level="standard")
 | `delete_project` | project, confirm | プロジェクト削除 |
 | `get_project_config` | project | プロジェクト設定取得 |
 | `update_summary` | description, current_phase, completed_tasks, total_tasks, custom_fields | サマリー更新 |
-| `create_document` | doc_type, name, content, phase_task, feature, keywords | ドキュメント作成 |
+| `create_document` | doc_type, name, content, phase_task, feature, keywords, auto_register_type | ドキュメント作成（未知のdoc_typeは自動登録） |
 | `update_document` | doc_id, content, name, feature, keywords | ドキュメント更新 |
 
 #### Cognilens アクション
@@ -230,10 +232,88 @@ resume(project="trapxtrap", detail_level="standard")
 | `generate` | prompt, max_tokens, temperature | テキスト生成 |
 | `chat` | messages, max_tokens, temperature | チャット |
 
-### その他
+### プロジェクト管理 (`project.py`)
 
-- `health.py` - サービスヘルスチェック
-- `generation.py` - RAG強化コンテンツ生成
+プロジェクトのライフサイクル管理ツール。
+
+| ツール | 用途 |
+|--------|------|
+| `list_projects` | プロジェクト一覧取得（アーカイブ含む/除外） |
+| `init_project` | テンプレートからプロジェクト初期化 |
+| `get_project_status` | プロジェクトの詳細ステータス取得 |
+| `clone_project` | 既存プロジェクトを複製 |
+| `delete_project` | アーカイブ/エクスポート+削除/完全削除 |
+| `restore_project` | アーカイブからの復元 |
+
+```python
+# 使用例
+init_project(project="my-game", template="game", name="My Game")
+get_project_status(project="my-game")
+delete_project(project="old-project", mode="archive")
+```
+
+**テンプレート種類:**
+- `game`: ゲーム開発（design, implementation, asset, bug, decision）
+- `mcp-server`: MCPサーバ開発（architecture, tool, adapter, config）
+- `web-app`: Webアプリ（frontend, backend, api, design）
+
+### ドキュメント管理 (`document.py`)
+
+未登録のドキュメントタイプを自動処理するスマートドキュメント作成。
+
+| ツール | 用途 |
+|--------|------|
+| `smart_create_document` | 未知のdoc_typeを自動分類・登録してドキュメント作成 |
+
+```python
+# 使用例: 未登録のdoc_typeでも自動的にLexoraで分類→Prismindに登録→作成
+smart_create_document(
+    name="2024-01-15 Sprint Planning",
+    doc_type="meeting_notes",  # 未登録でもOK
+    content="...",
+    phase_task="phase1-task2",
+    project="trapxtrap"
+)
+```
+
+**処理フロー:**
+1. Prismindで既存doc_type一覧を取得
+2. 未登録の場合、Lexoraで適切なtype_id/folder_nameを分類
+3. Prismindに新しいdoc_typeを自動登録
+4. ドキュメントを作成
+
+### ヘルスチェック (`health.py`)
+
+全サービスのヘルス状態を一括確認。
+
+| ツール | 用途 |
+|--------|------|
+| `service_health` | Cognilens, Prismind, Lexoraの稼働状況を一括チェック |
+
+```python
+# 使用例
+service_health()
+# -> {"status": "healthy", "services": {"cognilens": {...}, "prismind": {...}, "lexora": {...}}}
+```
+
+### コンテンツ生成 (`generation.py`)
+
+RAG強化によるコンテンツ生成。
+
+| ツール | 用途 |
+|--------|------|
+| `generate_with_context` | Prismind検索 + Cognilens圧縮 + Lexora生成 |
+
+```python
+# 使用例
+generate_with_context(
+    task="射撃システムの設計書を書いて",
+    context_query="射撃 弾丸 ダメージ",
+    project="trapxtrap",
+    max_context_tokens=1500,
+    max_output_tokens=1000
+)
+```
 
 ## 設定
 
