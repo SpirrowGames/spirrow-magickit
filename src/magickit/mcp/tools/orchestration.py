@@ -612,12 +612,15 @@ async def _call_service(
 
         # Session/Summary actions
         elif action == "update_summary":
-            # Prismind uses: description, current_phase, completed_tasks, total_tasks, custom_fields
+            # Prismind uses: project, description, current_phase, completed_tasks, total_tasks, custom_fields
             # Build kwargs, excluding None values to avoid validation errors
             kwargs: dict[str, Any] = {
                 "description": params.get("description", params.get("summary", "")),
                 "current_phase": params.get("current_phase", ""),
             }
+            # IMPORTANT: project must be passed to update the correct project's summary
+            if params.get("project"):
+                kwargs["project"] = params["project"]
             if params.get("completed_tasks") is not None:
                 kwargs["completed_tasks"] = params["completed_tasks"]
             if params.get("total_tasks") is not None:
@@ -628,7 +631,7 @@ async def _call_service(
 
         # Document actions
         elif action == "create_document":
-            # Prismind uses: doc_type, name, content, phase_task, feature, keywords
+            # Prismind uses: project, doc_type, name, content, phase_task, feature, keywords
             # Build kwargs, excluding None values to avoid validation errors
             metadata = params.get("metadata") or {}
             kwargs: dict[str, Any] = {
@@ -637,6 +640,9 @@ async def _call_service(
                 "content": params.get("content", ""),
                 "phase_task": params.get("phase_task", ""),
             }
+            # IMPORTANT: project should be passed to create document in correct project
+            if params.get("project"):
+                kwargs["project"] = params["project"]
             feature = params.get("feature", metadata.get("feature"))
             if feature:
                 kwargs["feature"] = feature

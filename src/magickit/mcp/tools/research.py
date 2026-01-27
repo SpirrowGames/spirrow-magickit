@@ -6,6 +6,7 @@ for optimized knowledge retrieval within token budgets.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastmcp import FastMCP
@@ -19,6 +20,72 @@ logger = get_logger(__name__)
 
 # Module-level settings reference
 _settings: Settings | None = None
+
+
+def _parse_list_result(result: Any) -> list[dict[str, Any]]:
+    """Parse MCP tool result to list of dicts.
+
+    MCP tools return JSON strings, which need to be parsed.
+    The result may be a list directly, or a dict containing a list.
+
+    Args:
+        result: Raw result from MCP tool call.
+
+    Returns:
+        List of dict entries.
+    """
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                # Try common list keys
+                for key in ["results", "items", "documents", "knowledge", "entries", "catalog"]:
+                    if key in data and isinstance(data[key], list):
+                        return data[key]
+                # Single dict result
+                return [data]
+            return [{"result": data}]
+        except json.JSONDecodeError:
+            return [{"result": result}]
+    if isinstance(result, dict):
+        # Already a dict, check for list inside
+        for key in ["results", "items", "documents", "knowledge", "entries", "catalog"]:
+            if key in result and isinstance(result[key], list):
+                return result[key]
+        return [result]
+    return [{"result": result}]
+
+
+def _parse_dict_result(result: Any) -> dict[str, Any]:
+    """Parse MCP tool result to dict.
+
+    MCP tools return JSON strings, which need to be parsed.
+
+    Args:
+        result: Raw result from MCP tool call.
+
+    Returns:
+        Parsed dict.
+    """
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                return data
+            return {"result": data}
+        except json.JSONDecodeError:
+            return {"result": result}
+    return {"result": result}
 
 
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
@@ -87,12 +154,36 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             category=category,
         )
 
-        search_results = await prismind.search_knowledge(
-            query=query,
-            category=category,
-            project=project,
-            tags=tags,
-            limit=search_limit,
+        try:
+            # Build search params, excluding None values to avoid validation errors
+            search_params: dict[str, Any] = {
+                "query": query,
+                "limit": search_limit,
+            }
+            if category:
+                search_params["category"] = category
+            if project:
+                search_params["project"] = project
+            if tags:
+                search_params["tags"] = tags
+
+            raw_results = await prismind.search_knowledge(**search_params)
+
+            logger.info(
+                "Prismind search raw result",
+                result_type=type(raw_results).__name__,
+                result_preview=str(raw_results)[:200] if raw_results else "None",
+            )
+        except Exception as e:
+            logger.error("Prismind search failed", error=str(e))
+            raw_results = None
+
+        # Parse JSON string result to list
+        search_results = _parse_list_result(raw_results)
+
+        logger.info(
+            "Parsed search results",
+            result_count=len(search_results),
         )
 
         if not search_results:
@@ -214,11 +305,18 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             doc_type=doc_type,
         )
 
-        catalog_results = await prismind.search_catalog(
-            query=query,
-            doc_type=doc_type,
-            limit=10,
-        )
+        # Build catalog search params, excluding empty values
+        catalog_params: dict[str, Any] = {
+            "query": query,
+            "limit": 10,
+        }
+        if doc_type:
+            catalog_params["doc_type"] = doc_type
+
+        raw_catalog = await prismind.search_catalog(**catalog_params)
+
+        # Parse JSON string result to list
+        catalog_results = _parse_list_result(raw_catalog)
 
         if not catalog_results:
             return {
@@ -236,7 +334,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             doc_id = entry.get("doc_id", entry.get("id", ""))
 
             try:
-                doc = await prismind.get_document(doc_id=doc_id)
+                raw_doc = await prismind.get_document(doc_id=doc_id)
+                # Parse JSON string result to dict
+                doc = _parse_dict_result(raw_doc)
                 content = doc.get("content", "")
 
                 documents.append({
@@ -268,10 +368,12 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 )
 
             try:
-                essence = await cognilens.extract_essence(
-                    document=full_text,
-                    focus_areas=focus_areas,
-                )
+                # Build essence params, excluding None values
+                essence_params: dict[str, Any] = {"document": full_text}
+                if focus_areas:
+                    essence_params["focus_areas"] = focus_areas
+
+                essence = await cognilens.extract_essence(**essence_params)
             except Exception as e:
                 logger.warning("Essence extraction failed", error=str(e))
                 essence = {"error": str(e)}
