@@ -15,6 +15,7 @@ from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.config import Settings
+from magickit.mcp.tools.document import smart_create_document_impl
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -631,25 +632,20 @@ async def _call_service(
 
         # Document actions
         elif action == "create_document":
-            # Prismind uses: project, doc_type, name, content, phase_task, feature, keywords
-            # Build kwargs, excluding None values to avoid validation errors
+            # Use smart_create_document_impl for automatic type handling
+            # This handles unknown doc_types by classifying with Lexora and registering
             metadata = params.get("metadata") or {}
-            kwargs: dict[str, Any] = {
-                "doc_type": params.get("doc_type", ""),
-                "name": params.get("name", params.get("title", "")),
-                "content": params.get("content", ""),
-                "phase_task": params.get("phase_task", ""),
-            }
-            # IMPORTANT: project should be passed to create document in correct project
-            if params.get("project"):
-                kwargs["project"] = params["project"]
-            feature = params.get("feature", metadata.get("feature"))
-            if feature:
-                kwargs["feature"] = feature
-            keywords = params.get("keywords", metadata.get("keywords"))
-            if keywords is not None:
-                kwargs["keywords"] = keywords
-            return await adapter.create_document(**kwargs)
+            return await smart_create_document_impl(
+                settings=settings,
+                name=params.get("name", params.get("title", "")),
+                doc_type=params.get("doc_type", ""),
+                content=params.get("content", ""),
+                phase_task=params.get("phase_task", ""),
+                project=params.get("project", ""),
+                feature=params.get("feature", metadata.get("feature", "")),
+                keywords=params.get("keywords", metadata.get("keywords")),
+                auto_register_type=params.get("auto_register_type", True),
+            )
 
         elif action == "update_document":
             # Prismind uses: doc_id, content, name, feature, keywords
