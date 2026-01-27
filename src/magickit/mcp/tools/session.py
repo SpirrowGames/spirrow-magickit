@@ -204,6 +204,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def checkpoint(
         summary: str,
+        project: str = "",
         decisions: list[str] | None = None,
         blockers: list[str] | None = None,
         auto_extract: bool = True,
@@ -222,6 +223,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             summary: Summary of work done since last checkpoint.
+            project: Project identifier for saving decisions.
             decisions: List of decisions made (will be saved as knowledge).
             blockers: List of current blockers or issues.
             auto_extract: If True, use Cognilens to extract essence from long summaries.
@@ -289,20 +291,25 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         # Step 3: Save decisions as knowledge
         if decisions:
-            for decision in decisions:
-                try:
-                    await prismind.add_knowledge(
-                        content=decision,
-                        category="decision",
-                    )
-                    knowledge_added += 1
-                except Exception as e:
-                    logger.warning("Failed to save decision", decision=decision[:50], error=str(e))
-                    errors.append(f"Decision save failed: {decision[:30]}...")
+            if not project:
+                logger.warning("No project specified, decisions will not be saved")
+            else:
+                for decision in decisions:
+                    try:
+                        await prismind.add_knowledge(
+                            content=decision,
+                            category="decision",
+                            project=project,
+                            tags=["checkpoint", "decision"],
+                        )
+                        knowledge_added += 1
+                    except Exception as e:
+                        logger.warning("Failed to save decision", decision=decision[:50], error=str(e))
+                        errors.append(f"Decision save failed: {decision[:30]}...")
 
-            if knowledge_added > 0:
-                saved_to.append("knowledge")
-                logger.info("Decisions saved as knowledge", count=knowledge_added)
+                if knowledge_added > 0:
+                    saved_to.append("knowledge")
+                    logger.info("Decisions saved as knowledge", count=knowledge_added)
 
         success = len(errors) == 0 or "session" in saved_to
         message = "Checkpoint saved successfully"
@@ -319,6 +326,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def handoff(
         next_action: str,
+        project: str = "",
         notes: str = "",
         blockers: list[str] | None = None,
         save_insights: bool = True,
@@ -337,6 +345,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             next_action: The recommended next step for the following session.
+            project: Project identifier for saving insights.
             notes: Additional notes or context to pass to the next session.
             blockers: List of blockers that need resolution.
             save_insights: If True, extract and save session insights as knowledge.
@@ -413,36 +422,41 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         # Step 3: Extract and save insights if requested
         if save_insights and notes:
-            cognilens = CognilensAdapter(
-                sse_url=_settings.cognilens_url,
-                timeout=_settings.cognilens_timeout,
-            )
-
-            try:
-                essence_result = await cognilens.extract_essence(
-                    document=notes,
-                    focus_areas=["learnings", "patterns", "recommendations"],
+            if not project:
+                logger.warning("No project specified, insights will not be saved")
+            else:
+                cognilens = CognilensAdapter(
+                    sse_url=_settings.cognilens_url,
+                    timeout=_settings.cognilens_timeout,
                 )
 
-                if isinstance(essence_result, dict):
-                    # Save key concepts as session insights
-                    key_concepts = essence_result.get("key_concepts", [])
-                    for concept in key_concepts[:5]:  # Limit to 5 insights
-                        try:
-                            await prismind.add_knowledge(
-                                content=concept,
-                                category="session_insight",
-                            )
-                            insights_saved += 1
-                        except Exception as e:
-                            logger.warning("Failed to save insight", error=str(e))
+                try:
+                    essence_result = await cognilens.extract_essence(
+                        document=notes,
+                        focus_areas=["learnings", "patterns", "recommendations"],
+                    )
 
-                if insights_saved > 0:
-                    saved_to.append("knowledge")
-                    logger.info("Session insights saved", count=insights_saved)
+                    if isinstance(essence_result, dict):
+                        # Save key concepts as session insights
+                        key_concepts = essence_result.get("key_concepts", [])
+                        for concept in key_concepts[:5]:  # Limit to 5 insights
+                            try:
+                                await prismind.add_knowledge(
+                                    content=concept,
+                                    category="session_insight",
+                                    project=project,
+                                    tags=["handoff", "insight"],
+                                )
+                                insights_saved += 1
+                            except Exception as e:
+                                logger.warning("Failed to save insight", error=str(e))
 
-            except Exception as e:
-                logger.warning("Insight extraction failed", error=str(e))
+                    if insights_saved > 0:
+                        saved_to.append("knowledge")
+                        logger.info("Session insights saved", count=insights_saved)
+
+                except Exception as e:
+                    logger.warning("Insight extraction failed", error=str(e))
 
         # Build response
         session_duration = ""

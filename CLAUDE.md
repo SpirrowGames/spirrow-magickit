@@ -188,10 +188,51 @@ resume(project="trapxtrap", detail_level="standard")
 | `research_and_summarize` | Prismind検索 + Cognilens圧縮 |
 | `analyze_documents` | ドキュメント検索 + エッセンス抽出 |
 
+### オーケストレーション (`orchestration.py`)
+
+`orchestrate_workflow`で使用可能なサービス・アクション一覧。
+
+#### Prismind アクション
+
+| アクション | パラメータ | 説明 |
+|-----------|-----------|------|
+| `search` | query, category, project, tags, limit | knowledge検索 |
+| `add` / `store` | content, category, project, tags, source | knowledge追加 |
+| `get_document` | query, doc_id, doc_type | ドキュメント取得 |
+| `get_progress` | project | プロジェクト進捗取得 |
+| `add_task` | project, description, priority, category | タスク追加 |
+| `complete_task` | project, task_id, notes | タスク完了（→ update_task_status） |
+| `start_task` | project, task_id, notes | タスク開始（→ update_task_status） |
+| `block_task` | project, task_id, reason | タスクブロック（→ update_task_status） |
+| `update_task_status` | project, task_id, status, notes | タスクステータス更新 |
+| `setup_project` | project, name, description, phases, categories | プロジェクト初期化 |
+| `list_projects` | include_archived | プロジェクト一覧 |
+| `update_project` | project, ... | プロジェクト更新 |
+| `delete_project` | project, confirm | プロジェクト削除 |
+| `get_project_config` | project | プロジェクト設定取得 |
+| `update_summary` | description, current_phase, completed_tasks, total_tasks, custom_fields | サマリー更新 |
+| `create_document` | doc_type, name, content, phase_task, feature, keywords | ドキュメント作成 |
+| `update_document` | doc_id, content, name, feature, keywords | ドキュメント更新 |
+
+#### Cognilens アクション
+
+| アクション | パラメータ | 説明 |
+|-----------|-----------|------|
+| `compress` | text, ratio, preserve | テキスト圧縮 |
+| `summarize` | text, style, max_tokens | 要約生成 |
+| `extract_essence` | document, focus_areas | エッセンス抽出 |
+| `optimize` | context, task_description, target_tokens | コンテキスト最適化 |
+
+#### Lexora アクション
+
+| アクション | パラメータ | 説明 |
+|-----------|-----------|------|
+| `generate` | prompt, max_tokens, temperature | テキスト生成 |
+| `chat` | messages, max_tokens, temperature | チャット |
+
 ### その他
 
 - `health.py` - サービスヘルスチェック
-- `orchestration.py` - インテリジェントルーティング
 - `generation.py` - RAG強化コンテンツ生成
 
 ## 設定

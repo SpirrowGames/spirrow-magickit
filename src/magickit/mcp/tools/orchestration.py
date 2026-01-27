@@ -519,6 +519,137 @@ async def _call_service(
                 doc_type=params.get("doc_type", ""),
             )
 
+        # Task management actions
+        elif action == "get_progress":
+            return await adapter.get_progress(
+                project=params.get("project", ""),
+            )
+
+        elif action == "add_task":
+            return await adapter.add_task(
+                project=params.get("project", ""),
+                description=params.get("description", ""),
+                priority=params.get("priority", "medium"),
+                category=params.get("category", ""),
+            )
+
+        elif action == "complete_task":
+            # complete_task is a convenience alias for update_task_status
+            return await adapter.update_task_status(
+                project=params.get("project", ""),
+                task_id=params.get("task_id", ""),
+                status="completed",
+                notes=params.get("notes", ""),
+            )
+
+        elif action == "update_task_status":
+            return await adapter.update_task_status(
+                project=params.get("project", ""),
+                task_id=params.get("task_id", ""),
+                status=params.get("status", ""),
+                notes=params.get("notes", ""),
+            )
+
+        elif action == "start_task":
+            # start_task is a convenience alias for update_task_status
+            return await adapter.update_task_status(
+                project=params.get("project", ""),
+                task_id=params.get("task_id", ""),
+                status="in_progress",
+                notes=params.get("notes", ""),
+            )
+
+        elif action == "block_task":
+            # block_task is a convenience alias for update_task_status
+            return await adapter.update_task_status(
+                project=params.get("project", ""),
+                task_id=params.get("task_id", ""),
+                status="blocked",
+                notes=params.get("reason", ""),  # reason -> notes
+            )
+
+        # Project management actions
+        elif action == "setup_project":
+            return await adapter.setup_project(
+                project=params.get("project", ""),
+                name=params.get("name", ""),
+                description=params.get("description", ""),
+                phases=params.get("phases"),
+                categories=params.get("categories"),
+            )
+
+        elif action == "list_projects":
+            return await adapter.list_projects(
+                include_archived=params.get("include_archived", False),
+            )
+
+        elif action == "update_project":
+            # Extract project and pass remaining params
+            project = params.get("project", "")
+            update_params = {k: v for k, v in params.items() if k != "project"}
+            return await adapter.update_project(
+                project=project,
+                **update_params,
+            )
+
+        elif action == "delete_project":
+            return await adapter.delete_project(
+                project=params.get("project", ""),
+                confirm=params.get("confirm", False),
+            )
+
+        elif action == "get_project_config":
+            return await adapter.get_project_config(
+                project=params.get("project", ""),
+            )
+
+        # Session/Summary actions
+        elif action == "update_summary":
+            # Prismind uses: description, current_phase, completed_tasks, total_tasks, custom_fields
+            # Build kwargs, excluding None values to avoid validation errors
+            kwargs: dict[str, Any] = {
+                "description": params.get("description", params.get("summary", "")),
+                "current_phase": params.get("current_phase", ""),
+            }
+            if params.get("completed_tasks") is not None:
+                kwargs["completed_tasks"] = params["completed_tasks"]
+            if params.get("total_tasks") is not None:
+                kwargs["total_tasks"] = params["total_tasks"]
+            if params.get("custom_fields") is not None:
+                kwargs["custom_fields"] = params["custom_fields"]
+            return await adapter.update_summary(**kwargs)
+
+        # Document actions
+        elif action == "create_document":
+            # Prismind uses: doc_type, name, content, phase_task, feature, keywords
+            # Extract feature/keywords from metadata if provided
+            metadata = params.get("metadata") or {}
+            return await adapter.create_document(
+                doc_type=params.get("doc_type", ""),
+                name=params.get("name", params.get("title", "")),
+                content=params.get("content", ""),
+                phase_task=params.get("phase_task", ""),
+                feature=params.get("feature", metadata.get("feature", "")),
+                keywords=params.get("keywords", metadata.get("keywords")),
+            )
+
+        elif action == "update_document":
+            # Prismind uses: doc_id, content, name, feature, keywords
+            metadata = params.get("metadata") or {}
+            return await adapter.update_document(
+                doc_id=params.get("doc_id", ""),
+                content=params.get("content"),
+                name=params.get("name", params.get("title")),
+                feature=params.get("feature", metadata.get("feature")),
+                keywords=params.get("keywords", metadata.get("keywords")),
+            )
+
+        else:
+            raise ValueError(
+                f"Unknown prismind action: {action}. "
+                "Add explicit mapping to _call_service."
+            )
+
     elif service == "cognilens":
         adapter = CognilensAdapter(
             sse_url=settings.cognilens_url,
@@ -552,6 +683,12 @@ async def _call_service(
                 target_tokens=params.get("target_tokens", 500),
             )
 
+        else:
+            raise ValueError(
+                f"Unknown cognilens action: {action}. "
+                "Add explicit mapping to _call_service."
+            )
+
     elif service == "lexora":
         adapter = LexoraAdapter(
             base_url=settings.lexora_url,
@@ -572,4 +709,11 @@ async def _call_service(
                 temperature=params.get("temperature", 0.7),
             )
 
-    raise ValueError(f"Unknown service/action: {service}/{action}")
+        else:
+            raise ValueError(
+                f"Unknown lexora action: {action}. "
+                "Add explicit mapping to _call_service."
+            )
+
+    else:
+        raise ValueError(f"Unknown service: {service}")
