@@ -667,6 +667,24 @@ async def _call_service(
                 kwargs["keywords"] = keywords
             return await adapter.update_document(**kwargs)
 
+        elif action == "delete_document":
+            # Prismind uses: doc_id, project, delete_drive_file, permanent
+            # - project: verify document belongs to this project before deletion
+            # - delete_drive_file: also delete from Google Drive (default: True)
+            # - permanent: if False, move to trash; if True, permanent delete (default: False)
+            kwargs: dict[str, Any] = {
+                "doc_id": params.get("doc_id", ""),
+            }
+            if params.get("project"):
+                kwargs["project"] = params["project"]
+            if params.get("delete_drive_file") is not None:
+                kwargs["delete_drive_file"] = params["delete_drive_file"]
+            else:
+                kwargs["delete_drive_file"] = True  # default: delete from Drive
+            if params.get("permanent") is not None:
+                kwargs["permanent"] = params["permanent"]
+            return await adapter.delete_document(**kwargs)
+
         else:
             raise ValueError(
                 f"Unknown prismind action: {action}. "

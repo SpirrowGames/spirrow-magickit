@@ -215,6 +215,7 @@ resume(project="trapxtrap", detail_level="standard")
 | `update_summary` | description, current_phase, completed_tasks, total_tasks, custom_fields | サマリー更新 |
 | `create_document` | doc_type, name, content, phase_task, feature, keywords, auto_register_type | ドキュメント作成（未知のdoc_typeは自動登録） |
 | `update_document` | doc_id, content, name, feature, keywords | ドキュメント更新 |
+| `delete_document` | doc_id, project, delete_drive_file, permanent | ドキュメント削除（permanent=falseでゴミ箱移動） |
 
 #### Cognilens アクション
 

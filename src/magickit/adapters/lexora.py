@@ -34,6 +34,7 @@ class LexoraAdapter(BaseAdapter):
         prompt: str,
         max_tokens: int = 1000,
         temperature: float = 0.7,
+        model: str = "Qwen2.5-1.5B",
         **kwargs: Any,
     ) -> str:
         """Generate text using the LLM.
@@ -42,6 +43,7 @@ class LexoraAdapter(BaseAdapter):
             prompt: Input prompt for generation.
             max_tokens: Maximum tokens to generate.
             temperature: Sampling temperature (0.0-1.0).
+            model: Model to use (default: Qwen2.5-1.5B for fast responses).
             **kwargs: Additional generation parameters.
 
         Returns:
@@ -50,24 +52,31 @@ class LexoraAdapter(BaseAdapter):
         Raises:
             httpx.HTTPError: If the request fails.
         """
+        # Use OpenAI-compatible /v1/completions endpoint
         payload = {
+            "model": model,
             "prompt": prompt,
             "max_tokens": max_tokens,
             "temperature": temperature,
             **kwargs,
         }
 
-        logger.info("Generating text", prompt_length=len(prompt), max_tokens=max_tokens)
-        response = await self._post("/generate", json=payload)
+        logger.info("Generating text", prompt_length=len(prompt), max_tokens=max_tokens, model=model)
+        response = await self._post("/v1/completions", json=payload)
         result = response.json()
 
-        return result.get("text", "")
+        # OpenAI format: {"choices": [{"text": "..."}]}
+        choices = result.get("choices", [])
+        if choices:
+            return choices[0].get("text", "")
+        return ""
 
     async def chat(
         self,
         messages: list[dict[str, str]],
         max_tokens: int = 1000,
         temperature: float = 0.7,
+        model: str = "Qwen2.5-1.5B",
         **kwargs: Any,
     ) -> str:
         """Chat with the LLM using message format.
@@ -76,6 +85,7 @@ class LexoraAdapter(BaseAdapter):
             messages: List of chat messages with 'role' and 'content'.
             max_tokens: Maximum tokens to generate.
             temperature: Sampling temperature (0.0-1.0).
+            model: Model to use (default: Qwen2.5-1.5B for fast responses).
             **kwargs: Additional chat parameters.
 
         Returns:
@@ -84,18 +94,25 @@ class LexoraAdapter(BaseAdapter):
         Raises:
             httpx.HTTPError: If the request fails.
         """
+        # Use OpenAI-compatible /v1/chat/completions endpoint
         payload = {
+            "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
             **kwargs,
         }
 
-        logger.info("Chat request", message_count=len(messages), max_tokens=max_tokens)
-        response = await self._post("/chat", json=payload)
+        logger.info("Chat request", message_count=len(messages), max_tokens=max_tokens, model=model)
+        response = await self._post("/v1/chat/completions", json=payload)
         result = response.json()
 
-        return result.get("response", "")
+        # OpenAI format: {"choices": [{"message": {"content": "..."}}]}
+        choices = result.get("choices", [])
+        if choices:
+            message = choices[0].get("message", {})
+            return message.get("content", "")
+        return ""
 
     async def analyze_intent(
         self,

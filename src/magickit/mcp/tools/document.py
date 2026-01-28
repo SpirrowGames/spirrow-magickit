@@ -22,6 +22,30 @@ logger = get_logger(__name__)
 _settings: Settings | None = None
 
 
+def _parse_result(result: Any) -> dict[str, Any]:
+    """Parse MCP tool result to dict.
+
+    Args:
+        result: Result from MCP tool call (can be dict, JSON string, or other).
+
+    Returns:
+        Parsed dict, or empty dict if parsing fails.
+    """
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                return data
+            return {"result": data}
+        except json.JSONDecodeError:
+            return {"result": result}
+    return {"result": result}
+
+
 async def _classify_document_type(
     lexora: LexoraAdapter,
     doc_type_name: str,
@@ -110,20 +134,41 @@ async def _classify_document_type(
                     json_lines.append(line)
             response = "\n".join(json_lines)
 
-        # Find JSON object in response
+        # Find first complete JSON object in response
         start_idx = response.find("{")
-        end_idx = response.rfind("}") + 1
-        if start_idx >= 0 and end_idx > start_idx:
-            json_str = response[start_idx:end_idx]
-            result = json.loads(json_str)
+        if start_idx >= 0:
+            # Find matching closing brace for the first opening brace
+            depth = 0
+            end_idx = start_idx
+            for i, char in enumerate(response[start_idx:], start_idx):
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i + 1
+                        break
 
-            # Validate required fields
-            if not all(k in result for k in ["type_id", "name", "folder_name"]):
-                raise ValueError("Missing required fields in classification result")
+            if end_idx > start_idx:
+                json_str = response[start_idx:end_idx]
+                logger.debug("Extracted JSON string", json_str=json_str[:200])
 
-            return result
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Try to fix common issues: unquoted values, trailing commas
+                    # Remove any control characters
+                    import re
+                    json_str_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
+                    result = json.loads(json_str_clean)
 
-        raise ValueError("No valid JSON found in Lexora response")
+                # Validate required fields
+                if not all(k in result for k in ["type_id", "name", "folder_name"]):
+                    raise ValueError(f"Missing required fields in classification result: {result}")
+
+                return result
+
+        raise ValueError(f"No valid JSON found in Lexora response: {response[:200]}")
 
     except json.JSONDecodeError as e:
         logger.error("Failed to parse Lexora response as JSON", error=str(e))
@@ -230,15 +275,16 @@ async def smart_create_document_impl(
             )
 
             # Register the new document type
-            register_result = await prismind.register_document_type(
+            register_result_raw = await prismind.register_document_type(
                 type_id=classification["type_id"],
                 name=classification["name"],
                 folder_name=classification["folder_name"],
                 description=classification.get("description", ""),
                 create_folder=True,
             )
+            register_result = _parse_result(register_result_raw)
 
-            if isinstance(register_result, dict) and register_result.get("success"):
+            if register_result.get("success"):
                 type_registered = True
                 registered_type = {
                     "type_id": classification["type_id"],
@@ -289,22 +335,17 @@ async def smart_create_document_impl(
         if keywords is not None:
             create_kwargs["keywords"] = keywords
 
-        create_result = await prismind.create_document(**create_kwargs)
+        create_result_raw = await prismind.create_document(**create_kwargs)
+        create_result = _parse_result(create_result_raw)
 
-        if isinstance(create_result, dict):
-            success = create_result.get("success", False)
-            doc_id = create_result.get("doc_id", "")
-            doc_url = create_result.get("doc_url", "")
-            message = create_result.get("message", "Document created")
+        success = create_result.get("success", False)
+        doc_id = create_result.get("doc_id", "")
+        doc_url = create_result.get("doc_url", "")
+        message = create_result.get("message", "Document created")
 
-            # Check if Prismind flagged unknown doc type
-            if create_result.get("unknown_doc_type") and not type_registered:
-                message += " (Warning: document type may not be registered)"
-        else:
-            success = True
-            doc_id = str(create_result) if create_result else ""
-            doc_url = ""
-            message = "Document created"
+        # Check if Prismind flagged unknown doc type
+        if create_result.get("unknown_doc_type") and not type_registered:
+            message += " (Warning: document type may not be registered)"
 
         logger.info(
             "Document created",
