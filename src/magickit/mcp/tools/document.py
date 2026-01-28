@@ -23,7 +23,8 @@ logger = get_logger(__name__)
 _settings: Settings | None = None
 
 # Default similarity threshold for semantic document type matching
-DEFAULT_SIMILARITY_THRESHOLD = 0.75
+# BGE-M3 embeddings typically return scores in 0.5-0.7 range for semantic matches
+DEFAULT_SIMILARITY_THRESHOLD = 0.45
 
 
 def _parse_result(result: Any) -> dict[str, Any]:
@@ -131,27 +132,68 @@ async def _generate_new_type_metadata(
     Returns:
         Dict containing type_id, name, folder_name, description.
     """
-    prompt = f"""You are a document type metadata generator.
+    # Normalize the doc_type_name to a valid type_id format (ASCII only)
+    normalized_type_id = doc_type_name.lower().replace("-", "_").replace(" ", "_")
+    # Keep only ASCII alphanumeric characters and underscore
+    normalized_type_id = "".join(
+        c for c in normalized_type_id if c.isascii() and (c.isalnum() or c == "_")
+    )
 
-Generate metadata for a NEW document type. Do NOT check for existing types - just create appropriate metadata.
+    # If normalized_type_id is empty (e.g., Japanese input), let LLM generate it
+    has_valid_type_id = bool(normalized_type_id)
 
-【Document Type Name】
-{doc_type_name}
+    if has_valid_type_id:
+        prompt = f"""You are a document type metadata generator.
 
-【Document Content Preview】
-{content_preview[:500]}
+Generate metadata for a NEW document type named "{doc_type_name}".
+
+【CRITICAL】
+The type_id MUST be "{normalized_type_id}" exactly (already normalized).
+
+【Document Content Preview (for context only)】
+{content_preview[:300]}
 
 【Requirements】
-Generate metadata with:
-- type_id: lowercase English with underscores only (e.g., meeting_notes, api_spec)
-- name: Human-readable display name (can be Japanese if appropriate)
-- folder_name: English only, PascalCase or kebab-case (e.g., "Design", "API-Specs", "MeetingNotes")
+- type_id: Use "{normalized_type_id}" exactly
+- name: Human-readable display name for "{doc_type_name}"
+- folder_name: English only, PascalCase (e.g., "MeetingNotes", "APISpecs")
 - description: Brief description (1 sentence)
 
 【Output Format】JSON only, no explanation.
 {{
-    "type_id": "meeting_notes",
+    "type_id": "{normalized_type_id}",
     "name": "Meeting Notes",
+    "folder_name": "MeetingNotes",
+    "description": "Records of meeting discussions and decisions"
+}}"""
+    else:
+        # Non-ASCII input (e.g., Japanese) - LLM must generate English type_id
+        prompt = f"""You are a document type metadata generator.
+
+Generate metadata for a NEW document type named "{doc_type_name}" (translate to English).
+
+【CRITICAL】
+Generate an appropriate English type_id based on the meaning of "{doc_type_name}".
+type_id MUST be lowercase ASCII English with underscores only.
+
+【Document Content Preview (for context only)】
+{content_preview[:300]}
+
+【Requirements】
+- type_id: Lowercase English with underscores (e.g., meeting_notes, api_spec)
+- name: Human-readable display name (can be Japanese)
+- folder_name: English only, PascalCase (e.g., "MeetingNotes", "APISpecs")
+- description: Brief description (1 sentence)
+
+【Examples】
+- "議事録" → type_id: "meeting_notes"
+- "設計書" → type_id: "design"
+- "仕様書" → type_id: "specification"
+
+【Output Format】JSON only, no explanation.
+{{
+    "type_id": "meeting_notes",
+    "name": "議事録",
     "folder_name": "MeetingNotes",
     "description": "Records of meeting discussions and decisions"
 }}"""
@@ -286,11 +328,9 @@ async def smart_create_document_impl(
 
     # Step 1: Get existing document types to check for exact match
     try:
-        types_result = await prismind.list_document_types()
-        if isinstance(types_result, dict):
-            existing_types = types_result.get("document_types", [])
-        else:
-            existing_types = []
+        types_result_raw = await prismind.list_document_types()
+        types_result = _parse_result(types_result_raw)
+        existing_types = types_result.get("document_types", [])
     except Exception as e:
         logger.warning("Failed to list document types, assuming none", error=str(e))
         existing_types = []
