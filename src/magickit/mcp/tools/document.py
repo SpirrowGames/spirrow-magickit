@@ -316,6 +316,18 @@ async def smart_create_document_impl(
                     reason=classification.get("reason", ""),
                 )
                 # No registration needed, type already exists
+            elif classification.get("type_id") in existing_type_ids:
+                # LLM returned same type_id as existing type but didn't say use_existing
+                # This happens when LLM generates same ID - treat as existing type match
+                matched_type_id = classification["type_id"]
+                original_type = doc_type
+                doc_type = matched_type_id
+                matched_existing = True
+                logger.info(
+                    "Using existing document type (type_id match)",
+                    original_type=original_type,
+                    matched_type_id=matched_type_id,
+                )
             else:
                 # Register the new document type
                 logger.info(
@@ -328,6 +340,7 @@ async def smart_create_document_impl(
                     type_id=classification["type_id"],
                     name=classification["name"],
                     folder_name=classification["folder_name"],
+                    scope="global",  # Register as global type for cross-project use
                     description=classification.get("description", ""),
                     create_folder=True,
                 )

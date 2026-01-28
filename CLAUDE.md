@@ -216,6 +216,9 @@ resume(project="trapxtrap", detail_level="standard")
 | `create_document` | doc_type, name, content, phase_task, feature, keywords, auto_register_type | ドキュメント作成（未知のdoc_typeは自動登録） |
 | `update_document` | doc_id, content, name, feature, keywords | ドキュメント更新 |
 | `delete_document` | doc_id, project, delete_drive_file, permanent | ドキュメント削除（permanent=falseでゴミ箱移動） |
+| `list_document_types` | - | ドキュメントタイプ一覧（グローバル+プロジェクト） |
+| `register_document_type` | type_id, name, folder_name, scope, description | ドキュメントタイプ登録（scope: "global"/"project"） |
+| `delete_document_type` | type_id, scope | ドキュメントタイプ削除（scope: "global"/"project"） |
 
 #### Cognilens アクション
 
@@ -278,15 +281,20 @@ smart_create_document(
 ```
 
 **処理フロー:**
-1. Prismindで既存doc_type一覧を取得
+1. Prismindで既存doc_type一覧を取得（グローバル+プロジェクト）
 2. 未登録の場合、Lexoraで既存タイプとの意味的類似度をチェック
 3. 類似タイプがあれば既存タイプを使用（例: "design" ≈ "spec"）
-4. 類似タイプがなければ新規タイプを登録（フォルダ名は英語のみ）
+4. 類似タイプがなければ新規タイプをグローバルとして登録（フォルダ名は英語のみ）
 5. ドキュメントを作成
 
 **レスポンス:**
 - `matched_existing: true` - 既存タイプにセマンティックマッチ
-- `type_registered: true` - 新規タイプを登録
+- `type_registered: true` - 新規グローバルタイプを登録
+
+**DocumentType スコープ:**
+- `global`: 全プロジェクトで共有（~/.prismind_global_doc_types.json に保存）
+- `project`: 特定プロジェクトのみ（ProjectConfig.document_types に保存）
+- 同じtype_idが両方に存在する場合、プロジェクト側が優先される
 
 ### ヘルスチェック (`health.py`)
 

@@ -688,6 +688,32 @@ async def _call_service(
         elif action == "list_document_types":
             return await adapter.list_document_types()
 
+        elif action == "register_document_type":
+            kwargs: dict[str, Any] = {
+                "type_id": params.get("type_id", ""),
+                "name": params.get("name", ""),
+                "folder_name": params.get("folder_name", ""),
+            }
+            # Default to global scope
+            kwargs["scope"] = params.get("scope", "global")
+            if params.get("template_doc_id"):
+                kwargs["template_doc_id"] = params["template_doc_id"]
+            if params.get("description"):
+                kwargs["description"] = params["description"]
+            if params.get("fields") is not None:
+                kwargs["fields"] = params["fields"]
+            if params.get("create_folder") is not None:
+                kwargs["create_folder"] = params["create_folder"]
+            return await adapter.register_document_type(**kwargs)
+
+        elif action == "delete_document_type":
+            kwargs: dict[str, Any] = {
+                "type_id": params.get("type_id", ""),
+            }
+            # Default to global scope
+            kwargs["scope"] = params.get("scope", "global")
+            return await adapter.delete_document_type(**kwargs)
+
         elif action == "list_documents":
             kwargs: dict[str, Any] = {}
             if params.get("project"):
