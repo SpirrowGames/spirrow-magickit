@@ -239,3 +239,55 @@ class PrismindAdapter(MCPBaseAdapter):
             except json.JSONDecodeError:
                 return [{"result": result}]
         return [{"result": result}]
+
+    # === Document Type Methods ===
+
+    async def find_similar_document_type(
+        self,
+        type_query: str,
+        threshold: float = 0.75,
+    ) -> dict[str, Any]:
+        """Find a document type semantically similar to the query.
+
+        Uses RAG-based semantic search (BGE-M3 embeddings) for multilingual
+        matching. For example, "api仕様" can match "api_spec".
+
+        Args:
+            type_query: Search query (type name, ID, or description)
+            threshold: Minimum similarity score (0.0-1.0)
+
+        Returns:
+            Dict containing:
+            - found: Whether a match was found
+            - type_id: Matched type ID (if found)
+            - name: Matched type name (if found)
+            - folder_name: Matched type folder name (if found)
+            - similarity: Similarity score (if found)
+            - message: Status message
+        """
+        logger.info(
+            "Finding similar document type",
+            type_query=type_query,
+            threshold=threshold,
+        )
+
+        success, result = await self._call_tool_safe(
+            "find_similar_document_type",
+            {"type_query": type_query, "threshold": threshold},
+        )
+
+        if not success:
+            logger.warning(
+                "find_similar_document_type failed, returning not found",
+                error=result,
+            )
+            return {
+                "found": False,
+                "type_id": "",
+                "name": "",
+                "folder_name": "",
+                "similarity": 0.0,
+                "message": f"Search failed: {result}",
+            }
+
+        return self._parse_json_result(result)

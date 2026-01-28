@@ -139,6 +139,7 @@ class CognilensAdapter(BaseAdapter):
 
 class PrismindAdapter(BaseAdapter):
     async def search(query: str, n: int) -> list[Document]
+    async def find_similar_document_type(type_query: str, threshold: float) -> dict
 ```
 
 ## API エンドポイント
@@ -219,6 +220,7 @@ resume(project="trapxtrap", detail_level="standard")
 | `list_document_types` | - | ドキュメントタイプ一覧（グローバル+プロジェクト） |
 | `register_document_type` | type_id, name, folder_name, scope, description | ドキュメントタイプ登録（scope: "global"/"project"） |
 | `delete_document_type` | type_id, scope | ドキュメントタイプ削除（scope: "global"/"project"） |
+| `find_similar_document_type` | type_query, threshold | RAGセマンティック検索で類似タイプを検索（多言語対応） |
 
 #### Cognilens アクション
 
@@ -264,16 +266,17 @@ delete_project(project="old-project", mode="archive")
 ### ドキュメント管理 (`document.py`)
 
 未登録のドキュメントタイプを自動処理するスマートドキュメント作成。
+RAGベースのセマンティック検索（BGE-M3埋め込み）で多言語マッチングをサポート。
 
 | ツール | 用途 |
 |--------|------|
-| `smart_create_document` | 未知のdoc_typeを自動分類・登録してドキュメント作成 |
+| `smart_create_document` | 未知のdoc_typeをRAGセマンティック検索で自動マッチ・登録してドキュメント作成 |
 
 ```python
-# 使用例: 未登録のdoc_typeでも自動的にLexoraで分類→Prismindに登録→作成
+# 使用例: 未登録のdoc_typeでもRAGセマンティック検索でマッチ→Prismindに登録→作成
 smart_create_document(
     name="2024-01-15 Sprint Planning",
-    doc_type="meeting_notes",  # 未登録でもOK
+    doc_type="api仕様",  # 多言語対応: "api_spec"にマッチ
     content="...",
     phase_task="phase1-task2",
     project="trapxtrap"
@@ -282,13 +285,18 @@ smart_create_document(
 
 **処理フロー:**
 1. Prismindで既存doc_type一覧を取得（グローバル+プロジェクト）
-2. 未登録の場合、Lexoraで既存タイプとの意味的類似度をチェック
-3. 類似タイプがあれば既存タイプを使用（例: "design" ≈ "spec"）
-4. 類似タイプがなければ新規タイプをグローバルとして登録（フォルダ名は英語のみ）
+2. 未登録の場合、RAGセマンティック検索で類似タイプを検索（閾値0.75）
+3. 類似タイプがあれば既存タイプを使用（例: "api仕様" ≈ "api_spec"、多言語対応）
+4. 類似タイプがなければLexoraでメタデータ生成 → グローバルとして登録（フォルダ名は英語のみ）
 5. ドキュメントを作成
 
+**セマンティックマッチング:**
+- BGE-M3埋め込みによる多言語対応（日本語 ↔ 英語も可）
+- 閾値: 0.75（設定可能）
+- 例: "api仕様" → "api_spec", "設計ドキュメント" → "design"
+
 **レスポンス:**
-- `matched_existing: true` - 既存タイプにセマンティックマッチ
+- `matched_existing: true` - 既存タイプにRAGセマンティックマッチ
 - `type_registered: true` - 新規グローバルタイプを登録
 
 **DocumentType スコープ:**
