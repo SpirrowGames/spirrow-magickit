@@ -78,32 +78,43 @@ async def _classify_document_type(
         indent=2,
     )
 
-    prompt = f"""あなたはドキュメント分類の専門家です。
+    prompt = f"""You are a document classification expert.
 
-新しいドキュメントタイプを登録する必要があります。
-以下の情報から、適切なtype_id、表示名、フォルダパスを決定してください。
+A new document type needs to be registered. Determine appropriate type_id, display name, and folder path.
 
-【登録したいドキュメントタイプ名】
+【New Document Type Name】
 {doc_type_name}
 
-【ドキュメント内容の一部】
+【Document Content Preview】
 {content_preview[:500]}
 
-【既存のドキュメントタイプ】
+【Existing Document Types】
 {existing_types_json}
 
-【ルール】
-- type_idは英数字とアンダースコアのみ（例: meeting_notes）
-- folder_nameはネストパスが使用可能（例: "議事録/定例", "設計/詳細設計"）
-- 既存タイプと重複しないこと
-- 日本語のフォルダ名を推奨
+【Rules】
+1. Check if an existing type semantically matches the new type (e.g., "design_doc" ≈ "specification", "meeting_notes" ≈ "minutes")
+2. If a semantically similar type exists, return use_existing=true with the matched type_id
+3. If no match, create a new type with:
+   - type_id: lowercase English with underscores only (e.g., meeting_notes, api_spec)
+   - name: Human-readable display name (can be Japanese)
+   - folder_name: English only, PascalCase or kebab-case (e.g., "Design", "API-Specs", "MeetingNotes")
+   - description: Brief description
 
-【出力形式】JSON形式のみで出力。余計な説明は不要。
+【Output Format】JSON only, no explanation.
+For using existing type:
 {{
+    "use_existing": true,
+    "matched_type_id": "design_docs",
+    "reason": "semantically equivalent to design documentation"
+}}
+
+For creating new type:
+{{
+    "use_existing": false,
     "type_id": "meeting_notes",
-    "name": "議事録",
-    "folder_name": "議事録",
-    "description": "会議の議事録を保存"
+    "name": "Meeting Notes",
+    "folder_name": "MeetingNotes",
+    "description": "Records of meeting discussions and decisions"
 }}"""
 
     logger.info(
@@ -162,10 +173,27 @@ async def _classify_document_type(
                     json_str_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
                     result = json.loads(json_str_clean)
 
-                # Validate required fields
+                # Handle use_existing case
+                if result.get("use_existing"):
+                    matched_type_id = result.get("matched_type_id")
+                    if not matched_type_id:
+                        raise ValueError("use_existing=true but no matched_type_id provided")
+                    logger.info(
+                        "Lexora suggests using existing type",
+                        matched_type_id=matched_type_id,
+                        reason=result.get("reason", ""),
+                    )
+                    return {
+                        "use_existing": True,
+                        "matched_type_id": matched_type_id,
+                        "reason": result.get("reason", ""),
+                    }
+
+                # Validate required fields for new type
                 if not all(k in result for k in ["type_id", "name", "folder_name"]):
                     raise ValueError(f"Missing required fields in classification result: {result}")
 
+                result["use_existing"] = False
                 return result
 
         raise ValueError(f"No valid JSON found in Lexora response: {response[:200]}")
@@ -194,6 +222,11 @@ async def smart_create_document_impl(
     This is the shared implementation used by both the MCP tool and
     orchestrate_workflow's create_document action.
 
+    When an unknown doc_type is provided, this function:
+    1. Asks Lexora to check if any existing type is semantically similar
+    2. If a match is found (e.g., "design_doc" ≈ "specification"), uses existing type
+    3. If no match, creates a new type with English folder names only
+
     Args:
         settings: Application settings.
         name: Document name.
@@ -210,9 +243,10 @@ async def smart_create_document_impl(
         - success: Whether creation succeeded
         - doc_id: Document ID
         - doc_url: Document URL
-        - doc_type: Used document type
+        - doc_type: Used document type (may differ from input if matched existing)
         - type_registered: Whether a new type was registered
         - registered_type: Details of registered type (if any)
+        - matched_existing: Whether an existing type was matched semantically
         - message: Status message
     """
     prismind = PrismindAdapter(
@@ -222,6 +256,7 @@ async def smart_create_document_impl(
 
     type_registered = False
     registered_type = None
+    matched_existing = False  # True if semantic match found existing type
 
     logger.info(
         "Smart document creation",
@@ -260,7 +295,7 @@ async def smart_create_document_impl(
         )
 
         try:
-            # Classify the document type
+            # Classify the document type (may suggest existing type)
             classification = await _classify_document_type(
                 lexora=lexora,
                 doc_type_name=doc_type,
@@ -268,43 +303,57 @@ async def smart_create_document_impl(
                 existing_types=existing_types,
             )
 
-            logger.info(
-                "Document type classified",
-                type_id=classification.get("type_id"),
-                folder_name=classification.get("folder_name"),
-            )
-
-            # Register the new document type
-            register_result_raw = await prismind.register_document_type(
-                type_id=classification["type_id"],
-                name=classification["name"],
-                folder_name=classification["folder_name"],
-                description=classification.get("description", ""),
-                create_folder=True,
-            )
-            register_result = _parse_result(register_result_raw)
-
-            if register_result.get("success"):
-                type_registered = True
-                registered_type = {
-                    "type_id": classification["type_id"],
-                    "name": classification["name"],
-                    "folder_name": classification["folder_name"],
-                    "description": classification.get("description", ""),
-                }
-                # Use the classified type_id for document creation
-                doc_type = classification["type_id"]
-
+            # Check if Lexora suggests using an existing type
+            if classification.get("use_existing"):
+                matched_type_id = classification["matched_type_id"]
+                original_type = doc_type
+                doc_type = matched_type_id
+                matched_existing = True
                 logger.info(
-                    "Document type registered",
-                    type_id=doc_type,
-                    folder_name=classification["folder_name"],
+                    "Using existing document type (semantic match)",
+                    original_type=original_type,
+                    matched_type_id=matched_type_id,
+                    reason=classification.get("reason", ""),
                 )
+                # No registration needed, type already exists
             else:
-                logger.warning(
-                    "Document type registration returned non-success",
-                    result=register_result,
+                # Register the new document type
+                logger.info(
+                    "Document type classified as new",
+                    type_id=classification.get("type_id"),
+                    folder_name=classification.get("folder_name"),
                 )
+
+                register_result_raw = await prismind.register_document_type(
+                    type_id=classification["type_id"],
+                    name=classification["name"],
+                    folder_name=classification["folder_name"],
+                    description=classification.get("description", ""),
+                    create_folder=True,
+                )
+                register_result = _parse_result(register_result_raw)
+
+                if register_result.get("success"):
+                    type_registered = True
+                    registered_type = {
+                        "type_id": classification["type_id"],
+                        "name": classification["name"],
+                        "folder_name": classification["folder_name"],
+                        "description": classification.get("description", ""),
+                    }
+                    # Use the classified type_id for document creation
+                    doc_type = classification["type_id"]
+
+                    logger.info(
+                        "Document type registered",
+                        type_id=doc_type,
+                        folder_name=classification["folder_name"],
+                    )
+                else:
+                    logger.warning(
+                        "Document type registration returned non-success",
+                        result=register_result,
+                    )
 
         except Exception as e:
             logger.error("Failed to classify/register document type", error=str(e))
@@ -360,6 +409,7 @@ async def smart_create_document_impl(
             "doc_type": doc_type,
             "type_registered": type_registered,
             "registered_type": registered_type,
+            "matched_existing": matched_existing,
             "message": message,
         }
 
@@ -372,6 +422,7 @@ async def smart_create_document_impl(
             "doc_type": doc_type,
             "type_registered": type_registered,
             "registered_type": registered_type,
+            "matched_existing": matched_existing,
             "message": f"Document creation failed: {e}",
         }
 
@@ -402,8 +453,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         USE THIS WHEN: Creating documents where the document type may not exist.
         This tool:
         - Checks if the document type is registered in Prismind
-        - If unknown, uses Lexora to classify and suggest type_id/folder structure
-        - Automatically registers the new document type in Prismind
+        - If unknown, checks for semantically similar existing types (e.g., "design" ≈ "spec")
+        - If match found, uses existing type; otherwise registers new type
+        - Folder names are always in English to prevent notation variations
         - Creates the document in the appropriate folder
 
         DO NOT USE WHEN:
@@ -425,9 +477,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - success: Whether creation succeeded
             - doc_id: Created document ID
             - doc_url: Document URL (Google Drive)
-            - doc_type: The document type used (may differ if classified)
+            - doc_type: The document type used (may differ if matched existing)
             - type_registered: Whether a new type was registered
             - registered_type: Details of registered type (type_id, name, folder_name, description)
+            - matched_existing: Whether an existing type was matched semantically
             - message: Status message
         """
         if _settings is None:

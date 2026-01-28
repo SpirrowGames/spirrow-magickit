@@ -279,9 +279,14 @@ smart_create_document(
 
 **処理フロー:**
 1. Prismindで既存doc_type一覧を取得
-2. 未登録の場合、Lexoraで適切なtype_id/folder_nameを分類
-3. Prismindに新しいdoc_typeを自動登録
-4. ドキュメントを作成
+2. 未登録の場合、Lexoraで既存タイプとの意味的類似度をチェック
+3. 類似タイプがあれば既存タイプを使用（例: "design" ≈ "spec"）
+4. 類似タイプがなければ新規タイプを登録（フォルダ名は英語のみ）
+5. ドキュメントを作成
+
+**レスポンス:**
+- `matched_existing: true` - 既存タイプにセマンティックマッチ
+- `type_registered: true` - 新規タイプを登録
 
 ### ヘルスチェック (`health.py`)
 
