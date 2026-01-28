@@ -685,6 +685,19 @@ async def _call_service(
                 kwargs["permanent"] = params["permanent"]
             return await adapter.delete_document(**kwargs)
 
+        elif action == "list_document_types":
+            return await adapter.list_document_types()
+
+        elif action == "list_documents":
+            kwargs: dict[str, Any] = {}
+            if params.get("project"):
+                kwargs["project"] = params["project"]
+            if params.get("doc_type"):
+                kwargs["doc_type"] = params["doc_type"]
+            if params.get("limit") is not None:
+                kwargs["limit"] = params["limit"]
+            return await adapter.list_documents(**kwargs)
+
         else:
             raise ValueError(
                 f"Unknown prismind action: {action}. "
