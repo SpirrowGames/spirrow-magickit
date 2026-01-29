@@ -16,6 +16,7 @@ from magickit.adapters.lexora import LexoraAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -30,6 +31,7 @@ async def start_specification(
     target: str,
     initial_request: str,
     feature_type: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Start AI-driven specification process by generating clarifying questions.
 
@@ -45,6 +47,7 @@ async def start_specification(
         target: Target file, function, or component to modify.
         initial_request: User's original feature request (can be vague).
         feature_type: Optional hint about the type (cache, api, refactor, etc.).
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -56,6 +59,7 @@ async def start_specification(
     if _settings is None:
         raise RuntimeError("Settings not initialized")
 
+    effective_user = user or get_current_user()
     session_id = f"spec-{uuid.uuid4().hex[:8]}"
 
     logger.info(
@@ -63,6 +67,7 @@ async def start_specification(
         session_id=session_id,
         target=target,
         initial_request=initial_request[:50],
+        user=effective_user,
     )
 
     # Step 1: Check for existing template in Prismind
@@ -77,6 +82,7 @@ async def start_specification(
                 query=f"spec_template:{feature_type}",
                 category="spec_template",
                 limit=1,
+                user=effective_user,
             )
             if results and isinstance(results, list) and len(results) > 0:
                 template = results[0]
@@ -188,6 +194,7 @@ JSON形式で出力してください。"""
 async def generate_specification(
     session_id: str,
     answers: dict[str, Any],
+    user: str = "",
 ) -> dict[str, Any]:
     """Generate a specification document from user answers.
 
@@ -197,6 +204,7 @@ async def generate_specification(
     Args:
         session_id: Session ID from start_specification.
         answers: Dict mapping question IDs to user answers.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -207,6 +215,8 @@ async def generate_specification(
     """
     if _settings is None:
         raise RuntimeError("Settings not initialized")
+
+    effective_user = user or get_current_user()
 
     if session_id not in _sessions:
         return {
@@ -225,6 +235,7 @@ async def generate_specification(
         "Generating specification",
         session_id=session_id,
         answers_count=len(answers),
+        user=effective_user,
     )
 
     # Generate specification using LLM
@@ -344,6 +355,7 @@ def _parse_specification_response(response: str) -> dict[str, Any]:
 async def prepare_execution(
     specification: dict[str, Any],
     session_id: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Analyze specification and prepare permissions for automated execution.
 
@@ -357,6 +369,7 @@ async def prepare_execution(
         specification: The specification dict from generate_specification,
                       containing target_files, requirements, and required_permissions.
         session_id: Optional session ID for tracking.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -365,10 +378,13 @@ async def prepare_execution(
         - summary: Human-readable summary of required permissions
         - next_action: Instructions for applying permissions
     """
+    effective_user = user or get_current_user()
+
     logger.info(
         "Preparing execution",
         session_id=session_id or "none",
         has_specification=bool(specification),
+        user=effective_user,
     )
 
     # Extract permissions from specification
@@ -466,6 +482,7 @@ async def apply_permissions(
     allowed_prompts: list[dict[str, str]],
     scope: str = "session",
     project_path: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Generate settings configuration for Claude Code permissions.
 
@@ -480,6 +497,7 @@ async def apply_permissions(
         allowed_prompts: List of permissions in allowedPrompts format.
         scope: Permission scope - "session" (temporary) or "project" (persistent).
         project_path: Optional project path for project-scoped permissions.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -488,10 +506,13 @@ async def apply_permissions(
         - apply_method: Recommended method to apply permissions
         - instructions: Step-by-step instructions for applying
     """
+    effective_user = user or get_current_user()
+
     logger.info(
         "Generating permission configuration",
         prompt_count=len(allowed_prompts),
         scope=scope,
+        user=effective_user,
     )
 
     if not allowed_prompts:

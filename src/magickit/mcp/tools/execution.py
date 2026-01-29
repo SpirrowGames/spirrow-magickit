@@ -17,6 +17,7 @@ from magickit.adapters.lexora import LexoraAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -31,6 +32,7 @@ async def decompose_specification(
     specification: dict[str, Any],
     session_id: str = "",
     granularity: str = "medium",
+    user: str = "",
 ) -> dict[str, Any]:
     """Decompose a specification into executable tasks with dependencies.
 
@@ -47,6 +49,7 @@ async def decompose_specification(
             - "fine": Many small tasks (good for complex changes)
             - "medium": Balanced task size (default)
             - "coarse": Fewer larger tasks (good for simple changes)
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -60,12 +63,14 @@ async def decompose_specification(
     if _settings is None:
         raise RuntimeError("Settings not initialized")
 
+    effective_user = user or get_current_user()
     execution_id = session_id or f"exec-{uuid.uuid4().hex[:8]}"
 
     logger.info(
         "Decomposing specification",
         execution_id=execution_id,
         granularity=granularity,
+        user=effective_user,
     )
 
     # Extract specification data
@@ -208,6 +213,7 @@ JSON形式で出力してください。"""
 
 async def get_next_task(
     execution_id: str,
+    user: str = "",
 ) -> dict[str, Any]:
     """Get the next task ready for execution.
 
@@ -216,6 +222,7 @@ async def get_next_task(
 
     Args:
         execution_id: Execution session ID from decompose_specification.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -224,6 +231,8 @@ async def get_next_task(
         - progress: Current progress (completed/total)
         - remaining: Number of remaining tasks
     """
+    effective_user = user or get_current_user()
+
     if execution_id not in _execution_sessions:
         return {
             "has_task": False,
@@ -288,6 +297,7 @@ async def complete_task(
     success: bool = True,
     result: str = "",
     error: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Mark a task as completed or failed.
 
@@ -300,6 +310,7 @@ async def complete_task(
         success: Whether the task succeeded.
         result: Result or summary of what was done.
         error: Error message if the task failed.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -308,6 +319,8 @@ async def complete_task(
         - progress: Current progress
         - is_complete: Whether all tasks are done
     """
+    effective_user = user or get_current_user()
+
     if execution_id not in _execution_sessions:
         return {
             "success": False,
@@ -384,6 +397,7 @@ async def complete_task(
 
 async def get_execution_status(
     execution_id: str,
+    user: str = "",
 ) -> dict[str, Any]:
     """Get the current status of an execution session.
 
@@ -392,6 +406,7 @@ async def get_execution_status(
 
     Args:
         execution_id: Execution session ID.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -400,6 +415,8 @@ async def get_execution_status(
         - progress: Progress details
         - tasks: All tasks with their current status
     """
+    effective_user = user or get_current_user()
+
     if execution_id not in _execution_sessions:
         return {
             "found": False,
@@ -511,6 +528,7 @@ async def finalize_execution(
     execution_id: str,
     project: str = "",
     save_to_knowledge: bool = True,
+    user: str = "",
 ) -> dict[str, Any]:
     """Finalize an execution session and record results.
 
@@ -526,6 +544,7 @@ async def finalize_execution(
         execution_id: Execution session ID.
         project: Project name for saving to Prismind.
         save_to_knowledge: Whether to save results as knowledge entries.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -536,6 +555,8 @@ async def finalize_execution(
     """
     if _settings is None:
         raise RuntimeError("Settings not initialized")
+
+    effective_user = user or get_current_user()
 
     if execution_id not in _execution_sessions:
         return {
@@ -554,6 +575,7 @@ async def finalize_execution(
         execution_id=execution_id,
         completed=len(completed_tasks),
         failed=len(failed_tasks),
+        user=effective_user,
     )
 
     # Generate summary
@@ -612,6 +634,7 @@ async def finalize_execution(
                 project=project,
                 tags=["execution", "implementation", title[:30]],
                 source=f"execution:{execution_id}",
+                user=effective_user,
             )
             knowledge_saved += 1
 
@@ -624,6 +647,7 @@ async def finalize_execution(
                         project=project,
                         tags=["task-result", task.get("action_type", "modify")],
                         source=f"task:{task['id']}",
+                        user=effective_user,
                     )
                     knowledge_saved += 1
 
@@ -674,6 +698,7 @@ async def generate_execution_report(
     execution_id: str,
     format: str = "markdown",
     include_details: bool = True,
+    user: str = "",
 ) -> dict[str, Any]:
     """Generate a detailed execution report.
 
@@ -684,6 +709,7 @@ async def generate_execution_report(
         execution_id: Execution session ID.
         format: Output format ("markdown", "changelog", "brief").
         include_details: Whether to include detailed task information.
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -691,6 +717,8 @@ async def generate_execution_report(
         - report: The formatted report
         - format: The format used
     """
+    effective_user = user or get_current_user()
+
     if execution_id not in _execution_sessions:
         return {
             "success": False,
@@ -801,6 +829,7 @@ async def run_full_workflow(
     project: str = "",
     feature_type: str = "",
     auto_approve: bool = False,
+    user: str = "",
 ) -> dict[str, Any]:
     """Run the complete specification-to-execution workflow.
 
@@ -818,6 +847,7 @@ async def run_full_workflow(
         project: Project name for context.
         feature_type: Optional hint about feature type.
         auto_approve: If True, skip question phase (use defaults).
+        user: User identifier for multi-user support (empty for default user).
 
     Returns:
         Dict containing:
@@ -831,6 +861,7 @@ async def run_full_workflow(
     if _settings is None:
         raise RuntimeError("Settings not initialized")
 
+    effective_user = user or get_current_user()
     workflow_id = f"workflow-{uuid.uuid4().hex[:8]}"
 
     logger.info(
@@ -838,6 +869,7 @@ async def run_full_workflow(
         workflow_id=workflow_id,
         target=target,
         request=request[:50],
+        user=effective_user,
     )
 
     # Import specification tools
@@ -878,6 +910,7 @@ async def run_full_workflow(
                 target=target,
                 initial_request=request,
                 feature_type=feature_type,
+                user=effective_user,
             )
 
             return {
@@ -897,12 +930,13 @@ async def run_full_workflow(
             }
 
         # Step 2: Prepare execution permissions
-        exec_prep = await specification.prepare_execution(spec_result)
+        exec_prep = await specification.prepare_execution(spec_result, user=effective_user)
 
         # Step 3: Decompose into tasks
         decompose_result = await decompose_specification(
             specification=spec_result,
             session_id=workflow_id,
+            user=effective_user,
         )
 
         # Store workflow info
