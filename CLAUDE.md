@@ -374,21 +374,24 @@ config = apply_permissions(
 - `session`: 現在のプラン実行中のみ有効（ExitPlanMode経由）
 - `project`: プロジェクト設定に永続化（.claude/settings.local.json）
 
-### 実行管理 (`execution.py`)
+### SpecExecutor - 実行パイプライン (`execution.py`)
 
-仕様書をタスクに分解し、依存関係を考慮した実行順序を管理。
+仕様書をタスクに分解し、依存関係を考慮した実行順序を管理するパイプライン。
 
 | ツール | 用途 |
 |--------|------|
-| `decompose_specification` | 仕様書をLLMで分析し、実行可能なタスクリストに分解 |
-| `get_next_task` | 依存関係を考慮して次の実行可能タスクを取得 |
-| `complete_task` | タスクを完了/失敗としてマーク、次タスクを取得 |
-| `get_execution_status` | 実行セッション全体の進捗状況を取得 |
+| `spec_executor_decompose` | 仕様書をLLMで分析し、実行可能なタスクリストに分解 |
+| `spec_executor_next_task` | 依存関係を考慮して次の実行可能タスクを取得 |
+| `spec_executor_complete_task` | タスクを完了/失敗としてマーク、次タスクを取得 |
+| `spec_executor_status` | 実行セッション全体の進捗状況を取得 |
+| `spec_executor_finalize` | 実行完了処理、結果をknowledgeに保存、ハンドオフ情報生成 |
+| `spec_executor_report` | 実行レポート生成（markdown/changelog/brief形式） |
+| `spec_executor_run` | 仕様策定→実行準備を一括実行（便利ツール） |
 
 ```python
 # 使用例: タスク分解と実行ループ
 # Step 1: 仕様書をタスクに分解
-result = decompose_specification(
+result = spec_executor_decompose(
     specification=spec,  # generate_specificationの出力
     granularity="medium"  # "fine" / "medium" / "coarse"
 )
@@ -396,7 +399,7 @@ result = decompose_specification(
 
 # Step 2: タスクを順番に実行
 while True:
-    task_info = get_next_task(execution_id="exec-abc123")
+    task_info = spec_executor_next_task(execution_id="exec-abc123")
     if not task_info["has_task"]:
         break
 
@@ -405,7 +408,7 @@ while True:
     # ... 実装 ...
 
     # Step 3: タスク完了を記録
-    result = complete_task(
+    result = spec_executor_complete_task(
         execution_id="exec-abc123",
         task_id=task["id"],
         success=True,
@@ -414,7 +417,7 @@ while True:
     # -> {"next_task": {...}, "progress": "2/5", "is_complete": False}
 
 # Step 4: 進捗確認
-status = get_execution_status(execution_id="exec-abc123")
+status = spec_executor_status(execution_id="exec-abc123")
 # -> {"progress": {"completed": 5, "total": 5, "percent": 100.0}}
 ```
 
@@ -436,15 +439,9 @@ status = get_execution_status(execution_id="exec-abc123")
 
 **実行完了後の処理:**
 
-| ツール | 用途 |
-|--------|------|
-| `finalize_execution` | 実行完了処理、結果をknowledgeに保存、ハンドオフ情報生成 |
-| `generate_execution_report` | 実行レポート生成（markdown/changelog/brief形式） |
-| `run_full_workflow` | 仕様策定→実行準備を一括実行（便利ツール） |
-
 ```python
 # 実行完了後の処理
-result = finalize_execution(
+result = spec_executor_finalize(
     execution_id="exec-abc123",
     project="my-project",
     save_to_knowledge=True  # 結果をPrismindに保存
@@ -452,14 +449,14 @@ result = finalize_execution(
 # -> {"summary": "...", "knowledge_saved": 3, "handoff": {...}}
 
 # レポート生成（ドキュメント用）
-report = generate_execution_report(
+report = spec_executor_report(
     execution_id="exec-abc123",
     format="changelog"  # "markdown" / "changelog" / "brief"
 )
 # -> {"report": "## [Add Caching] - 2024-01-15\n### Added\n- ..."}
 
 # ワンショット実行（仕様策定→実行準備を一括）
-workflow = run_full_workflow(
+workflow = spec_executor_run(
     target="src/api.py",
     request="キャッシュを追加したい",
     project="my-project",
@@ -469,7 +466,7 @@ workflow = run_full_workflow(
 ```
 
 **知識の蓄積:**
-- `finalize_execution`で実行結果をPrismindに保存
+- `spec_executor_finalize`で実行結果をPrismindに保存
 - カテゴリ: `実装記録`, `実装詳細`
 - 次回セッションで`resume`時に参照可能
 
