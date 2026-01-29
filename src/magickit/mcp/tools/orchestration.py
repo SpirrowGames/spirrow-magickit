@@ -17,6 +17,7 @@ from magickit.adapters.lexora import LexoraAdapter
 from magickit.config import Settings
 from magickit.mcp.tools.document import smart_create_document_impl
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -144,6 +145,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         parallel_groups: list[list[int]] | None = None,
         stop_on_error: bool = True,
         context: dict[str, Any] | None = None,
+        user: str = "",
     ) -> dict[str, Any]:
         """Execute a multi-step workflow across Spirrow services with dependency management.
 
@@ -176,6 +178,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             context: Optional initial context available to all steps.
                     Use ${output_key} in params to reference previous step outputs.
 
+            user: User identifier for multi-user support (auto-detected if empty).
+
         Returns:
             Dict containing:
             - status: "completed", "partial", or "failed"
@@ -199,6 +203,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         start_time = asyncio.get_event_loop().time()
 
         # Initialize tracking
@@ -213,6 +220,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Starting workflow",
             total_steps=len(steps),
             execution_order=execution_order,
+            user=effective_user,
         )
 
         # Execute steps
@@ -221,7 +229,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 # Single step
                 idx = batch[0]
                 result = await _execute_step(
-                    steps[idx], idx, outputs, _settings
+                    steps[idx], idx, outputs, _settings, effective_user
                 )
                 results[idx] = result
 
@@ -234,7 +242,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             else:
                 # Parallel batch
                 tasks = [
-                    _execute_step(steps[idx], idx, outputs, _settings)
+                    _execute_step(steps[idx], idx, outputs, _settings, effective_user)
                     for idx in batch
                 ]
                 batch_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -442,6 +450,7 @@ async def _execute_step(
     step_idx: int,
     outputs: dict[str, Any],
     settings: Settings,
+    user: str = "",
 ) -> dict[str, Any]:
     """Execute a single workflow step."""
 
@@ -465,7 +474,7 @@ async def _execute_step(
     )
 
     try:
-        result = await _call_service(service, action, params, settings)
+        result = await _call_service(service, action, params, settings, user)
         return {
             "status": "completed",
             "output": result,
@@ -485,6 +494,7 @@ async def _call_service(
     action: str,
     params: dict[str, Any],
     settings: Settings,
+    user: str = "",
 ) -> Any:
     """Call a specific service action."""
 
@@ -503,6 +513,8 @@ async def _call_service(
             }
             if params.get("tags") is not None:
                 kwargs["tags"] = params["tags"]
+            if user:
+                kwargs["user"] = user
             results = await adapter.search_knowledge(**kwargs)
             return "\n\n".join(r.get("content", "") for r in results)
 
@@ -515,6 +527,8 @@ async def _call_service(
             }
             if params.get("tags") is not None:
                 kwargs["tags"] = params["tags"]
+            if user:
+                kwargs["user"] = user
             return await adapter.add_knowledge(**kwargs)
 
         elif action == "get_document":
@@ -529,6 +543,7 @@ async def _call_service(
             return await adapter.get_progress(
                 project=params.get("project", ""),
                 phase=params.get("phase", ""),
+                user=user,
             )
 
         elif action == "add_task":
@@ -541,35 +556,44 @@ async def _call_service(
                 priority=params.get("priority", "medium"),
                 category=params.get("category", ""),
                 blocked_by=params.get("blocked_by"),
+                user=user,
             )
 
         elif action == "complete_task":
             return await adapter.complete_task(
                 task_id=params.get("task_id", ""),
+                phase=params.get("phase", ""),
                 project=params.get("project", ""),
                 notes=params.get("notes", ""),
+                user=user,
             )
 
         elif action == "update_task_status":
             return await adapter.update_task_status(
                 task_id=params.get("task_id", ""),
                 status=params.get("status", ""),
+                phase=params.get("phase", ""),
                 project=params.get("project", ""),
                 notes=params.get("notes", ""),
+                user=user,
             )
 
         elif action == "start_task":
             return await adapter.start_task(
                 task_id=params.get("task_id", ""),
+                phase=params.get("phase", ""),
                 project=params.get("project", ""),
                 notes=params.get("notes", ""),
+                user=user,
             )
 
         elif action == "block_task":
             return await adapter.block_task(
                 task_id=params.get("task_id", ""),
                 reason=params.get("reason", ""),
+                phase=params.get("phase", ""),
                 project=params.get("project", ""),
+                user=user,
             )
 
         # Project management actions
@@ -644,6 +668,7 @@ async def _call_service(
                 feature=params.get("feature", metadata.get("feature", "")),
                 keywords=params.get("keywords", metadata.get("keywords")),
                 auto_register_type=params.get("auto_register_type", True),
+                user=user,
             )
 
         elif action == "update_document":

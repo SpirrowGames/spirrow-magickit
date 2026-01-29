@@ -16,6 +16,7 @@ from magickit.adapters.lexora import LexoraAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -277,6 +278,7 @@ async def smart_create_document_impl(
     feature: str = "",
     keywords: list[str] | None = None,
     auto_register_type: bool = True,
+    user: str = "",
 ) -> dict[str, Any]:
     """Smart document creation that handles unknown document types.
 
@@ -298,6 +300,7 @@ async def smart_create_document_impl(
         feature: Feature name.
         keywords: Search keywords.
         auto_register_type: Whether to auto-register unknown types.
+        user: User identifier for multi-user support.
 
     Returns:
         Dict containing:
@@ -310,6 +313,9 @@ async def smart_create_document_impl(
         - matched_existing: Whether an existing type was matched semantically
         - message: Status message
     """
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
+
     prismind = PrismindAdapter(
         sse_url=settings.prismind_url,
         timeout=settings.prismind_timeout,
@@ -526,6 +532,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         feature: str = "",
         keywords: list[str] | None = None,
         auto_register_type: bool = True,
+        user: str = "",
     ) -> dict[str, Any]:
         """Create a document with automatic document type handling.
 
@@ -551,6 +558,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             feature: Optional feature name.
             keywords: Optional search keywords.
             auto_register_type: If True, auto-register unknown types (default: True).
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -576,4 +584,5 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             feature=feature,
             keywords=keywords,
             auto_register_type=auto_register_type,
+            user=user,
         )

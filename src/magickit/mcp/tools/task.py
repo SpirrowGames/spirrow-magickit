@@ -17,6 +17,7 @@ from fastmcp import FastMCP
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -192,6 +193,7 @@ async def add_task_impl(
     category: str = "",
     blocked_by: list[str] | None = None,
     project: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Add a new task with orchestration.
 
@@ -211,10 +213,14 @@ async def add_task_impl(
         category: Category (bug/feature/refactor/design/test)
         blocked_by: List of task IDs this depends on
         project: Project ID
+        user: User identifier for multi-user support
 
     Returns:
         Dict with task info and warnings
     """
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
+
     prismind = PrismindAdapter(
         sse_url=settings.prismind_url,
         timeout=settings.prismind_timeout,
@@ -224,7 +230,7 @@ async def add_task_impl(
 
     # Step 1: Get current progress for task_id generation and phase detection
     try:
-        progress = await prismind.get_progress(project=project)
+        progress = await prismind.get_progress(project=project, user=effective_user)
         all_tasks = _extract_tasks_from_progress(progress)
     except Exception as e:
         logger.warning("Failed to get progress, using T01", error=str(e))
@@ -245,6 +251,7 @@ async def add_task_impl(
             category="task",
             project=project,
             limit=3,
+            user=effective_user,
         )
         if similar:
             for item in similar:
@@ -279,6 +286,7 @@ async def add_task_impl(
             priority=priority,
             category=category,
             blocked_by=blocked_by,
+            user=effective_user,
         )
     except Exception as e:
         logger.error("Failed to add task", error=str(e))
@@ -302,6 +310,7 @@ async def add_task_impl(
             project=project,
             tags=tags,
             source=f"task:{task_id}",
+            user=effective_user,
         )
     except Exception as e:
         logger.warning("Failed to register task as knowledge", error=str(e))
@@ -327,6 +336,7 @@ async def list_tasks_impl(
     priority: str = "",
     project: str = "",
     include_blocked: bool = True,
+    user: str = "",
 ) -> dict[str, Any]:
     """List tasks with smart sorting and recommendations.
 
@@ -337,17 +347,21 @@ async def list_tasks_impl(
         priority: Filter by priority
         project: Project ID
         include_blocked: Include blocked tasks
+        user: User identifier for multi-user support
 
     Returns:
         Dict with sorted tasks, recommended task, and stats
     """
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
+
     prismind = PrismindAdapter(
         sse_url=settings.prismind_url,
         timeout=settings.prismind_timeout,
     )
 
     try:
-        progress = await prismind.get_progress(project=project, phase=phase)
+        progress = await prismind.get_progress(project=project, phase=phase, user=effective_user)
     except Exception as e:
         logger.error("Failed to get progress", error=str(e))
         return {
@@ -395,20 +409,27 @@ async def list_tasks_impl(
 async def start_task_impl(
     settings: Settings,
     task_id: str,
+    phase: str = "",
     project: str = "",
     force: bool = False,
+    user: str = "",
 ) -> dict[str, Any]:
     """Start a task with dependency check and context retrieval.
 
     Args:
         settings: Application settings
         task_id: Task ID to start
+        phase: Phase name (specify if task_id exists in multiple phases)
         project: Project ID
         force: Start even if dependencies not met
+        user: User identifier for multi-user support
 
     Returns:
         Dict with task info and related context
     """
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
+
     prismind = PrismindAdapter(
         sse_url=settings.prismind_url,
         timeout=settings.prismind_timeout,
@@ -416,7 +437,7 @@ async def start_task_impl(
 
     # Get current progress
     try:
-        progress = await prismind.get_progress(project=project)
+        progress = await prismind.get_progress(project=project, user=effective_user)
         all_tasks = _extract_tasks_from_progress(progress)
     except Exception as e:
         logger.error("Failed to get progress", error=str(e))
@@ -425,18 +446,29 @@ async def start_task_impl(
             "error": f"Failed to get task info: {e}",
         }
 
-    # Find target task
+    # Find target task (consider phase if specified)
     target_task = None
+    matching_tasks = []
     for task in all_tasks:
         if task.get("task_id") == task_id:
-            target_task = task
-            break
+            if phase and task.get("phase") != phase:
+                continue
+            matching_tasks.append(task)
 
-    if not target_task:
+    if not matching_tasks:
         return {
             "success": False,
-            "error": f"Task {task_id} not found",
+            "error": f"Task {task_id} not found" + (f" in phase {phase}" if phase else ""),
         }
+
+    if len(matching_tasks) > 1:
+        phases = [t.get("phase") for t in matching_tasks]
+        return {
+            "success": False,
+            "error": f"Task {task_id} is ambiguous (exists in phases: {phases}). Specify phase parameter.",
+        }
+
+    target_task = matching_tasks[0]
 
     # Check dependencies
     warnings: list[str] = []
@@ -458,11 +490,14 @@ async def start_task_impl(
                 }
             warnings.append(f"Starting with incomplete dependencies: {incomplete_deps}")
 
-    # Start the task
+    # Start the task (pass phase to avoid ambiguity)
+    task_phase = target_task.get("phase", "")
     try:
         result = await prismind.start_task(
             task_id=task_id,
+            phase=task_phase,
             project=project,
+            user=effective_user,
         )
     except Exception as e:
         logger.error("Failed to start task", error=str(e))
@@ -482,6 +517,7 @@ async def start_task_impl(
             query=search_query,
             project=project,
             limit=5,
+            user=effective_user,
         )
         context["related_knowledge"] = related_knowledge
 
@@ -514,22 +550,29 @@ async def start_task_impl(
 async def complete_task_impl(
     settings: Settings,
     task_id: str,
+    phase: str = "",
     notes: str = "",
     learnings: str = "",
     project: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Complete a task with knowledge recording.
 
     Args:
         settings: Application settings
         task_id: Task ID to complete
+        phase: Phase name (specify if task_id exists in multiple phases)
         notes: Completion notes
         learnings: Learnings to record as knowledge
         project: Project ID
+        user: User identifier for multi-user support
 
     Returns:
         Dict with completion info and unblocked tasks
     """
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
+
     prismind = PrismindAdapter(
         sse_url=settings.prismind_url,
         timeout=settings.prismind_timeout,
@@ -537,7 +580,7 @@ async def complete_task_impl(
 
     # Get current progress
     try:
-        progress = await prismind.get_progress(project=project)
+        progress = await prismind.get_progress(project=project, user=effective_user)
         all_tasks = _extract_tasks_from_progress(progress)
     except Exception as e:
         logger.error("Failed to get progress", error=str(e))
@@ -546,25 +589,39 @@ async def complete_task_impl(
             "error": f"Failed to get task info: {e}",
         }
 
-    # Find target task
+    # Find target task (consider phase if specified)
     target_task = None
+    matching_tasks = []
     for task in all_tasks:
         if task.get("task_id") == task_id:
-            target_task = task
-            break
+            if phase and task.get("phase") != phase:
+                continue
+            matching_tasks.append(task)
 
-    if not target_task:
+    if not matching_tasks:
         return {
             "success": False,
-            "error": f"Task {task_id} not found",
+            "error": f"Task {task_id} not found" + (f" in phase {phase}" if phase else ""),
         }
 
-    # Complete the task
+    if len(matching_tasks) > 1:
+        phases = [t.get("phase") for t in matching_tasks]
+        return {
+            "success": False,
+            "error": f"Task {task_id} is ambiguous (exists in phases: {phases}). Specify phase parameter.",
+        }
+
+    target_task = matching_tasks[0]
+
+    # Complete the task (pass phase to avoid ambiguity)
+    task_phase = target_task.get("phase", "")
     try:
         result = await prismind.complete_task(
             task_id=task_id,
+            phase=task_phase,
             project=project,
             notes=notes,
+            user=effective_user,
         )
     except Exception as e:
         logger.error("Failed to complete task", error=str(e))
@@ -592,6 +649,7 @@ async def complete_task_impl(
                 project=project,
                 tags=[task_id, phase, "completed"],
                 source=f"task:{task_id}:completion",
+                user=effective_user,
             )
         except Exception as e:
             logger.warning("Failed to record learnings", error=str(e))
@@ -636,8 +694,10 @@ async def block_task_impl(
     settings: Settings,
     task_id: str,
     reason: str,
+    phase: str = "",
     blocked_by: list[str] | None = None,
     project: str = "",
+    user: str = "",
 ) -> dict[str, Any]:
     """Block a task with reason recording.
 
@@ -645,12 +705,17 @@ async def block_task_impl(
         settings: Application settings
         task_id: Task ID to block
         reason: Reason for blocking
+        phase: Phase name (specify if task_id exists in multiple phases)
         blocked_by: Task IDs causing the block
         project: Project ID
+        user: User identifier for multi-user support
 
     Returns:
         Dict with block info and impact analysis
     """
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
+
     prismind = PrismindAdapter(
         sse_url=settings.prismind_url,
         timeout=settings.prismind_timeout,
@@ -658,7 +723,7 @@ async def block_task_impl(
 
     # Get current progress
     try:
-        progress = await prismind.get_progress(project=project)
+        progress = await prismind.get_progress(project=project, user=effective_user)
         all_tasks = _extract_tasks_from_progress(progress)
     except Exception as e:
         logger.error("Failed to get progress", error=str(e))
@@ -667,25 +732,39 @@ async def block_task_impl(
             "error": f"Failed to get task info: {e}",
         }
 
-    # Find target task
+    # Find target task (consider phase if specified)
     target_task = None
+    matching_tasks = []
     for task in all_tasks:
         if task.get("task_id") == task_id:
-            target_task = task
-            break
+            if phase and task.get("phase") != phase:
+                continue
+            matching_tasks.append(task)
 
-    if not target_task:
+    if not matching_tasks:
         return {
             "success": False,
-            "error": f"Task {task_id} not found",
+            "error": f"Task {task_id} not found" + (f" in phase {phase}" if phase else ""),
         }
 
-    # Block the task
+    if len(matching_tasks) > 1:
+        phases = [t.get("phase") for t in matching_tasks]
+        return {
+            "success": False,
+            "error": f"Task {task_id} is ambiguous (exists in phases: {phases}). Specify phase parameter.",
+        }
+
+    target_task = matching_tasks[0]
+
+    # Block the task (pass phase to avoid ambiguity)
+    task_phase = target_task.get("phase", "")
     try:
         result = await prismind.block_task(
             task_id=task_id,
             reason=reason,
+            phase=task_phase,
             project=project,
+            user=effective_user,
         )
     except Exception as e:
         logger.error("Failed to block task", error=str(e))
@@ -712,6 +791,7 @@ async def block_task_impl(
             project=project,
             tags=[task_id, phase, "blocked"],
             source=f"task:{task_id}:blocked",
+            user=effective_user,
         )
     except Exception as e:
         logger.warning("Failed to record blocker", error=str(e))
@@ -767,6 +847,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         category: str = "",
         blocked_by: list[str] | None = None,
         project: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Add a new task with automatic ID generation and validation.
 
@@ -785,6 +866,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             category: Category (bug/feature/refactor/design/test)
             blocked_by: Task IDs this depends on
             project: Project ID (empty for current)
+            user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
             Dict with task_id, warnings, and status
@@ -801,6 +883,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             category=category,
             blocked_by=blocked_by,
             project=project,
+            user=user,
         )
 
     @mcp.tool()
@@ -810,6 +893,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         priority: str = "",
         project: str = "",
         include_blocked: bool = True,
+        user: str = "",
     ) -> dict[str, Any]:
         """List tasks with smart sorting and recommendations.
 
@@ -825,6 +909,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             priority: Filter by priority (high/medium/low)
             project: Project ID (empty for current)
             include_blocked: Include blocked tasks in results
+            user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
             Dict with sorted tasks, recommended task, and stats
@@ -839,13 +924,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             priority=priority,
             project=project,
             include_blocked=include_blocked,
+            user=user,
         )
 
     @mcp.tool()
     async def start_task(
         task_id: str,
+        phase: str = "",
         project: str = "",
         force: bool = False,
+        user: str = "",
     ) -> dict[str, Any]:
         """Start a task with dependency validation and context retrieval.
 
@@ -857,8 +945,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to start (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
             project: Project ID (empty for current)
             force: Start even if dependencies incomplete
+            user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
             Dict with task info, related context, and warnings
@@ -869,16 +959,20 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         return await start_task_impl(
             settings=_settings,
             task_id=task_id,
+            phase=phase,
             project=project,
             force=force,
+            user=user,
         )
 
     @mcp.tool()
     async def complete_task(
         task_id: str,
+        phase: str = "",
         notes: str = "",
         learnings: str = "",
         project: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Complete a task with knowledge recording.
 
@@ -891,9 +985,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to complete (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
             notes: Completion notes
             learnings: Key learnings to record as knowledge
             project: Project ID (empty for current)
+            user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
             Dict with completion status, unblocked tasks, and next recommendation
@@ -904,17 +1000,21 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         return await complete_task_impl(
             settings=_settings,
             task_id=task_id,
+            phase=phase,
             notes=notes,
             learnings=learnings,
             project=project,
+            user=user,
         )
 
     @mcp.tool()
     async def block_task(
         task_id: str,
         reason: str,
+        phase: str = "",
         blocked_by: list[str] | None = None,
         project: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Block a task with reason and impact analysis.
 
@@ -928,8 +1028,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             task_id: Task ID to block (required)
             reason: Reason for blocking (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
             blocked_by: Task IDs causing the block
             project: Project ID (empty for current)
+            user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
             Dict with block status, impacted tasks, and cascade analysis
@@ -941,6 +1043,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             settings=_settings,
             task_id=task_id,
             reason=reason,
+            phase=phase,
             blocked_by=blocked_by,
             project=project,
+            user=user,
         )

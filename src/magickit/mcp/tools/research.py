@@ -15,6 +15,7 @@ from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -107,6 +108,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         tags: list[str] | None = None,
         search_limit: int = 10,
         summary_style: str = "concise",
+        user: str = "",
     ) -> dict[str, Any]:
         """Search knowledge base and compress results in a single optimized operation.
 
@@ -129,6 +131,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             tags: Optional tag filters for Prismind search.
             search_limit: Maximum number of search results to retrieve.
             summary_style: Style for summarization ("concise", "detailed", "bullet").
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -141,6 +144,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         # Step 1: Search knowledge via Prismind
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
@@ -152,6 +158,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             query=query[:50],
             limit=search_limit,
             category=category,
+            user=effective_user,
         )
 
         try:
@@ -166,6 +173,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 search_params["project"] = project
             if tags:
                 search_params["tags"] = tags
+            if effective_user:
+                search_params["user"] = effective_user
 
             raw_results = await prismind.search_knowledge(**search_params)
 
@@ -262,6 +271,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         token_budget: int = 2000,
         focus_areas: list[str] | None = None,
         include_essence: bool = True,
+        user: str = "",
     ) -> dict[str, Any]:
         """Retrieve and analyze documents with intelligent essence extraction.
 
@@ -282,6 +292,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             token_budget: Maximum tokens for the combined output.
             focus_areas: Optional areas to focus on during essence extraction.
             include_essence: Whether to extract essence (key concepts) from documents.
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -293,6 +304,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
             timeout=_settings.prismind_timeout,
@@ -303,6 +317,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Searching document catalog",
             query=query[:50],
             doc_type=doc_type,
+            user=effective_user,
         )
 
         # Build catalog search params, excluding empty values
@@ -312,6 +327,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         }
         if doc_type:
             catalog_params["doc_type"] = doc_type
+        if effective_user:
+            catalog_params["user"] = effective_user
 
         raw_catalog = await prismind.search_catalog(**catalog_params)
 

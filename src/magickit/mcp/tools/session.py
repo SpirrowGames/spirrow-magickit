@@ -14,6 +14,7 @@ from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -32,14 +33,24 @@ async def _begin_task_impl(
     project: str,
     task_description: str = "",
     max_tokens: int = 2000,
+    user: str = "",
 ) -> dict[str, Any]:
     """Internal implementation for begin_task logic.
 
     This function contains the actual implementation that both begin_task
     and resume tools delegate to.
+
+    Args:
+        project: Project identifier
+        task_description: Description of current task
+        max_tokens: Maximum tokens for context
+        user: User identifier for multi-user support
     """
     if _settings is None:
         raise RuntimeError("Settings not initialized")
+
+    # Auto-detect user if not specified
+    effective_user = user or get_current_user()
 
     prismind = PrismindAdapter(
         sse_url=_settings.prismind_url,
@@ -50,11 +61,12 @@ async def _begin_task_impl(
         "Starting task session",
         project=project,
         task_description=task_description[:50] if task_description else "",
+        user=effective_user,
     )
 
     # Step 1: Start session in Prismind
     try:
-        session_result = await prismind.start_session(project=project)
+        session_result = await prismind.start_session(project=project, user=effective_user)
         session_data = _parse_result(session_result)
     except Exception as e:
         logger.error("Failed to start session", project=project, error=str(e))
@@ -137,6 +149,7 @@ async def _begin_task_impl(
     # Build response
     response: dict[str, Any] = {
         "project": project,
+        "user": effective_user,
         "session_id": session_data.get("session_id", "") if isinstance(session_data, dict) else "",
         "current_phase": session_data.get("current_phase", "") if isinstance(session_data, dict) else "",
         "current_task": session_data.get("current_task", "") if isinstance(session_data, dict) else "",
@@ -174,6 +187,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         project: str,
         task_description: str = "",
         max_tokens: int = 2000,
+        user: str = "",
     ) -> dict[str, Any]:
         """Start a task session and restore relevant context from previous sessions.
 
@@ -191,6 +205,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project: Project identifier (e.g., "trapxtrap").
             task_description: Optional description of the current task for context retrieval.
             max_tokens: Maximum tokens for the restored context.
+            user: User identifier for multi-user support (empty for default user).
 
         Returns:
             Dict containing:
@@ -206,8 +221,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - recommended_docs: Related documents to review
             - knowledge_count: Number of relevant knowledge entries found
             - notes: Session notes from prior work
+            - user: User identifier
         """
-        return await _begin_task_impl(project, task_description, max_tokens)
+        return await _begin_task_impl(project, task_description, max_tokens, user)
 
     @mcp.tool()
     async def checkpoint(
@@ -216,6 +232,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         decisions: list[str] | None = None,
         blockers: list[str] | None = None,
         auto_extract: bool = True,
+        user: str = "",
     ) -> dict[str, Any]:
         """Save intermediate progress during a session.
 
@@ -235,6 +252,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             decisions: List of decisions made (will be saved as knowledge).
             blockers: List of current blockers or issues.
             auto_extract: If True, use Cognilens to extract essence from long summaries.
+            user: User identifier for multi-user support (empty for default user).
 
         Returns:
             Dict containing:
@@ -245,6 +263,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
+
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
 
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
@@ -259,6 +280,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Creating checkpoint",
             summary_length=len(summary),
             decisions_count=len(decisions) if decisions else 0,
+            user=effective_user,
         )
 
         # Step 1: Extract essence if summary is long
@@ -289,6 +311,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             save_args: dict[str, Any] = {"summary": processed_summary}
             if blockers:
                 save_args["blockers"] = blockers
+            save_args["user"] = effective_user
 
             await prismind.save_session(**save_args)
             saved_to.append("session")
@@ -309,6 +332,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                             category="decision",
                             project=project,
                             tags=["checkpoint", "decision"],
+                            user=effective_user,
                         )
                         knowledge_added += 1
                     except Exception as e:
@@ -338,6 +362,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         notes: str = "",
         blockers: list[str] | None = None,
         save_insights: bool = True,
+        user: str = "",
     ) -> dict[str, Any]:
         """End a session and prepare handoff for the next session.
 
@@ -357,6 +382,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             notes: Additional notes or context to pass to the next session.
             blockers: List of blockers that need resolution.
             save_insights: If True, extract and save session insights as knowledge.
+            user: User identifier for multi-user support (empty for default user).
 
         Returns:
             Dict containing:
@@ -369,6 +395,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
+
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
 
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
@@ -383,6 +412,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Performing handoff",
             next_action=next_action[:50],
             notes_length=len(notes),
+            user=effective_user,
         )
 
         # Step 1: Summarize notes if long
@@ -412,6 +442,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             }
             if blockers:
                 end_args["blockers"] = blockers
+            end_args["user"] = effective_user
 
             session_result = await prismind.end_session(**end_args)
             session_data = _parse_result(session_result)
@@ -454,6 +485,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                                     category="session_insight",
                                     project=project,
                                     tags=["handoff", "insight"],
+                                    user=effective_user,
                                 )
                                 insights_saved += 1
                             except Exception as e:
@@ -487,6 +519,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         project: str,
         detail_level: str = "standard",
         task_description: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Resume work on a project with preset detail levels.
 
@@ -501,6 +534,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project: Project identifier (e.g., "trapxtrap").
             detail_level: Amount of context to restore ("minimal", "standard", "full").
             task_description: Optional description of the task to focus context retrieval.
+            user: User identifier for multi-user support (empty for default user).
 
         Returns:
             Same structure as begin_task.
@@ -512,6 +546,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project=project,
             detail_level=detail_level,
             max_tokens=max_tokens,
+            user=user or "default",
         )
 
         # Delegate to internal implementation
@@ -519,6 +554,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project=project,
             task_description=task_description,
             max_tokens=max_tokens,
+            user=user,
         )
 
 

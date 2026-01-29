@@ -14,6 +14,7 @@ from magickit.adapters.prismind import PrismindAdapter
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -42,6 +43,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         project: str = "",
         system_prompt: str = "",
         compress_context: bool = True,
+        user: str = "",
     ) -> dict[str, Any]:
         """Generate content using RAG-enhanced context from the knowledge base.
 
@@ -67,6 +69,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project: Optional project filter for knowledge search.
             system_prompt: Optional system prompt for generation.
             compress_context: Whether to compress context if too large.
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -77,6 +80,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
+
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
 
         # Use task as context query if not provided
         if not context_query:
@@ -92,6 +98,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Searching for context",
             query=context_query[:50],
             category=category,
+            user=effective_user,
         )
 
         search_results = await prismind.search_knowledge(
@@ -99,6 +106,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             category=category,
             project=project,
             limit=10,
+            user=effective_user,
         )
 
         # Collect and dedupe context

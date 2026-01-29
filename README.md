@@ -50,6 +50,8 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `list_projects` / `init_project` | プロジェクト管理 |
 | `get_project_status` | プロジェクト詳細ステータス |
 | `smart_create_document` | スマートドキュメント作成（RAGセマンティックマッチング） |
+| `add_task` / `list_tasks` | タスク管理 |
+| `start_task` / `complete_task` / `block_task` | タスクステータス管理 |
 
 ### スマートドキュメント作成
 
@@ -87,6 +89,55 @@ steps = [
      "depends_on": [1]}
 ]
 ```
+
+## マルチユーザー対応
+
+Magickitは複数ユーザーが同時に利用できるマルチユーザー環境をサポートしています。
+
+### ユーザー識別
+
+ユーザーは以下の優先順位で自動識別されます：
+
+1. **`SPIRROW_USER` 環境変数** - 明示的な指定（最優先）
+2. **`git config user.email`** - Gitの設定から取得
+3. **OSユーザー名** - フォールバック
+
+```bash
+# 明示的にユーザーを指定する場合
+export SPIRROW_USER="alice@example.com"
+```
+
+### ツールでのユーザー指定
+
+すべてのMCPツールは `user` パラメータをサポートしています。省略時は自動検出されます。
+
+```python
+# 自動検出（推奨）
+begin_task(project="my-project")
+
+# 明示的に指定
+begin_task(project="my-project", user="alice@example.com")
+```
+
+### ユーザー別データ分離
+
+- セッション状態はユーザーごとに分離されます
+- `prismind:session:{project}:{user}` 形式でストレージキーが生成されます
+- 異なるユーザーが同じプロジェクトで作業しても、セッション状態が干渉しません
+
+### 対応ツール
+
+以下のツールがマルチユーザーに対応しています：
+
+| カテゴリ | ツール |
+|---------|--------|
+| セッション | `begin_task`, `checkpoint`, `handoff`, `resume` |
+| タスク管理 | `add_task`, `list_tasks`, `start_task`, `complete_task`, `block_task` |
+| プロジェクト | `get_project_status`, `clone_project`, `delete_project`, `restore_project` |
+| リサーチ | `research_and_summarize`, `analyze_documents` |
+| 生成 | `generate_with_context` |
+| ドキュメント | `smart_create_document` |
+| ワークフロー | `orchestrate_workflow` |
 
 ## セットアップ
 
@@ -159,7 +210,8 @@ src/magickit/
 │       ├── generation.py     # RAG強化コンテンツ生成
 │       ├── session.py   # セッション管理
 │       ├── project.py   # プロジェクト管理
-│       └── document.py  # スマートドキュメント作成
+│       ├── document.py  # スマートドキュメント作成
+│       └── task.py      # タスク管理
 ├── adapters/
 │   ├── mcp_base.py      # MCP Adapter 基底クラス
 │   ├── lexora.py        # LLM呼び出し
@@ -170,7 +222,8 @@ src/magickit/
 │   ├── dependency_graph.py  # 依存関係グラフ
 │   └── context_manager.py   # コンテキスト最適化
 └── utils/
-    └── logging.py
+    ├── logging.py
+    └── user.py           # マルチユーザー識別
 ```
 
 ## REST APIエンドポイント

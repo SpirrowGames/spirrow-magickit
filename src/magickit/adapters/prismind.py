@@ -298,17 +298,21 @@ class PrismindAdapter(MCPBaseAdapter):
         self,
         project: str = "",
         phase: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Get project progress with tasks.
 
         Args:
             project: Project ID (empty for current project)
             phase: Filter by specific phase (empty for all)
+            user: User identifier for multi-user support
 
         Returns:
             Dict containing phases and tasks
         """
         arguments: dict[str, Any] = {}
+        if user:
+            arguments["user"] = user
         if project:
             arguments["project"] = project
         if phase:
@@ -332,12 +336,14 @@ class PrismindAdapter(MCPBaseAdapter):
         priority: str = "medium",
         category: str = "",
         blocked_by: list[str] | None = None,
+        user: str = "",
     ) -> dict[str, Any]:
         """Add a new task.
 
         Args:
             phase: Phase name (e.g., "Phase 2")
             task_id: Task ID (e.g., "T01")
+            user: User identifier for multi-user support
             name: Task name
             description: Task description
             project: Project ID (empty for current)
@@ -363,12 +369,15 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["category"] = category
         if blocked_by:
             arguments["blocked_by"] = blocked_by
+        if user:
+            arguments["user"] = user
 
         logger.info(
             "Adding task via MCP",
             task_id=task_id,
             name=name,
             phase=phase,
+            user=user,
         )
 
         success, result = await self._call_tool_safe("add_task", arguments)
@@ -380,24 +389,32 @@ class PrismindAdapter(MCPBaseAdapter):
     async def start_task(
         self,
         task_id: str,
+        phase: str = "",
         project: str = "",
         notes: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Start a task (set status to in_progress).
 
         Args:
             task_id: Task ID
+            phase: Phase name (required if task_id is ambiguous across phases)
             project: Project ID (empty for current)
             notes: Optional notes
+            user: User identifier for multi-user support
 
         Returns:
             Dict with success status and message
         """
         arguments: dict[str, Any] = {"task_id": task_id}
+        if phase:
+            arguments["phase"] = phase
         if project:
             arguments["project"] = project
         if notes:
             arguments["notes"] = notes
+        if user:
+            arguments["user"] = user
 
         logger.info("Starting task via MCP", task_id=task_id)
 
@@ -410,24 +427,32 @@ class PrismindAdapter(MCPBaseAdapter):
     async def complete_task(
         self,
         task_id: str,
+        phase: str = "",
         project: str = "",
         notes: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Complete a task (set status to completed).
 
         Args:
             task_id: Task ID
+            phase: Phase name (required if task_id is ambiguous across phases)
             project: Project ID (empty for current)
             notes: Completion notes
+            user: User identifier for multi-user support
 
         Returns:
             Dict with success status and message
         """
         arguments: dict[str, Any] = {"task_id": task_id}
+        if phase:
+            arguments["phase"] = phase
         if project:
             arguments["project"] = project
         if notes:
             arguments["notes"] = notes
+        if user:
+            arguments["user"] = user
 
         logger.info("Completing task via MCP", task_id=task_id)
 
@@ -441,14 +466,18 @@ class PrismindAdapter(MCPBaseAdapter):
         self,
         task_id: str,
         reason: str,
+        phase: str = "",
         project: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Block a task with a reason.
 
         Args:
             task_id: Task ID
             reason: Reason for blocking
+            phase: Phase name (required if task_id is ambiguous across phases)
             project: Project ID (empty for current)
+            user: User identifier for multi-user support
 
         Returns:
             Dict with success status and message
@@ -457,8 +486,12 @@ class PrismindAdapter(MCPBaseAdapter):
             "task_id": task_id,
             "reason": reason,
         }
+        if phase:
+            arguments["phase"] = phase
         if project:
             arguments["project"] = project
+        if user:
+            arguments["user"] = user
 
         logger.info("Blocking task via MCP", task_id=task_id, reason=reason)
 
@@ -472,16 +505,20 @@ class PrismindAdapter(MCPBaseAdapter):
         self,
         task_id: str,
         status: str,
+        phase: str = "",
         project: str = "",
         notes: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Update task status.
 
         Args:
             task_id: Task ID
             status: New status (not_started/in_progress/completed/blocked)
+            phase: Phase name (required if task_id is ambiguous across phases)
             project: Project ID (empty for current)
             notes: Optional notes
+            user: User identifier for multi-user support
 
         Returns:
             Dict with success status and message
@@ -490,10 +527,14 @@ class PrismindAdapter(MCPBaseAdapter):
             "task_id": task_id,
             "status": status,
         }
+        if phase:
+            arguments["phase"] = phase
         if project:
             arguments["project"] = project
         if notes:
             arguments["notes"] = notes
+        if user:
+            arguments["user"] = user
 
         logger.info(
             "Updating task status via MCP",
@@ -514,6 +555,7 @@ class PrismindAdapter(MCPBaseAdapter):
         project: str = "",
         tags: list[str] | None = None,
         limit: int = 10,
+        user: str = "",
     ) -> list[dict[str, Any]]:
         """Search knowledge base.
 
@@ -523,6 +565,7 @@ class PrismindAdapter(MCPBaseAdapter):
             project: Filter by project
             tags: Filter by tags
             limit: Maximum results
+            user: User identifier for multi-user support
 
         Returns:
             List of matching knowledge entries
@@ -537,8 +580,10 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["project"] = project
         if tags:
             arguments["tags"] = tags
+        if user:
+            arguments["user"] = user
 
-        logger.info("Searching knowledge via MCP", query=query[:50])
+        logger.info("Searching knowledge via MCP", query=query[:50], user=user)
 
         success, result = await self._call_tool_safe("search_knowledge", arguments)
         if not success:
@@ -553,6 +598,7 @@ class PrismindAdapter(MCPBaseAdapter):
         project: str = "",
         tags: list[str] | None = None,
         source: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Add knowledge entry.
 
@@ -562,11 +608,14 @@ class PrismindAdapter(MCPBaseAdapter):
             project: Project ID
             tags: Tags
             source: Source reference
+            user: User identifier for multi-user support
 
         Returns:
             Dict with success status and knowledge_id
         """
         arguments: dict[str, Any] = {"content": content}
+        if user:
+            arguments["user"] = user
         if category:
             arguments["category"] = category
         if project:
@@ -581,5 +630,103 @@ class PrismindAdapter(MCPBaseAdapter):
         success, result = await self._call_tool_safe("add_knowledge", arguments)
         if not success:
             raise RuntimeError(f"add_knowledge failed: {result}")
+
+        return self._parse_json_result(result)
+
+    # === Session management methods ===
+
+    async def start_session(
+        self,
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Start a session and load saved state.
+
+        Args:
+            project: Project ID (empty for current)
+            user: User identifier for multi-user support
+
+        Returns:
+            Dict with session context (project, current_phase, current_task, etc.)
+        """
+        arguments: dict[str, Any] = {}
+        if project:
+            arguments["project"] = project
+        if user:
+            arguments["user"] = user
+
+        logger.info("Starting session via MCP", project=project, user=user)
+
+        success, result = await self._call_tool_safe("start_session", arguments)
+        if not success:
+            raise RuntimeError(f"start_session failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def end_session(
+        self,
+        next_action: str = "",
+        notes: str = "",
+        blockers: list[str] | None = None,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """End the session and save state.
+
+        Args:
+            next_action: Recommended next action for next session
+            notes: Notes to pass to next session
+            blockers: List of blockers
+            user: User identifier for multi-user support
+
+        Returns:
+            Dict with success status and session duration
+        """
+        arguments: dict[str, Any] = {}
+        if next_action:
+            arguments["next_action"] = next_action
+        if notes:
+            arguments["notes"] = notes
+        if blockers:
+            arguments["blockers"] = blockers
+        if user:
+            arguments["user"] = user
+
+        logger.info("Ending session via MCP", user=user)
+
+        success, result = await self._call_tool_safe("end_session", arguments)
+        if not success:
+            raise RuntimeError(f"end_session failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def save_session(
+        self,
+        summary: str = "",
+        blockers: list[str] | None = None,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Save session state without ending.
+
+        Args:
+            summary: Work summary
+            blockers: List of blockers
+            user: User identifier for multi-user support
+
+        Returns:
+            Dict with success status
+        """
+        arguments: dict[str, Any] = {}
+        if summary:
+            arguments["summary"] = summary
+        if blockers:
+            arguments["blockers"] = blockers
+        if user:
+            arguments["user"] = user
+
+        logger.info("Saving session via MCP", user=user)
+
+        success, result = await self._call_tool_safe("save_session", arguments)
+        if not success:
+            raise RuntimeError(f"save_session failed: {result}")
 
         return self._parse_json_result(result)

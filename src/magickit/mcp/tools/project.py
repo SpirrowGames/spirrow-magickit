@@ -16,6 +16,7 @@ from fastmcp import FastMCP
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
+from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
 
@@ -230,7 +231,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             }
 
     @mcp.tool()
-    async def get_project_status(project: str) -> dict[str, Any]:
+    async def get_project_status(project: str, user: str = "") -> dict[str, Any]:
         """Get comprehensive project status including sessions and knowledge stats.
 
         USE THIS WHEN: You need detailed status of a project including progress,
@@ -238,6 +239,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             project: Project identifier.
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -252,16 +254,19 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
             timeout=_settings.prismind_timeout,
         )
 
-        logger.info("Getting project status", project=project)
+        logger.info("Getting project status", project=project, user=effective_user)
 
         # Step 1: Get progress
         try:
-            progress_result = await prismind.get_progress(project=project)
+            progress_result = await prismind.get_progress(project=project, user=effective_user)
             progress = _parse_result(progress_result)
         except Exception as e:
             logger.warning("Failed to get progress", project=project, error=str(e))
@@ -274,6 +279,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 query="*",
                 project=project,
                 limit=100,
+                user=effective_user,
             )
             knowledge_list = _parse_list_result(knowledge_result)
             knowledge_stats["total"] = len(knowledge_list)
@@ -310,6 +316,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         source_project: str,
         new_project: str,
         include_knowledge: bool = False,
+        user: str = "",
     ) -> dict[str, Any]:
         """Clone an existing project as a template.
 
@@ -320,6 +327,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             source_project: Source project to clone from.
             new_project: Name for the new project.
             include_knowledge: If True, copy knowledge entries to new project.
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -332,6 +340,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
             timeout=_settings.prismind_timeout,
@@ -342,13 +353,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             source=source_project,
             target=new_project,
             include_knowledge=include_knowledge,
+            user=effective_user,
         )
 
         knowledge_copied = 0
 
         try:
             # Step 1: Get source project info
-            progress_result = await prismind.get_progress(project=source_project)
+            progress_result = await prismind.get_progress(project=source_project, user=effective_user)
             source_info = _parse_result(progress_result)
 
             if not source_info:
@@ -399,6 +411,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                         query="*",
                         project=source_project,
                         limit=500,
+                        user=effective_user,
                     )
                     knowledge_list = _parse_list_result(knowledge_result)
 
@@ -409,6 +422,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                                 project=new_project,
                                 category=entry.get("category", ""),
                                 tags=entry.get("tags", []),
+                                user=effective_user,
                             )
                             knowledge_copied += 1
                         except Exception:
@@ -448,6 +462,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         mode: str = "archive",
         confirm: bool = False,
         delete_drive_folder: bool = False,
+        user: str = "",
     ) -> dict[str, Any]:
         """Delete a project with specified mode.
 
@@ -463,6 +478,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             mode: Deletion mode ("archive", "archive_and_delete", "permanent").
             confirm: Required for permanent deletion.
             delete_drive_folder: If True, also permanently delete Google Drive folder (irreversible).
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -476,6 +492,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
             timeout=_settings.prismind_timeout,
@@ -485,6 +504,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Deleting project",
             project=project,
             mode=mode,
+            user=effective_user,
         )
 
         export_path = None
@@ -523,7 +543,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
             elif mode == "archive_and_delete":
                 # Export then delete
-                export_path = await _export_project_impl(project, prismind)
+                export_path = await _export_project_impl(project, prismind, effective_user)
                 delete_result = await prismind.delete_project(
                     project=project,
                     confirm=True,
@@ -613,6 +633,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def restore_project(
         project: str,
         from_export: str | None = None,
+        user: str = "",
     ) -> dict[str, Any]:
         """Restore a project from archived status or export file.
 
@@ -622,6 +643,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             project: Project identifier.
             from_export: Path to export directory (if restoring from export).
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -634,6 +656,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
             timeout=_settings.prismind_timeout,
@@ -643,6 +668,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "Restoring project",
             project=project,
             from_export=from_export,
+            user=effective_user,
         )
 
         knowledge_restored = 0
@@ -654,7 +680,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 if not export_path.exists():
                     raise FileNotFoundError(f"Export path not found: {from_export}")
 
-                result = await _import_project_impl(export_path, project, prismind)
+                result = await _import_project_impl(export_path, project, prismind, effective_user)
                 knowledge_restored = result.get("knowledge_restored", 0)
 
                 logger.info(
@@ -701,12 +727,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             }
 
 
-async def _export_project_impl(project: str, prismind: PrismindAdapter) -> Path:
+async def _export_project_impl(project: str, prismind: PrismindAdapter, user: str = "") -> Path:
     """Export project data to archive directory.
 
     Args:
         project: Project identifier.
         prismind: PrismindAdapter instance.
+        user: User identifier for multi-user support.
 
     Returns:
         Path to the export directory.
@@ -721,7 +748,7 @@ async def _export_project_impl(project: str, prismind: PrismindAdapter) -> Path:
 
     # Export project metadata
     try:
-        progress_result = await prismind.get_progress(project=project)
+        progress_result = await prismind.get_progress(project=project, user=user)
         project_data = _parse_result(progress_result)
         (export_dir / "project.json").write_text(
             json.dumps(project_data, indent=2, default=str),
@@ -737,6 +764,7 @@ async def _export_project_impl(project: str, prismind: PrismindAdapter) -> Path:
             query="*",
             project=project,
             limit=1000,
+            user=user,
         )
         knowledge_list = _parse_list_result(knowledge_result)
         (export_dir / "knowledge.json").write_text(
@@ -758,6 +786,7 @@ async def _import_project_impl(
     export_path: Path,
     project: str,
     prismind: PrismindAdapter,
+    user: str = "",
 ) -> dict[str, Any]:
     """Import project data from archive directory.
 
@@ -765,6 +794,7 @@ async def _import_project_impl(
         export_path: Path to the export directory.
         project: Target project name.
         prismind: PrismindAdapter instance.
+        user: User identifier for multi-user support.
 
     Returns:
         Dict with import statistics.
@@ -828,6 +858,7 @@ async def _import_project_impl(
                     project=project,
                     category=entry.get("category", ""),
                     tags=entry.get("tags", []),
+                    user=user,
                 )
                 add_parsed = _parse_result(add_result)
                 if add_parsed.get("error") or add_parsed.get("success") is False:
