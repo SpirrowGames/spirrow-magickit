@@ -1,4 +1,4 @@
-"""Execution tools for task decomposition and queue management.
+"""SpecExecutor: Task decomposition and execution pipeline.
 
 Provides tools for breaking down specifications into executable tasks,
 managing task queues, and tracking execution progress.
@@ -28,7 +28,7 @@ _settings: Settings | None = None
 _execution_sessions: dict[str, dict[str, Any]] = {}
 
 
-async def decompose_specification(
+async def spec_executor_decompose(
     specification: dict[str, Any],
     session_id: str = "",
     granularity: str = "medium",
@@ -202,8 +202,8 @@ JSON形式で出力してください。"""
         "estimated_steps": len(tasks),
         "next_action": {
             "instruction": (
-                "Use get_next_task to retrieve the first task, then execute it. "
-                "After completing each task, use complete_execution_task to mark it done"
+                "Use spec_executor_next_task to retrieve the first task, then execute it. "
+                "After completing each task, use spec_executor_complete_task to mark it done "
                 "and get the next one."
             ),
             "first_task": tasks[0] if tasks else None,
@@ -211,7 +211,7 @@ JSON形式で出力してください。"""
     }
 
 
-async def get_next_task(
+async def spec_executor_next_task(
     execution_id: str,
     user: str = "",
 ) -> dict[str, Any]:
@@ -221,7 +221,7 @@ async def get_next_task(
     and need to know what task to work on next.
 
     Args:
-        execution_id: Execution session ID from decompose_specification.
+        execution_id: Execution session ID from spec_executor_decompose.
         user: User identifier for multi-user support (empty for default user).
 
     Returns:
@@ -291,7 +291,7 @@ async def get_next_task(
     }
 
 
-async def complete_execution_task(
+async def spec_executor_complete_task(
     execution_id: str,
     task_id: str,
     success: bool = True,
@@ -302,13 +302,13 @@ async def complete_execution_task(
     """Mark an execution task as completed or failed.
 
     USE THIS WHEN: You've finished working on a task in an execution session
-    (from decompose_specification) and want to record the result and get the next task.
+    (from spec_executor_decompose) and want to record the result and get the next task.
 
     Note: This is different from complete_task in task.py which is for
     Prismind-backed project task management.
 
     Args:
-        execution_id: Execution session ID from decompose_specification.
+        execution_id: Execution session ID from spec_executor_decompose.
         task_id: ID of the completed task.
         success: Whether the task succeeded.
         result: Result or summary of what was done.
@@ -373,7 +373,7 @@ async def complete_execution_task(
     )
 
     # Get next task
-    next_task_result = await get_next_task(execution_id)
+    next_task_result = await spec_executor_next_task(execution_id)
 
     completed_count = len(session["completed_tasks"])
     failed_count = len(session["failed_tasks"])
@@ -398,7 +398,7 @@ async def complete_execution_task(
     }
 
 
-async def get_execution_status(
+async def spec_executor_status(
     execution_id: str,
     user: str = "",
 ) -> dict[str, Any]:
@@ -527,7 +527,7 @@ def _generate_fallback_tasks(spec_data: dict[str, Any]) -> list[dict[str, Any]]:
     return tasks
 
 
-async def finalize_execution(
+async def spec_executor_finalize(
     execution_id: str,
     project: str = "",
     save_to_knowledge: bool = True,
@@ -697,7 +697,7 @@ async def finalize_execution(
     }
 
 
-async def generate_execution_report(
+async def spec_executor_report(
     execution_id: str,
     format: str = "markdown",
     include_details: bool = True,
@@ -826,7 +826,7 @@ async def generate_execution_report(
     }
 
 
-async def run_full_workflow(
+async def spec_executor_run(
     target: str,
     request: str,
     project: str = "",
@@ -926,7 +926,7 @@ async def run_full_workflow(
                     "instruction": (
                         "Answer the questions using AskUserQuestion, then call "
                         "generate_specification with the answers, followed by "
-                        "decompose_specification to create the task list."
+                        "spec_executor_decompose to create the task list."
                     ),
                     "questions": start_result["questions"],
                 },
@@ -936,7 +936,7 @@ async def run_full_workflow(
         exec_prep = await specification.prepare_execution(spec_result, user=effective_user)
 
         # Step 3: Decompose into tasks
-        decompose_result = await decompose_specification(
+        decompose_result = await spec_executor_decompose(
             specification=spec_result,
             session_id=workflow_id,
             user=effective_user,
@@ -961,9 +961,9 @@ async def run_full_workflow(
             "next_action": {
                 "instruction": (
                     "1. Use ExitPlanMode with allowedPrompts to get permission approval\n"
-                    "2. Use get_next_task to start executing tasks\n"
-                    "3. After each task, use complete_execution_task to record results\n"
-                    "4. When done, use finalize_execution to save results"
+                    "2. Use spec_executor_next_task to start executing tasks\n"
+                    "3. After each task, use spec_executor_complete_task to record results\n"
+                    "4. When done, use spec_executor_finalize to save results"
                 ),
                 "first_task": decompose_result["tasks"][0] if decompose_result["tasks"] else None,
                 "allowed_prompts": exec_prep["allowed_prompts"],
@@ -980,7 +980,7 @@ async def run_full_workflow(
 
 
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
-    """Register execution tools with the MCP server.
+    """Register SpecExecutor tools with the MCP server.
 
     Args:
         mcp: FastMCP server instance.
@@ -989,11 +989,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     global _settings
     _settings = settings
 
-    # Register the module-level functions as MCP tools
-    mcp.tool()(decompose_specification)
-    mcp.tool()(get_next_task)
-    mcp.tool()(complete_execution_task)
-    mcp.tool()(get_execution_status)
-    mcp.tool()(finalize_execution)
-    mcp.tool()(generate_execution_report)
-    mcp.tool()(run_full_workflow)
+    # Register the SpecExecutor tools
+    mcp.tool()(spec_executor_decompose)
+    mcp.tool()(spec_executor_next_task)
+    mcp.tool()(spec_executor_complete_task)
+    mcp.tool()(spec_executor_status)
+    mcp.tool()(spec_executor_finalize)
+    mcp.tool()(spec_executor_report)
+    mcp.tool()(spec_executor_run)
