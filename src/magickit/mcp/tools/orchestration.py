@@ -528,49 +528,48 @@ async def _call_service(
         elif action == "get_progress":
             return await adapter.get_progress(
                 project=params.get("project", ""),
+                phase=params.get("phase", ""),
             )
 
         elif action == "add_task":
             return await adapter.add_task(
-                project=params.get("project", ""),
+                phase=params.get("phase", ""),
+                task_id=params.get("task_id", ""),
+                name=params.get("name", ""),
                 description=params.get("description", ""),
+                project=params.get("project", ""),
                 priority=params.get("priority", "medium"),
                 category=params.get("category", ""),
+                blocked_by=params.get("blocked_by"),
             )
 
         elif action == "complete_task":
-            # complete_task is a convenience alias for update_task_status
-            return await adapter.update_task_status(
-                project=params.get("project", ""),
+            return await adapter.complete_task(
                 task_id=params.get("task_id", ""),
-                status="completed",
+                project=params.get("project", ""),
                 notes=params.get("notes", ""),
             )
 
         elif action == "update_task_status":
             return await adapter.update_task_status(
-                project=params.get("project", ""),
                 task_id=params.get("task_id", ""),
                 status=params.get("status", ""),
+                project=params.get("project", ""),
                 notes=params.get("notes", ""),
             )
 
         elif action == "start_task":
-            # start_task is a convenience alias for update_task_status
-            return await adapter.update_task_status(
-                project=params.get("project", ""),
+            return await adapter.start_task(
                 task_id=params.get("task_id", ""),
-                status="in_progress",
+                project=params.get("project", ""),
                 notes=params.get("notes", ""),
             )
 
         elif action == "block_task":
-            # block_task is a convenience alias for update_task_status
-            return await adapter.update_task_status(
-                project=params.get("project", ""),
+            return await adapter.block_task(
                 task_id=params.get("task_id", ""),
-                status="blocked",
-                notes=params.get("reason", ""),  # reason -> notes
+                reason=params.get("reason", ""),
+                project=params.get("project", ""),
             )
 
         # Project management actions

@@ -291,3 +291,295 @@ class PrismindAdapter(MCPBaseAdapter):
             }
 
         return self._parse_json_result(result)
+
+    # === Task Management Methods ===
+
+    async def get_progress(
+        self,
+        project: str = "",
+        phase: str = "",
+    ) -> dict[str, Any]:
+        """Get project progress with tasks.
+
+        Args:
+            project: Project ID (empty for current project)
+            phase: Filter by specific phase (empty for all)
+
+        Returns:
+            Dict containing phases and tasks
+        """
+        arguments: dict[str, Any] = {}
+        if project:
+            arguments["project"] = project
+        if phase:
+            arguments["phase"] = phase
+
+        logger.info("Getting progress via MCP", project=project, phase=phase)
+
+        success, result = await self._call_tool_safe("get_progress", arguments)
+        if not success:
+            raise RuntimeError(f"get_progress failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def add_task(
+        self,
+        phase: str,
+        task_id: str,
+        name: str,
+        description: str = "",
+        project: str = "",
+        priority: str = "medium",
+        category: str = "",
+        blocked_by: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add a new task.
+
+        Args:
+            phase: Phase name (e.g., "Phase 2")
+            task_id: Task ID (e.g., "T01")
+            name: Task name
+            description: Task description
+            project: Project ID (empty for current)
+            priority: Priority level (high/medium/low)
+            category: Task category (bug/feature/refactor/design/test)
+            blocked_by: List of task IDs this task depends on
+
+        Returns:
+            Dict with success status and message
+        """
+        arguments: dict[str, Any] = {
+            "phase": phase,
+            "task_id": task_id,
+            "name": name,
+        }
+        if description:
+            arguments["description"] = description
+        if project:
+            arguments["project"] = project
+        if priority and priority != "medium":
+            arguments["priority"] = priority
+        if category:
+            arguments["category"] = category
+        if blocked_by:
+            arguments["blocked_by"] = blocked_by
+
+        logger.info(
+            "Adding task via MCP",
+            task_id=task_id,
+            name=name,
+            phase=phase,
+        )
+
+        success, result = await self._call_tool_safe("add_task", arguments)
+        if not success:
+            raise RuntimeError(f"add_task failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def start_task(
+        self,
+        task_id: str,
+        project: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Start a task (set status to in_progress).
+
+        Args:
+            task_id: Task ID
+            project: Project ID (empty for current)
+            notes: Optional notes
+
+        Returns:
+            Dict with success status and message
+        """
+        arguments: dict[str, Any] = {"task_id": task_id}
+        if project:
+            arguments["project"] = project
+        if notes:
+            arguments["notes"] = notes
+
+        logger.info("Starting task via MCP", task_id=task_id)
+
+        success, result = await self._call_tool_safe("start_task", arguments)
+        if not success:
+            raise RuntimeError(f"start_task failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def complete_task(
+        self,
+        task_id: str,
+        project: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Complete a task (set status to completed).
+
+        Args:
+            task_id: Task ID
+            project: Project ID (empty for current)
+            notes: Completion notes
+
+        Returns:
+            Dict with success status and message
+        """
+        arguments: dict[str, Any] = {"task_id": task_id}
+        if project:
+            arguments["project"] = project
+        if notes:
+            arguments["notes"] = notes
+
+        logger.info("Completing task via MCP", task_id=task_id)
+
+        success, result = await self._call_tool_safe("complete_task", arguments)
+        if not success:
+            raise RuntimeError(f"complete_task failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def block_task(
+        self,
+        task_id: str,
+        reason: str,
+        project: str = "",
+    ) -> dict[str, Any]:
+        """Block a task with a reason.
+
+        Args:
+            task_id: Task ID
+            reason: Reason for blocking
+            project: Project ID (empty for current)
+
+        Returns:
+            Dict with success status and message
+        """
+        arguments: dict[str, Any] = {
+            "task_id": task_id,
+            "reason": reason,
+        }
+        if project:
+            arguments["project"] = project
+
+        logger.info("Blocking task via MCP", task_id=task_id, reason=reason)
+
+        success, result = await self._call_tool_safe("block_task", arguments)
+        if not success:
+            raise RuntimeError(f"block_task failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def update_task_status(
+        self,
+        task_id: str,
+        status: str,
+        project: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Update task status.
+
+        Args:
+            task_id: Task ID
+            status: New status (not_started/in_progress/completed/blocked)
+            project: Project ID (empty for current)
+            notes: Optional notes
+
+        Returns:
+            Dict with success status and message
+        """
+        arguments: dict[str, Any] = {
+            "task_id": task_id,
+            "status": status,
+        }
+        if project:
+            arguments["project"] = project
+        if notes:
+            arguments["notes"] = notes
+
+        logger.info(
+            "Updating task status via MCP",
+            task_id=task_id,
+            status=status,
+        )
+
+        success, result = await self._call_tool_safe("update_task_status", arguments)
+        if not success:
+            raise RuntimeError(f"update_task_status failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def search_knowledge(
+        self,
+        query: str,
+        category: str = "",
+        project: str = "",
+        tags: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search knowledge base.
+
+        Args:
+            query: Search query
+            category: Filter by category
+            project: Filter by project
+            tags: Filter by tags
+            limit: Maximum results
+
+        Returns:
+            List of matching knowledge entries
+        """
+        arguments: dict[str, Any] = {
+            "query": query,
+            "limit": limit,
+        }
+        if category:
+            arguments["category"] = category
+        if project:
+            arguments["project"] = project
+        if tags:
+            arguments["tags"] = tags
+
+        logger.info("Searching knowledge via MCP", query=query[:50])
+
+        success, result = await self._call_tool_safe("search_knowledge", arguments)
+        if not success:
+            raise RuntimeError(f"search_knowledge failed: {result}")
+
+        return self._parse_list_result(result)
+
+    async def add_knowledge(
+        self,
+        content: str,
+        category: str = "",
+        project: str = "",
+        tags: list[str] | None = None,
+        source: str = "",
+    ) -> dict[str, Any]:
+        """Add knowledge entry.
+
+        Args:
+            content: Knowledge content
+            category: Category
+            project: Project ID
+            tags: Tags
+            source: Source reference
+
+        Returns:
+            Dict with success status and knowledge_id
+        """
+        arguments: dict[str, Any] = {"content": content}
+        if category:
+            arguments["category"] = category
+        if project:
+            arguments["project"] = project
+        if tags:
+            arguments["tags"] = tags
+        if source:
+            arguments["source"] = source
+
+        logger.info("Adding knowledge via MCP", content_length=len(content))
+
+        success, result = await self._call_tool_safe("add_knowledge", arguments)
+        if not success:
+            raise RuntimeError(f"add_knowledge failed: {result}")
+
+        return self._parse_json_result(result)
