@@ -15,7 +15,7 @@ from magickit.config import get_settings
 from magickit.utils.logging import configure_logging, get_logger
 
 # Import tool modules (will be registered via decorators)
-from magickit.mcp.tools import health, research, orchestration, generation, session, project, document
+from magickit.mcp.tools import health, research, orchestration, generation, session, project, document, specification, execution
 
 logger = get_logger(__name__)
 
@@ -51,6 +51,8 @@ rather than calling individual services separately.""",
     session.register_tools(mcp, settings)
     project.register_tools(mcp, settings)
     document.register_tools(mcp, settings)
+    specification.register_tools(mcp, settings)
+    execution.register_tools(mcp, settings)
 
     logger.info(
         "MCP server created",

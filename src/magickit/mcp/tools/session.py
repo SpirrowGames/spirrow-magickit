@@ -88,6 +88,10 @@ async def _begin_task_impl(
             blockers = session_data.get("blockers", [])
             if blockers:
                 context_parts.append(f"Blockers: {', '.join(blockers)}")
+        if session_data.get("last_summary"):
+            context_parts.append(f"Last Summary: {session_data.get('last_summary')}")
+        if session_data.get("next_action"):
+            context_parts.append(f"Next Action: {session_data.get('next_action')}")
         if session_data.get("notes"):
             context_parts.append(f"Notes: {session_data.get('notes')}")
 
@@ -138,6 +142,8 @@ async def _begin_task_impl(
         "current_task": session_data.get("current_task", "") if isinstance(session_data, dict) else "",
         "last_completed": session_data.get("last_completed", "") if isinstance(session_data, dict) else "",
         "blockers": session_data.get("blockers", []) if isinstance(session_data, dict) else [],
+        "last_summary": session_data.get("last_summary", "") if isinstance(session_data, dict) else "",
+        "next_action": session_data.get("next_action", "") if isinstance(session_data, dict) else "",
         "context": combined_context,
         "recommended_docs": session_data.get("recommended_docs", []) if isinstance(session_data, dict) else [],
         "knowledge_count": len(knowledge_list),
@@ -194,6 +200,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - current_task: Current active task
             - last_completed: Last completed task
             - blockers: List of known blockers
+            - last_summary: Summary from the last session
+            - next_action: Recommended next action from handoff
             - context: Compressed relevant context
             - recommended_docs: Related documents to review
             - knowledge_count: Number of relevant knowledge entries found
