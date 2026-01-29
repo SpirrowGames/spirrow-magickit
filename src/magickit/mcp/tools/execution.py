@@ -203,7 +203,7 @@ JSON形式で出力してください。"""
         "next_action": {
             "instruction": (
                 "Use get_next_task to retrieve the first task, then execute it. "
-                "After completing each task, use complete_task to mark it done "
+                "After completing each task, use complete_execution_task to mark it done"
                 "and get the next one."
             ),
             "first_task": tasks[0] if tasks else None,
@@ -291,7 +291,7 @@ async def get_next_task(
     }
 
 
-async def complete_task(
+async def complete_execution_task(
     execution_id: str,
     task_id: str,
     success: bool = True,
@@ -299,13 +299,16 @@ async def complete_task(
     error: str = "",
     user: str = "",
 ) -> dict[str, Any]:
-    """Mark a task as completed or failed.
+    """Mark an execution task as completed or failed.
 
-    USE THIS WHEN: You've finished working on a task and want to record
-    the result and get the next task.
+    USE THIS WHEN: You've finished working on a task in an execution session
+    (from decompose_specification) and want to record the result and get the next task.
+
+    Note: This is different from complete_task in task.py which is for
+    Prismind-backed project task management.
 
     Args:
-        execution_id: Execution session ID.
+        execution_id: Execution session ID from decompose_specification.
         task_id: ID of the completed task.
         success: Whether the task succeeded.
         result: Result or summary of what was done.
@@ -959,7 +962,7 @@ async def run_full_workflow(
                 "instruction": (
                     "1. Use ExitPlanMode with allowedPrompts to get permission approval\n"
                     "2. Use get_next_task to start executing tasks\n"
-                    "3. After each task, use complete_task to record results\n"
+                    "3. After each task, use complete_execution_task to record results\n"
                     "4. When done, use finalize_execution to save results"
                 ),
                 "first_task": decompose_result["tasks"][0] if decompose_result["tasks"] else None,
@@ -989,7 +992,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     # Register the module-level functions as MCP tools
     mcp.tool()(decompose_specification)
     mcp.tool()(get_next_task)
-    mcp.tool()(complete_task)
+    mcp.tool()(complete_execution_task)
     mcp.tool()(get_execution_status)
     mcp.tool()(finalize_execution)
     mcp.tool()(generate_execution_report)
