@@ -92,7 +92,7 @@ async def start_specification(
 
     # Step 2: Generate questions using LLM
     lexora = LexoraAdapter(
-        sse_url=_settings.lexora_url,
+        base_url=_settings.lexora_url,
         timeout=_settings.lexora_timeout,
     )
 
@@ -240,7 +240,7 @@ async def generate_specification(
 
     # Generate specification using LLM
     lexora = LexoraAdapter(
-        sse_url=_settings.lexora_url,
+        base_url=_settings.lexora_url,
         timeout=_settings.lexora_timeout,
     )
 

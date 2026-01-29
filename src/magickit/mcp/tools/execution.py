@@ -84,7 +84,7 @@ async def decompose_specification(
 
     # Generate tasks using LLM
     lexora = LexoraAdapter(
-        sse_url=_settings.lexora_url,
+        base_url=_settings.lexora_url,
         timeout=_settings.lexora_timeout,
     )
 
@@ -880,7 +880,7 @@ async def run_full_workflow(
         if auto_approve:
             # Generate basic specification directly
             lexora = LexoraAdapter(
-                sse_url=_settings.lexora_url,
+                base_url=_settings.lexora_url,
                 timeout=_settings.lexora_timeout,
             )
 
