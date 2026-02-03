@@ -171,7 +171,47 @@ magickit.acquire_lock(
 | Member | タスク実行、知識ベース読み書き |
 | Guest | 特定タスクのみ、読み取り専用 |
 
-### 7. その他の機能
+### 7. プロジェクトライフサイクル管理
+
+長期プロジェクトの全ライフサイクルをサポート。
+
+#### フェーズ管理
+```python
+# フェーズ遷移（タスク完了率チェック付き）
+advance_phase(project="my-game")
+
+# フェーズ詳細状況
+get_phase_status(project="my-game", phase="production")
+```
+
+#### マイルストーン管理
+```python
+add_milestone(project="my-game", name="Alpha", target_date="2024-03-01")
+check_milestone_status(project="my-game")  # 遅延警告
+```
+
+#### 進捗追跡・予測
+```python
+get_burndown(project="my-game")          # バーンダウンチャート
+estimate_completion(project="my-game")    # 完了予測（ベロシティベース）
+track_velocity(project="my-game")         # ベロシティ記録
+get_risk_indicators(project="my-game")    # リスク指標
+```
+
+#### 品質ゲート
+```python
+define_quality_gate(project="my-game", phase="production", criteria=[...])
+check_quality_gate(project="my-game")     # フェーズ完了条件チェック
+```
+
+#### レポート・分析
+```python
+generate_status_report(project="my-game")        # ステータスレポート
+generate_release_notes(project="my-game")        # リリースノート自動生成
+analyze_project_performance(project="my-game")   # 振り返り分析
+```
+
+### 8. その他の機能
 
 - **ドライラン / プレビュー**: 実行前に影響範囲を確認
 - **チェックポイント**: 状態の保存・復元
@@ -307,6 +347,22 @@ spirrow-magickit/
 │       │   ├── __init__.py
 │       │   ├── routes.py   # エンドポイント定義
 │       │   └── models.py   # リクエスト/レスポンスモデル
+│       ├── mcp/
+│       │   └── tools/
+│       │       ├── health.py         # ヘルスチェック
+│       │       ├── research.py       # 知識検索・要約
+│       │       ├── orchestration.py  # ルーティング・ワークフロー
+│       │       ├── generation.py     # RAG強化コンテンツ生成
+│       │       ├── session.py        # セッション管理
+│       │       ├── project.py        # プロジェクト管理
+│       │       ├── document.py       # スマートドキュメント作成
+│       │       ├── task.py           # タスク管理
+│       │       ├── specification.py  # AI駆動仕様策定
+│       │       ├── execution.py      # タスク分解・実行管理
+│       │       ├── lifecycle.py      # フェーズ・マイルストーン管理
+│       │       ├── progress.py       # 進捗追跡・予測
+│       │       ├── quality.py        # 品質ゲート
+│       │       └── reporting.py      # レポート・分析
 │       ├── core/
 │       │   ├── __init__.py
 │       │   ├── task_queue.py
@@ -392,5 +448,5 @@ spirrow-magickit/
 
 ---
 
-*Document Version: 2.0*
-*Last Updated: 2026-01-17*
+*Document Version: 2.1*
+*Last Updated: 2026-02-03*

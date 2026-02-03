@@ -52,6 +52,11 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `smart_create_document` | スマートドキュメント作成（RAGセマンティックマッチング） |
 | `add_task` / `list_tasks` | タスク管理 |
 | `start_task` / `complete_task` / `block_task` | タスクステータス管理 |
+| `advance_phase` / `set_phase` | フェーズ遷移管理 |
+| `add_milestone` / `list_milestones` | マイルストーン管理 |
+| `get_burndown` / `estimate_completion` | 進捗追跡・完了予測 |
+| `define_quality_gate` / `check_quality_gate` | 品質ゲート |
+| `generate_status_report` / `generate_release_notes` | レポート生成 |
 
 ### スマートドキュメント作成
 
@@ -72,6 +77,74 @@ smart_create_document(
 2. マッチすれば既存タイプを使用（例: "議事録" ≈ "meeting_minutes"）
 3. マッチしなければLLMでメタデータ生成 → グローバルとして登録
 4. ドキュメント作成
+
+### プロジェクトライフサイクル管理
+
+ゲーム開発など長期プロジェクトの立ち上げ→進捗管理→完了→アーカイブの全ライフサイクルをサポート。
+
+#### フェーズ・マイルストーン管理
+
+```python
+# プロジェクト初期化（テンプレート使用）
+init_project(project="my-game", template="game")
+
+# マイルストーン追加
+add_milestone(project="my-game", name="Alpha", target_date="2024-03-01", phase="production")
+add_milestone(project="my-game", name="Beta", target_date="2024-05-01", phase="polish")
+
+# フェーズ遷移（完了条件チェック付き）
+advance_phase(project="my-game")  # pre-production → production
+```
+
+#### 進捗追跡・予測
+
+```python
+# バーンダウンチャートデータ取得
+get_burndown(project="my-game", phase="production", days=14)
+
+# 完了予測（ベロシティベース）
+estimate_completion(project="my-game")
+# → {"estimated_date": "2024-03-15", "days_remaining": 30, "confidence": "medium"}
+
+# ベロシティ記録
+track_velocity(project="my-game", completed_today=3, notes="順調に進行中")
+
+# リスク指標
+get_risk_indicators(project="my-game")
+# → {"overall_risk": "low", "risk_score": 25, "indicators": [...]}
+```
+
+#### 品質ゲート
+
+```python
+# 品質ゲート定義
+define_quality_gate(
+    project="my-game",
+    phase="production",
+    criteria=[
+        {"type": "task_completion", "threshold": 80},
+        {"type": "no_critical_blockers"},
+        {"type": "milestone_achieved", "milestone": "Alpha"}
+    ]
+)
+
+# ゲートチェック
+check_quality_gate(project="my-game", phase="production")
+# → {"passed": true, "results": [...]}
+```
+
+#### レポート・分析
+
+```python
+# ステータスレポート生成
+generate_status_report(project="my-game", format="markdown")
+
+# リリースノート自動生成
+generate_release_notes(project="my-game", version="v1.0.0", from_phase="production")
+
+# 振り返り分析（LLMによるインサイト生成）
+analyze_project_performance(project="my-game", use_llm=True)
+```
 
 ### オーケストレーションワークフロー
 
@@ -138,6 +211,10 @@ begin_task(project="my-project", user="alice@example.com")
 | 生成 | `generate_with_context` |
 | ドキュメント | `smart_create_document` |
 | ワークフロー | `orchestrate_workflow` |
+| ライフサイクル | `advance_phase`, `set_phase`, `get_phase_status`, `add_milestone`, `update_milestone`, `list_milestones`, `check_milestone_status` |
+| 進捗追跡 | `get_burndown`, `estimate_completion`, `track_velocity`, `get_risk_indicators` |
+| 品質ゲート | `define_quality_gate`, `check_quality_gate`, `list_quality_gates` |
+| レポート | `generate_status_report`, `generate_release_notes`, `analyze_project_performance` |
 
 ## セットアップ
 
@@ -211,7 +288,11 @@ src/magickit/
 │       ├── session.py   # セッション管理
 │       ├── project.py   # プロジェクト管理
 │       ├── document.py  # スマートドキュメント作成
-│       └── task.py      # タスク管理
+│       ├── task.py      # タスク管理
+│       ├── lifecycle.py # フェーズ・マイルストーン管理
+│       ├── progress.py  # 進捗追跡・予測
+│       ├── quality.py   # 品質ゲート
+│       └── reporting.py # レポート・分析
 ├── adapters/
 │   ├── mcp_base.py      # MCP Adapter 基底クラス
 │   ├── lexora.py        # LLM呼び出し

@@ -56,7 +56,11 @@ src/magickit/
 │       ├── project.py   # プロジェクト管理
 │       ├── document.py  # スマートドキュメント作成
 │       ├── specification.py  # AI駆動仕様策定
-│       └── execution.py  # タスク分解・実行管理
+│       ├── execution.py  # タスク分解・実行管理
+│       ├── lifecycle.py  # フェーズ・マイルストーン管理
+│       ├── progress.py   # 進捗追跡・予測
+│       ├── quality.py    # 品質ゲート管理
+│       └── reporting.py  # レポート・分析
 ├── adapters/
 │   ├── base.py          # Adapter ABC
 │   ├── lexora.py        # LLM呼び出し
@@ -175,14 +179,61 @@ Claudeセッション間でコンテキストを維持するためのツール�
 | `checkpoint` | 作業中の中間保存、決定事項をknowledgeとして保存 |
 | `handoff` | セッション終了と次回への引き継ぎ情報保存 |
 | `resume` | `begin_task`のエイリアス（detail_levelプリセット付き） |
+| `update_progress` | 進捗更新（phase/task/blockers）軽量版 |
+
+**セッション引き継ぎの仕組み:**
+- `handoff`で`summary`と`next_action`を保存
+- 次回セッションで`begin_task`/`resume`時に`last_summary`と`next_action`を復元
+- MCP Memory Serverに状態を永続化
 
 ```python
 # 使用例
 begin_task(project="trapxtrap", task_description="射撃システム実装")
-checkpoint(summary="基本実装完了", decisions=["弾丸はプールで管理"])
-handoff(next_action="ダメージ計算の実装", notes="...")
+
+# 中間保存（進捗情報も更新可能）
+checkpoint(
+    summary="基本実装完了",
+    decisions=["弾丸はプールで管理"],
+    current_phase="Phase 2",
+    current_task="T01: 射撃システム",
+    next_action="ダメージ計算を実装"
+)
+
+# 軽量な進捗更新
+update_progress(
+    current_task="T02: ダメージ計算",
+    completed_task="T01: 射撃システム"
+)
+
+# セッション終了時の引き継ぎ
+handoff(
+    next_action="ダメージ計算の実装",
+    summary="射撃システムの基本実装完了、弾丸プール方式を採用",
+    project="trapxtrap",
+    notes="参考: docs/shooting-design.md"
+)
+
+# 次回セッション開始
 resume(project="trapxtrap", detail_level="standard")
+# → last_summary, next_action が復元される
 ```
+
+**checkpointパラメータ:**
+- `summary`: 作業サマリー
+- `project`: プロジェクトID
+- `decisions`: 決定事項リスト（knowledgeに保存）
+- `blockers`: ブロッカーリスト
+- `current_phase`: 現在のフェーズ（例: "Phase 2"）
+- `current_task`: 現在のタスク（例: "T01: 機能実装"）
+- `next_action`: 次にやること
+
+**handoffパラメータ:**
+- `next_action`: 次回セッションへの推奨アクション（必須）
+- `project`: プロジェクトID
+- `summary`: セッションのサマリー
+- `notes`: 追加メモ
+- `blockers`: ブロッカーリスト
+- `save_insights`: インサイトをknowledgeに保存するか
 
 ### リサーチ (`research.py`)
 
@@ -264,6 +315,284 @@ delete_project(project="old-project", mode="archive")
 - `game`: ゲーム開発（design, implementation, asset, bug, decision）
 - `mcp-server`: MCPサーバ開発（architecture, tool, adapter, config）
 - `web-app`: Webアプリ（frontend, backend, api, design）
+
+### ライフサイクル管理 (`lifecycle.py`)
+
+ゲーム開発プロジェクトのフェーズ遷移とマイルストーン管理。
+
+| ツール | 用途 |
+|--------|------|
+| `advance_phase` | 次フェーズへ進行（完了条件チェック付き） |
+| `set_phase` | フェーズを手動設定 |
+| `get_phase_status` | フェーズの詳細状況取得 |
+| `add_milestone` | マイルストーン追加（Alpha, Beta, Release等） |
+| `update_milestone` | マイルストーン更新（日付、ステータス） |
+| `list_milestones` | マイルストーン一覧取得 |
+| `check_milestone_status` | 達成状況確認、遅延警告 |
+
+```python
+# 使用例: フェーズ管理
+# フェーズ進行（完了率80%以上が必要）
+advance_phase(project="my-game", completion_threshold=80.0)
+# -> {"success": true, "previous_phase": "pre-production", "current_phase": "production"}
+
+# フェーズ強制進行
+advance_phase(project="my-game", force=True)
+
+# フェーズ状態確認
+get_phase_status(project="my-game", phase="production")
+# -> {"phase": "production", "stats": {"total": 10, "completed": 7}, "blockers": [...]}
+
+# 使用例: マイルストーン管理
+add_milestone(
+    project="my-game",
+    name="Alpha",
+    target_date="2024-03-01",
+    phase="production",
+    description="Initial playable version"
+)
+
+update_milestone(
+    project="my-game",
+    name="Alpha",
+    status="completed",
+    actual_date="2024-03-05"
+)
+
+# マイルストーン遅延チェック
+check_milestone_status(project="my-game")
+# -> {"at_risk": [...], "overdue": [...], "on_track": 2}
+```
+
+**advance_phaseパラメータ:**
+- `project`: プロジェクトID（必須）
+- `force`: 完了条件を無視して進行
+- `completion_threshold`: 最低完了率（デフォルト80%）
+
+**マイルストーンステータス:**
+- `pending`: 未開始
+- `in_progress`: 進行中
+- `completed`: 完了
+- `delayed`: 遅延
+
+### 進捗追跡 (`progress.py`)
+
+バーンダウンチャート、完了予測、リスク分析。
+
+| ツール | 用途 |
+|--------|------|
+| `get_burndown` | バーンダウンチャートデータ取得 |
+| `estimate_completion` | 完了予測日計算（ベロシティベース） |
+| `track_velocity` | タスク完了速度の追跡・記録 |
+| `get_risk_indicators` | リスク指標（遅延警告、ブロッカー数等） |
+
+```python
+# バーンダウンデータ取得
+get_burndown(project="my-game", phase="production", days=14)
+# -> {
+#   "data_points": [{"date": "2024-01-15", "remaining": 25, "completed_today": 3}, ...],
+#   "current_velocity": 2.5,
+#   "ideal_burndown": [...]
+# }
+
+# 完了予測
+estimate_completion(project="my-game")
+# -> {
+#   "estimated_date": "2024-03-15",
+#   "days_remaining": 45,
+#   "current_velocity": 2.1,
+#   "confidence": "high",
+#   "factors": ["Based on 7+ days of data"]
+# }
+
+# 毎日のベロシティ記録（作業終了時に呼び出し）
+track_velocity(project="my-game", completed_today=3, notes="集中できた日")
+# -> {"rolling_average": 2.8, "remaining_tasks": 22}
+
+# リスク分析
+get_risk_indicators(project="my-game")
+# -> {
+#   "overall_risk": "medium",
+#   "risk_score": 35,
+#   "indicators": [
+#     {"type": "blocked_tasks", "severity": "medium", "value": "2/20"},
+#     {"type": "velocity_stable", "severity": "low", "value": "2.5/day"}
+#   ],
+#   "recommendations": ["Address blocked tasks before they become critical"]
+# }
+```
+
+**リスクレベル:**
+- `low` (0-19): 健全な状態
+- `medium` (20-39): 注意が必要
+- `high` (40-59): 対策が必要
+- `critical` (60+): 即座の対応が必要
+
+**リスク指標:**
+- ブロックされたタスク比率
+- ベロシティトレンド（前週比）
+- マイルストーン遅延
+- フェーズ完了状況
+
+### 品質ゲート (`quality.py`)
+
+フェーズ遷移前の品質チェック条件を定義・評価。
+
+| ツール | 用途 |
+|--------|------|
+| `define_quality_gate` | フェーズ完了条件の定義 |
+| `check_quality_gate` | 条件達成チェック |
+| `list_quality_gates` | 定義済みゲート一覧 |
+
+```python
+# 品質ゲート定義
+define_quality_gate(
+    project="my-game",
+    phase="production",
+    name="Production Ready Gate",
+    criteria=[
+        {"type": "task_completion", "threshold": 90, "description": "90% tasks completed"},
+        {"type": "no_blockers", "description": "No blocked tasks"},
+        {"type": "milestone_achieved", "milestone": "Alpha", "description": "Alpha milestone achieved"}
+    ]
+)
+
+# 品質ゲートチェック
+check_quality_gate(project="my-game", phase="production")
+# -> {
+#   "passed": false,
+#   "results": [
+#     {"type": "task_completion", "passed": true, "details": "92% complete (threshold: 90%)"},
+#     {"type": "no_blockers", "passed": false, "details": "2 blocked task(s)"},
+#     {"type": "milestone_achieved", "passed": true, "details": "Milestone status: completed"}
+#   ],
+#   "passed_count": 2,
+#   "failed_count": 1
+# }
+```
+
+**条件タイプ:**
+- `task_completion`: タスク完了率（threshold指定）
+- `no_blockers`: ブロックされたタスクがない
+- `no_critical_blockers`: 高優先度のブロッカーがない
+- `all_bugs_resolved`: バグカテゴリのタスクが全て完了
+- `milestone_achieved`: 指定マイルストーンが完了
+- `custom`: 手動確認が必要なカスタム条件
+
+**デフォルトゲート（未定義時）:**
+- pre-production: 80%完了、クリティカルブロッカーなし
+- production: 90%完了、ブロッカーなし
+- polish: 95%完了、バグ解決、ブロッカーなし
+- release: 100%完了、ブロッカーなし、Releaseマイルストーン達成
+
+### レポート・分析 (`reporting.py`)
+
+ステータスレポート、リリースノート、振り返り分析。
+
+| ツール | 用途 |
+|--------|------|
+| `generate_status_report` | ステークホルダー向けレポート |
+| `generate_release_notes` | リリースノート自動生成 |
+| `analyze_project_performance` | 振り返り分析、教訓抽出 |
+
+```python
+# ステータスレポート生成
+generate_status_report(
+    project="my-game",
+    format="markdown",  # "markdown" / "text" / "json"
+    include_tasks=True,
+    include_milestones=True,
+    include_risks=True
+)
+# -> {
+#   "report": "# Project Status Report: my-game\n\n## Overview\n- **Current Phase:** production\n...",
+#   "metrics": {"total_tasks": 50, "completed_tasks": 35, "completion_percent": 70.0}
+# }
+
+# リリースノート生成
+generate_release_notes(
+    project="my-game",
+    version="v1.0.0",
+    from_phase="production"  # このフェーズ以降の完了タスクを含む
+)
+# -> {
+#   "release_notes": "# Release Notes - v1.0.0\n\n## New Features\n- **射撃システム**\n...",
+#   "features_count": 5,
+#   "fixes_count": 3
+# }
+
+# 振り返り分析
+analyze_project_performance(project="my-game", use_llm=True)
+# -> {
+#   "insights": [
+#     "Velocity improved significantly over time",
+#     "5 blockers were recorded during the project",
+#     "Most common task category: implementation (25 tasks)"
+#   ],
+#   "metrics": {"completion_rate": 85.0, "average_velocity": 2.5},
+#   "recommendations": ["Implement better blocker prevention"],
+#   "narrative": "The project showed strong progress..."  # LLM生成
+# }
+```
+
+**レポートフォーマット:**
+- `markdown`: GitHub-flavored Markdown（推奨）
+- `text`: プレーンテキスト
+- `json`: 構造化データ
+
+**リリースノートのカテゴリ分類:**
+- `feature` / `implementation` → New Features
+- `bug` → Bug Fixes
+- `refactor` / `improvement` / `polish` → Improvements
+- その他 → Other Changes
+
+## ゲーム開発ワークフロー例
+
+完全なプロジェクトライフサイクルの例：
+
+```python
+# 1. プロジェクト立ち上げ
+init_project(project="my-game", template="game")
+add_milestone(project="my-game", name="Alpha", target_date="2024-03-01", phase="production")
+add_milestone(project="my-game", name="Beta", target_date="2024-05-01", phase="polish")
+add_milestone(project="my-game", name="Release", target_date="2024-06-15", phase="release")
+
+# 2. 品質ゲート設定
+define_quality_gate(
+    project="my-game",
+    phase="pre-production",
+    criteria=[
+        {"type": "task_completion", "threshold": 80},
+        {"type": "no_critical_blockers"}
+    ]
+)
+
+# 3. 日々の作業
+begin_task(project="my-game", task_description="射撃システム実装")
+# ... 作業 ...
+track_velocity(project="my-game", completed_today=3)
+checkpoint(summary="射撃システム基本実装完了", project="my-game")
+
+# 4. 進捗確認
+get_burndown(project="my-game", phase="production")
+estimate_completion(project="my-game")
+get_risk_indicators(project="my-game")
+
+# 5. フェーズ遷移
+check_quality_gate(project="my-game", phase="pre-production")
+advance_phase(project="my-game")  # pre-production → production
+
+# 6. マイルストーン確認
+check_milestone_status(project="my-game")
+
+# 7. レポート
+generate_status_report(project="my-game", format="markdown")
+generate_release_notes(project="my-game", version="v0.1.0-alpha")
+
+# 8. 完了・振り返り
+analyze_project_performance(project="my-game", use_llm=True)
+delete_project(project="my-game", mode="archive")
+```
 
 ### ドキュメント管理 (`document.py`)
 

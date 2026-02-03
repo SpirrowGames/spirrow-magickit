@@ -231,6 +231,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         project: str = "",
         decisions: list[str] | None = None,
         blockers: list[str] | None = None,
+        current_phase: str = "",
+        current_task: str = "",
+        next_action: str = "",
         auto_extract: bool = True,
         user: str = "",
     ) -> dict[str, Any]:
@@ -251,6 +254,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project: Project identifier for saving decisions.
             decisions: List of decisions made (will be saved as knowledge).
             blockers: List of current blockers or issues.
+            current_phase: Update the current phase (e.g., "Phase 2").
+            current_task: Update the current task (e.g., "T01: Implement feature").
+            next_action: What to do next (saved for session continuity).
             auto_extract: If True, use Cognilens to extract essence from long summaries.
             user: User identifier for multi-user support (empty for default user).
 
@@ -311,6 +317,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             save_args: dict[str, Any] = {"summary": processed_summary}
             if blockers:
                 save_args["blockers"] = blockers
+            if current_phase:
+                save_args["current_phase"] = current_phase
+            if current_task:
+                save_args["current_task"] = current_task
+            if next_action:
+                save_args["next_action"] = next_action
+            if project:
+                save_args["project"] = project
             save_args["user"] = effective_user
 
             await prismind.save_session(**save_args)
@@ -359,6 +373,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def handoff(
         next_action: str,
         project: str = "",
+        summary: str = "",
         notes: str = "",
         blockers: list[str] | None = None,
         save_insights: bool = True,
@@ -378,7 +393,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             next_action: The recommended next step for the following session.
-            project: Project identifier for saving insights.
+            project: Project identifier for saving insights and session state.
+            summary: Summary of work done in this session.
             notes: Additional notes or context to pass to the next session.
             blockers: List of blockers that need resolution.
             save_insights: If True, extract and save session insights as knowledge.
@@ -440,14 +456,18 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "next_action": next_action,
                 "notes": processed_notes,
             }
+            if summary:
+                end_args["summary"] = summary
             if blockers:
                 end_args["blockers"] = blockers
+            if project:
+                end_args["project"] = project
             end_args["user"] = effective_user
 
             session_result = await prismind.end_session(**end_args)
             session_data = _parse_result(session_result)
             saved_to.append("session")
-            logger.info("Session ended")
+            logger.info("Session ended", project=project)
         except Exception as e:
             logger.error("Failed to end session", error=str(e))
             return {
@@ -556,6 +576,84 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             max_tokens=max_tokens,
             user=user,
         )
+
+    @mcp.tool()
+    async def update_progress(
+        project: str = "",
+        current_phase: str = "",
+        current_task: str = "",
+        completed_task: str = "",
+        blockers: list[str] | None = None,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Update progress in the current session.
+
+        USE THIS WHEN: You want to update the current phase/task without saving
+        a full checkpoint. Use this for lightweight progress tracking.
+
+        DO NOT USE WHEN:
+        - You want to save a summary or notes → use checkpoint
+        - You're ending the session → use handoff
+
+        Args:
+            project: Project identifier (uses current if empty).
+            current_phase: New current phase (e.g., "Phase 2").
+            current_task: New current task (e.g., "T01: Implement feature").
+            completed_task: Task that was just completed.
+            blockers: Updated list of blockers.
+            user: User identifier for multi-user support (empty for default user).
+
+        Returns:
+            Dict containing:
+            - success: Whether the update was saved
+            - saved_to: List of storage locations used
+            - message: Status message
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
+        prismind = PrismindAdapter(
+            sse_url=_settings.prismind_url,
+            timeout=_settings.prismind_timeout,
+        )
+
+        logger.info(
+            "Updating progress",
+            project=project,
+            current_phase=current_phase,
+            current_task=current_task,
+            completed_task=completed_task,
+            user=effective_user,
+        )
+
+        try:
+            result = await prismind.update_progress(
+                current_phase=current_phase,
+                current_task=current_task,
+                completed_task=completed_task,
+                blockers=blockers,
+                project=project,
+                user=effective_user,
+            )
+
+            saved_to = result.get("saved_to", [])
+            message = result.get("message", "Progress updated successfully")
+
+            return {
+                "success": True,
+                "saved_to": saved_to,
+                "message": message,
+            }
+        except Exception as e:
+            logger.error("Failed to update progress", error=str(e))
+            return {
+                "success": False,
+                "saved_to": [],
+                "message": f"Failed to update progress: {e}",
+            }
 
 
 def _parse_result(result: Any) -> dict[str, Any]:

@@ -665,33 +665,41 @@ class PrismindAdapter(MCPBaseAdapter):
 
     async def end_session(
         self,
+        summary: str = "",
         next_action: str = "",
-        notes: str = "",
         blockers: list[str] | None = None,
+        notes: str = "",
+        project: str = "",
         user: str = "",
     ) -> dict[str, Any]:
         """End the session and save state.
 
         Args:
+            summary: Work summary for this session
             next_action: Recommended next action for next session
-            notes: Notes to pass to next session
             blockers: List of blockers
+            notes: Notes to pass to next session
+            project: Project ID (uses current if empty)
             user: User identifier for multi-user support
 
         Returns:
             Dict with success status and session duration
         """
         arguments: dict[str, Any] = {}
+        if summary:
+            arguments["summary"] = summary
         if next_action:
             arguments["next_action"] = next_action
-        if notes:
-            arguments["notes"] = notes
         if blockers:
             arguments["blockers"] = blockers
+        if notes:
+            arguments["notes"] = notes
+        if project:
+            arguments["project"] = project
         if user:
             arguments["user"] = user
 
-        logger.info("Ending session via MCP", user=user)
+        logger.info("Ending session via MCP", project=project, user=user)
 
         success, result = await self._call_tool_safe("end_session", arguments)
         if not success:
@@ -702,14 +710,24 @@ class PrismindAdapter(MCPBaseAdapter):
     async def save_session(
         self,
         summary: str = "",
+        next_action: str = "",
         blockers: list[str] | None = None,
+        notes: str = "",
+        current_phase: str = "",
+        current_task: str = "",
+        project: str = "",
         user: str = "",
     ) -> dict[str, Any]:
         """Save session state without ending.
 
         Args:
             summary: Work summary
+            next_action: What to do next
             blockers: List of blockers
+            notes: Notes
+            current_phase: Update current phase
+            current_task: Update current task
+            project: Project ID (uses current if empty)
             user: User identifier for multi-user support
 
         Returns:
@@ -718,15 +736,74 @@ class PrismindAdapter(MCPBaseAdapter):
         arguments: dict[str, Any] = {}
         if summary:
             arguments["summary"] = summary
+        if next_action:
+            arguments["next_action"] = next_action
         if blockers:
             arguments["blockers"] = blockers
+        if notes:
+            arguments["notes"] = notes
+        if current_phase:
+            arguments["current_phase"] = current_phase
+        if current_task:
+            arguments["current_task"] = current_task
+        if project:
+            arguments["project"] = project
         if user:
             arguments["user"] = user
 
-        logger.info("Saving session via MCP", user=user)
+        logger.info("Saving session via MCP", project=project, user=user)
 
         success, result = await self._call_tool_safe("save_session", arguments)
         if not success:
             raise RuntimeError(f"save_session failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def update_progress(
+        self,
+        current_phase: str = "",
+        current_task: str = "",
+        completed_task: str = "",
+        blockers: list[str] | None = None,
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Update progress in the session.
+
+        Args:
+            current_phase: New current phase
+            current_task: New current task
+            completed_task: Task that was just completed
+            blockers: Updated blockers
+            project: Project ID (uses current if empty)
+            user: User identifier for multi-user support
+
+        Returns:
+            Dict with success status
+        """
+        arguments: dict[str, Any] = {}
+        if current_phase:
+            arguments["current_phase"] = current_phase
+        if current_task:
+            arguments["current_task"] = current_task
+        if completed_task:
+            arguments["completed_task"] = completed_task
+        if blockers is not None:
+            arguments["blockers"] = blockers
+        if project:
+            arguments["project"] = project
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Updating progress via MCP",
+            project=project,
+            current_phase=current_phase,
+            current_task=current_task,
+        )
+
+        success, result = await self._call_tool_safe("update_progress", arguments)
+        if not success:
+            raise RuntimeError(f"update_progress failed: {result}")
 
         return self._parse_json_result(result)
