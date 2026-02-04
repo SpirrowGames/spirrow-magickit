@@ -10,6 +10,7 @@ Provides orchestrated task management with smart features:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastmcp import FastMCP
@@ -20,6 +21,30 @@ from magickit.utils.logging import get_logger
 from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
+
+
+def _parse_json_result(result: Any) -> dict[str, Any]:
+    """Parse tool result to dict.
+
+    Args:
+        result: Raw result from MCP call (may be string, dict, or other)
+
+    Returns:
+        Parsed dict
+    """
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                return data
+            return {"result": data}
+        except json.JSONDecodeError:
+            return {"result": result}
+    return {"result": result}
 
 # Module-level settings reference
 _settings: Settings | None = None
@@ -858,13 +883,14 @@ async def get_task_impl(
 
     # Get task from Prismind
     try:
-        result = await prismind.call(
+        raw_result = await prismind.call(
             "get_task",
             task_id=task_id,
             phase=phase,
             project=project,
             user=effective_user,
         )
+        result = _parse_json_result(raw_result)
     except Exception as e:
         logger.error("Failed to get task", error=str(e))
         return {
@@ -886,9 +912,9 @@ async def get_task_impl(
     # Get related knowledge if requested
     if include_related_knowledge:
         try:
-            task = result.get("task", {})
-            task_name = task.get("name", "")
-            task_notes = task.get("notes", "")
+            task = result.get("task") or {}
+            task_name = task.get("name", "") if isinstance(task, dict) else ""
+            task_notes = task.get("notes", "") if isinstance(task, dict) else ""
             search_query = f"{task_name} {task_notes}"[:200]
 
             related = await prismind.search_knowledge(
@@ -954,13 +980,14 @@ async def delete_task_impl(
 
     # Delete task via Prismind
     try:
-        result = await prismind.call(
+        raw_result = await prismind.call(
             "delete_task",
             task_id=task_id,
             phase=phase,
             project=project,
             user=effective_user,
         )
+        result = _parse_json_result(raw_result)
     except Exception as e:
         logger.error("Failed to delete task", error=str(e))
         return {
@@ -1039,7 +1066,7 @@ async def update_task_impl(
 
     # Update task via Prismind
     try:
-        result = await prismind.call(
+        raw_result = await prismind.call(
             "update_task",
             task_id=task_id,
             phase=phase,
@@ -1054,6 +1081,7 @@ async def update_task_impl(
             project=project,
             user=effective_user,
         )
+        result = _parse_json_result(raw_result)
     except Exception as e:
         logger.error("Failed to update task", error=str(e))
         return {
