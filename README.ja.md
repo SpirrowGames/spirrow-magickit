@@ -61,7 +61,9 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `check_document_consistency` | 整合性チェック |
 | `cleanup_documents` | バッチクリーンアップ |
 | `add_task` / `list_tasks` | タスク管理 |
+| `get_task` / `update_task` / `delete_task` | タスク操作（取得・更新・削除） |
 | `start_task` / `complete_task` / `block_task` | タスクステータス管理 |
+| `move_task_to_phase` / `set_task_priority` / `set_task_blockers` | ショートカット |
 | `advance_phase` / `set_phase` | フェーズ遷移管理 |
 | `add_milestone` / `list_milestones` | マイルストーン管理 |
 | `get_burndown` / `estimate_completion` | 進捗追跡・完了予測 |

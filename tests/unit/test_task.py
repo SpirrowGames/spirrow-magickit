@@ -542,6 +542,334 @@ class TestBlockTask:
             assert result["total_impacted"] == 2
 
 
+class TestGetTask:
+    """Tests for get_task tool."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Setup test fixtures."""
+        self.mock_settings = MagicMock()
+        self.mock_settings.prismind_url = "http://localhost:8112"
+        self.mock_settings.prismind_timeout = 30.0
+        task._settings = self.mock_settings
+
+    @pytest.mark.asyncio
+    async def test_get_task_success(self):
+        """Test successful task retrieval."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task": {
+                    "task_id": "T01",
+                    "name": "Task 1",
+                    "status": "in_progress",
+                    "priority": "high",
+                },
+                "phase": "Phase 1",
+                "project": "test-project",
+                "message": "Task retrieved",
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.get_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+            )
+
+            assert result["success"] is True
+            assert result["task"]["task_id"] == "T01"
+            assert result["phase"] == "Phase 1"
+
+    @pytest.mark.asyncio
+    async def test_get_task_with_knowledge(self):
+        """Test get_task with related knowledge."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task": {
+                    "task_id": "T01",
+                    "name": "Task 1",
+                    "notes": "Important notes",
+                },
+                "phase": "Phase 1",
+                "project": "test-project",
+            })
+            mock_adapter.search_knowledge = AsyncMock(return_value=[
+                {"content": "Related knowledge 1"},
+            ])
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.get_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                include_related_knowledge=True,
+            )
+
+            assert result["success"] is True
+            assert "related_knowledge" in result
+            mock_adapter.search_knowledge.assert_called_once()
+
+
+class TestDeleteTask:
+    """Tests for delete_task tool."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Setup test fixtures."""
+        self.mock_settings = MagicMock()
+        self.mock_settings.prismind_url = "http://localhost:8112"
+        self.mock_settings.prismind_timeout = 30.0
+        task._settings = self.mock_settings
+
+    @pytest.mark.asyncio
+    async def test_delete_task_success(self):
+        """Test successful task deletion."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.get_progress = AsyncMock(return_value={
+                "phases": [{
+                    "phase": "Phase 1",
+                    "tasks": [
+                        {"task_id": "T01", "name": "Task 1"},
+                    ],
+                }],
+            })
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task_id": "T01",
+                "phase": "Phase 1",
+                "project": "test-project",
+                "dependent_tasks_updated": [],
+                "message": "Task deleted",
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.delete_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+            )
+
+            assert result["success"] is True
+            assert result["task_id"] == "T01"
+
+    @pytest.mark.asyncio
+    async def test_delete_task_with_dependencies_no_cascade(self):
+        """Test delete_task fails with dependencies when cascade is disabled."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.get_progress = AsyncMock(return_value={
+                "phases": [{
+                    "phase": "Phase 1",
+                    "tasks": [
+                        {"task_id": "T01", "name": "Task 1"},
+                        {"task_id": "T02", "blocked_by": ["T01"]},
+                    ],
+                }],
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.delete_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                cascade_unblock=False,
+            )
+
+            assert result["success"] is False
+            assert "impacted_tasks" in result
+
+
+class TestUpdateTask:
+    """Tests for update_task tool."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Setup test fixtures."""
+        self.mock_settings = MagicMock()
+        self.mock_settings.prismind_url = "http://localhost:8112"
+        self.mock_settings.prismind_timeout = 30.0
+        task._settings = self.mock_settings
+
+    @pytest.mark.asyncio
+    async def test_update_task_success(self):
+        """Test successful task update."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task_id": "T01",
+                "project": "test-project",
+                "updated_fields": ["name", "priority"],
+                "phase_moved": False,
+                "old_phase": "Phase 1",
+                "new_phase": "Phase 1",
+                "message": "Task updated",
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.update_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                name="New Name",
+                priority="high",
+            )
+
+            assert result["success"] is True
+            assert "name" in result["updated_fields"]
+            assert "priority" in result["updated_fields"]
+
+    @pytest.mark.asyncio
+    async def test_update_task_phase_move(self):
+        """Test task phase move."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task_id": "T01",
+                "project": "test-project",
+                "updated_fields": ["phase"],
+                "phase_moved": True,
+                "old_phase": "Phase 1",
+                "new_phase": "Phase 2",
+                "message": "Task moved",
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.update_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                new_phase="Phase 2",
+            )
+
+            assert result["success"] is True
+            assert result["phase_moved"] is True
+            assert result["new_phase"] == "Phase 2"
+
+    @pytest.mark.asyncio
+    async def test_update_task_invalid_dependency(self):
+        """Test update_task fails with invalid dependency."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.get_progress = AsyncMock(return_value={
+                "phases": [{
+                    "phase": "Phase 1",
+                    "tasks": [
+                        {"task_id": "T01", "name": "Task 1"},
+                    ],
+                }],
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.update_task_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                blocked_by=["T99"],  # Non-existent task
+            )
+
+            assert result["success"] is False
+            assert "Invalid blocked_by task IDs" in result["error"]
+
+
+class TestShortcutTools:
+    """Tests for shortcut/convenience tools."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Setup test fixtures."""
+        self.mock_settings = MagicMock()
+        self.mock_settings.prismind_url = "http://localhost:8112"
+        self.mock_settings.prismind_timeout = 30.0
+        task._settings = self.mock_settings
+
+    @pytest.mark.asyncio
+    async def test_move_task_to_phase(self):
+        """Test move_task_to_phase shortcut."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task_id": "T01",
+                "phase_moved": True,
+                "old_phase": "Phase 1",
+                "new_phase": "Phase 2",
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.move_task_to_phase_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                from_phase="Phase 1",
+                to_phase="Phase 2",
+            )
+
+            assert result["success"] is True
+            assert result["phase_moved"] is True
+
+    @pytest.mark.asyncio
+    async def test_set_task_priority(self):
+        """Test set_task_priority shortcut."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task_id": "T01",
+                "updated_fields": ["priority"],
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.set_task_priority_impl(
+                settings=self.mock_settings,
+                task_id="T01",
+                priority="high",
+            )
+
+            assert result["success"] is True
+            assert "priority" in result["updated_fields"]
+
+    @pytest.mark.asyncio
+    async def test_set_task_priority_invalid(self):
+        """Test set_task_priority with invalid priority."""
+        result = await task.set_task_priority_impl(
+            settings=self.mock_settings,
+            task_id="T01",
+            priority="invalid",
+        )
+
+        assert result["success"] is False
+        assert "Invalid priority" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_set_task_blockers(self):
+        """Test set_task_blockers shortcut."""
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.get_progress = AsyncMock(return_value={
+                "phases": [{
+                    "phase": "Phase 1",
+                    "tasks": [
+                        {"task_id": "T01"},
+                        {"task_id": "T02"},
+                    ],
+                }],
+            })
+            mock_adapter.call = AsyncMock(return_value={
+                "success": True,
+                "task_id": "T02",
+                "updated_fields": ["blocked_by"],
+            })
+            mock_adapter_class.return_value = mock_adapter
+
+            result = await task.set_task_blockers_impl(
+                settings=self.mock_settings,
+                task_id="T02",
+                blocked_by=["T01"],
+            )
+
+            assert result["success"] is True
+            assert "blocked_by" in result["updated_fields"]
+
+
 class TestRegisterTools:
     """Tests for tool registration."""
 
@@ -552,5 +880,5 @@ class TestRegisterTools:
 
         task.register_tools(mock_mcp, mock_settings)
 
-        # Should register 5 tools
-        assert mock_mcp.tool.call_count == 5
+        # Should register 11 tools (5 original + 3 new + 3 shortcuts)
+        assert mock_mcp.tool.call_count == 11

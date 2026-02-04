@@ -58,6 +58,7 @@ src/magickit/
 │       ├── document_maintenance.py  # ドキュメント整合性・クリーンアップ
 │       ├── specification.py  # AI駆動仕様策定
 │       ├── execution.py  # タスク分解・実行管理
+│       ├── task.py       # タスク管理（追加・更新・削除・移動）
 │       ├── lifecycle.py  # フェーズ・マイルストーン管理
 │       ├── progress.py   # 進捗追跡・予測
 │       ├── quality.py    # 品質ゲート管理
@@ -258,6 +259,9 @@ resume(project="trapxtrap", detail_level="standard")
 | `get_document` | query, doc_id, doc_type | ドキュメント取得 |
 | `get_progress` | project | プロジェクト進捗取得 |
 | `add_task` | project, description, priority, category | タスク追加 |
+| `get_task` | task_id, phase, project | 単一タスク取得 |
+| `delete_task` | task_id, phase, project | タスク削除（blocked_by参照自動クリーンアップ） |
+| `update_task` | task_id, phase, name, description, status, priority, category, blocked_by, blockers, new_phase, project | タスク包括更新（フェーズ移動対応） |
 | `complete_task` | project, task_id, notes | タスク完了（→ update_task_status） |
 | `start_task` | project, task_id, notes | タスク開始（→ update_task_status） |
 | `block_task` | project, task_id, reason | タスクブロック（→ update_task_status） |
@@ -316,6 +320,83 @@ delete_project(project="old-project", mode="archive")
 - `game`: ゲーム開発（design, implementation, asset, bug, decision）
 - `mcp-server`: MCPサーバ開発（architecture, tool, adapter, config）
 - `web-app`: Webアプリ（frontend, backend, api, design）
+
+### タスク管理 (`task.py`)
+
+プロジェクトタスクの包括的な管理ツール。依存関係の検証、knowledge連携、影響分析を含む。
+
+| ツール | 用途 |
+|--------|------|
+| `add_task` | タスク追加（ID自動生成、重複検出、依存関係検証） |
+| `list_tasks` | タスク一覧（フィルタリング、スマートソート、推奨タスク） |
+| `get_task` | 単一タスク詳細取得（関連knowledge含む） |
+| `start_task` | タスク開始（依存関係チェック、コンテキスト取得） |
+| `complete_task` | タスク完了（learnings記録、アンブロック検出） |
+| `block_task` | タスクブロック（影響分析、カスケード効果） |
+| `delete_task` | タスク削除（依存関係クリーンアップ） |
+| `update_task` | タスク更新（全フィールド対応、フェーズ移動） |
+| `move_task_to_phase` | フェーズ間移動のショートカット |
+| `set_task_priority` | 優先度設定のショートカット |
+| `set_task_blockers` | 依存関係設定のショートカット |
+
+```python
+# 使用例: タスク追加（ID自動生成）
+add_task(
+    name="射撃システム実装",
+    description="プレイヤーの射撃機能を実装",
+    phase="Phase 2",
+    priority="high",
+    category="feature",
+    blocked_by=["T01"],  # 依存タスク
+    project="my-game"
+)
+
+# 使用例: タスク一覧取得（フィルタリング）
+list_tasks(
+    phase="Phase 2",
+    status="not_started",
+    priority="high",
+    project="my-game"
+)
+# -> {"tasks": [...], "recommended": {...}, "stats": {...}}
+
+# 使用例: タスク取得
+get_task(task_id="T01", include_related_knowledge=True)
+# -> {"task": {...}, "related_knowledge": [...]}
+
+# 使用例: タスク更新（名前・優先度変更）
+update_task(
+    task_id="T01",
+    name="New Name",
+    priority="high",
+    project="my-game"
+)
+
+# 使用例: フェーズ移動
+move_task_to_phase(
+    task_id="T01",
+    from_phase="Phase 1",
+    to_phase="Phase 2"
+)
+
+# 使用例: タスク削除（依存タスクの参照を自動クリーンアップ）
+delete_task(
+    task_id="T01",
+    cascade_unblock=True,  # blocked_by参照を自動削除
+    project="my-game"
+)
+# -> {"dependent_tasks_updated": ["T02", "T03"]}
+```
+
+**スマートソート:**
+- ブロックされていないタスク優先
+- 依存タスクがないタスク優先
+- 優先度順（high → medium → low）
+
+**推奨タスク検出:**
+- ステータスが`not_started`
+- 全ての依存タスク（blocked_by）が`completed`
+- 最も高い優先度
 
 ### ライフサイクル管理 (`lifecycle.py`)
 

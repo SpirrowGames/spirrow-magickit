@@ -828,6 +828,386 @@ async def block_task_impl(
     }
 
 
+async def get_task_impl(
+    settings: Settings,
+    task_id: str,
+    phase: str = "",
+    project: str = "",
+    include_related_knowledge: bool = False,
+    user: str = "",
+) -> dict[str, Any]:
+    """Get a single task by ID with optional related knowledge.
+
+    Args:
+        settings: Application settings
+        task_id: Task ID to retrieve
+        phase: Phase name (specify if task_id exists in multiple phases)
+        project: Project ID
+        include_related_knowledge: Include related knowledge entries
+        user: User identifier for multi-user support
+
+    Returns:
+        Dict with task details and optional related knowledge
+    """
+    effective_user = user or get_current_user()
+
+    prismind = PrismindAdapter(
+        sse_url=settings.prismind_url,
+        timeout=settings.prismind_timeout,
+    )
+
+    # Get task from Prismind
+    try:
+        result = await prismind.call(
+            "get_task",
+            task_id=task_id,
+            phase=phase,
+            project=project,
+            user=effective_user,
+        )
+    except Exception as e:
+        logger.error("Failed to get task", error=str(e))
+        return {
+            "success": False,
+            "error": f"Failed to get task: {e}",
+        }
+
+    if not result.get("success"):
+        return result
+
+    response = {
+        "success": True,
+        "task": result.get("task"),
+        "phase": result.get("phase"),
+        "project": result.get("project"),
+        "message": result.get("message"),
+    }
+
+    # Get related knowledge if requested
+    if include_related_knowledge:
+        try:
+            task = result.get("task", {})
+            task_name = task.get("name", "")
+            task_notes = task.get("notes", "")
+            search_query = f"{task_name} {task_notes}"[:200]
+
+            related = await prismind.search_knowledge(
+                query=search_query,
+                project=project,
+                limit=5,
+                user=effective_user,
+            )
+            response["related_knowledge"] = related
+        except Exception as e:
+            logger.warning("Failed to get related knowledge", error=str(e))
+            response["related_knowledge"] = []
+
+    return response
+
+
+async def delete_task_impl(
+    settings: Settings,
+    task_id: str,
+    phase: str = "",
+    project: str = "",
+    check_dependencies: bool = True,
+    cascade_unblock: bool = True,
+    user: str = "",
+) -> dict[str, Any]:
+    """Delete a task with dependency impact analysis.
+
+    Args:
+        settings: Application settings
+        task_id: Task ID to delete
+        phase: Phase name (specify if task_id exists in multiple phases)
+        project: Project ID
+        check_dependencies: Check and warn about dependent tasks
+        cascade_unblock: Automatically remove from blocked_by lists
+        user: User identifier for multi-user support
+
+    Returns:
+        Dict with deletion result and impact info
+    """
+    effective_user = user or get_current_user()
+
+    prismind = PrismindAdapter(
+        sse_url=settings.prismind_url,
+        timeout=settings.prismind_timeout,
+    )
+
+    # Get current progress for impact analysis
+    if check_dependencies:
+        try:
+            progress = await prismind.get_progress(project=project, user=effective_user)
+            all_tasks = _extract_tasks_from_progress(progress)
+            impacted_tasks = _find_tasks_blocked_by(all_tasks, task_id)
+
+            if impacted_tasks and not cascade_unblock:
+                return {
+                    "success": False,
+                    "error": f"Task {task_id} has dependent tasks",
+                    "impacted_tasks": impacted_tasks,
+                    "hint": "Use cascade_unblock=True to automatically update dependent tasks",
+                }
+        except Exception as e:
+            logger.warning("Failed to check dependencies", error=str(e))
+
+    # Delete task via Prismind
+    try:
+        result = await prismind.call(
+            "delete_task",
+            task_id=task_id,
+            phase=phase,
+            project=project,
+            user=effective_user,
+        )
+    except Exception as e:
+        logger.error("Failed to delete task", error=str(e))
+        return {
+            "success": False,
+            "error": f"Failed to delete task: {e}",
+        }
+
+    return {
+        "success": result.get("success", False),
+        "task_id": result.get("task_id"),
+        "phase": result.get("phase"),
+        "project": result.get("project"),
+        "dependent_tasks_updated": result.get("dependent_tasks_updated", []),
+        "message": result.get("message"),
+    }
+
+
+async def update_task_impl(
+    settings: Settings,
+    task_id: str,
+    phase: str = "",
+    name: str | None = None,
+    description: str | None = None,
+    status: str | None = None,
+    priority: str | None = None,
+    category: str | None = None,
+    blocked_by: list[str] | None = None,
+    blockers: list[str] | None = None,
+    new_phase: str | None = None,
+    project: str = "",
+    user: str = "",
+) -> dict[str, Any]:
+    """Update a task with any combination of fields.
+
+    Args:
+        settings: Application settings
+        task_id: Task ID to update
+        phase: Current phase name (specify if task_id exists in multiple phases)
+        name: New task name
+        description: New description (stored in notes)
+        status: New status (not_started/in_progress/completed/blocked)
+        priority: New priority (high/medium/low)
+        category: New category
+        blocked_by: New blocked_by list
+        blockers: New blockers list
+        new_phase: Target phase for moving the task
+        project: Project ID
+        user: User identifier for multi-user support
+
+    Returns:
+        Dict with update result including phase move info
+    """
+    effective_user = user or get_current_user()
+
+    prismind = PrismindAdapter(
+        sse_url=settings.prismind_url,
+        timeout=settings.prismind_timeout,
+    )
+
+    # Validate blocked_by if provided
+    if blocked_by:
+        try:
+            progress = await prismind.get_progress(project=project, user=effective_user)
+            all_tasks = _extract_tasks_from_progress(progress)
+            existing_ids = {t.get("task_id") for t in all_tasks}
+
+            invalid_deps = [dep for dep in blocked_by if dep not in existing_ids]
+            if invalid_deps:
+                return {
+                    "success": False,
+                    "error": f"Invalid blocked_by task IDs: {invalid_deps}",
+                    "existing_task_ids": list(existing_ids),
+                }
+        except Exception as e:
+            logger.warning("Failed to validate dependencies", error=str(e))
+
+    # Update task via Prismind
+    try:
+        result = await prismind.call(
+            "update_task",
+            task_id=task_id,
+            phase=phase,
+            name=name,
+            description=description,
+            status=status,
+            priority=priority,
+            category=category,
+            blocked_by=blocked_by,
+            blockers=blockers,
+            new_phase=new_phase,
+            project=project,
+            user=effective_user,
+        )
+    except Exception as e:
+        logger.error("Failed to update task", error=str(e))
+        return {
+            "success": False,
+            "error": f"Failed to update task: {e}",
+        }
+
+    return {
+        "success": result.get("success", False),
+        "task_id": result.get("task_id"),
+        "project": result.get("project"),
+        "updated_fields": result.get("updated_fields", []),
+        "phase_moved": result.get("phase_moved", False),
+        "old_phase": result.get("old_phase", ""),
+        "new_phase": result.get("new_phase", ""),
+        "message": result.get("message"),
+    }
+
+
+# === Shortcut/Convenience Functions ===
+
+
+async def move_task_to_phase_impl(
+    settings: Settings,
+    task_id: str,
+    from_phase: str,
+    to_phase: str,
+    project: str = "",
+    user: str = "",
+) -> dict[str, Any]:
+    """Move a task from one phase to another.
+
+    Shortcut for update_task with new_phase.
+
+    Args:
+        settings: Application settings
+        task_id: Task ID to move
+        from_phase: Current phase name
+        to_phase: Target phase name
+        project: Project ID
+        user: User identifier
+
+    Returns:
+        Dict with move result
+    """
+    return await update_task_impl(
+        settings=settings,
+        task_id=task_id,
+        phase=from_phase,
+        new_phase=to_phase,
+        project=project,
+        user=user,
+    )
+
+
+async def set_task_priority_impl(
+    settings: Settings,
+    task_id: str,
+    priority: str,
+    phase: str = "",
+    project: str = "",
+    user: str = "",
+) -> dict[str, Any]:
+    """Set task priority.
+
+    Shortcut for update_task with priority.
+
+    Args:
+        settings: Application settings
+        task_id: Task ID
+        priority: New priority (high/medium/low)
+        phase: Phase name (if needed)
+        project: Project ID
+        user: User identifier
+
+    Returns:
+        Dict with update result
+    """
+    valid_priorities = ["high", "medium", "low"]
+    if priority not in valid_priorities:
+        return {
+            "success": False,
+            "error": f"Invalid priority. Valid values: {valid_priorities}",
+        }
+
+    return await update_task_impl(
+        settings=settings,
+        task_id=task_id,
+        phase=phase,
+        priority=priority,
+        project=project,
+        user=user,
+    )
+
+
+async def set_task_blockers_impl(
+    settings: Settings,
+    task_id: str,
+    blocked_by: list[str],
+    phase: str = "",
+    project: str = "",
+    validate: bool = True,
+    user: str = "",
+) -> dict[str, Any]:
+    """Set task dependencies (blocked_by).
+
+    Shortcut for update_task with blocked_by.
+
+    Args:
+        settings: Application settings
+        task_id: Task ID
+        blocked_by: List of task IDs this depends on
+        phase: Phase name (if needed)
+        project: Project ID
+        validate: Validate that blocked_by IDs exist
+        user: User identifier
+
+    Returns:
+        Dict with update result
+    """
+    effective_user = user or get_current_user()
+
+    prismind = PrismindAdapter(
+        sse_url=settings.prismind_url,
+        timeout=settings.prismind_timeout,
+    )
+
+    # Validate dependencies if requested
+    if validate and blocked_by:
+        try:
+            progress = await prismind.get_progress(project=project, user=effective_user)
+            all_tasks = _extract_tasks_from_progress(progress)
+            existing_ids = {t.get("task_id") for t in all_tasks}
+
+            invalid_deps = [dep for dep in blocked_by if dep not in existing_ids]
+            if invalid_deps:
+                return {
+                    "success": False,
+                    "error": f"Invalid blocked_by task IDs: {invalid_deps}",
+                    "existing_task_ids": list(existing_ids),
+                }
+        except Exception as e:
+            logger.warning("Failed to validate dependencies", error=str(e))
+
+    return await update_task_impl(
+        settings=settings,
+        task_id=task_id,
+        phase=phase,
+        blocked_by=blocked_by,
+        project=project,
+        user=user,
+    )
+
+
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
     """Register task management tools with the MCP server.
 
@@ -1046,5 +1426,250 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             phase=phase,
             blocked_by=blocked_by,
             project=project,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def get_task(
+        task_id: str,
+        phase: str = "",
+        project: str = "",
+        include_related_knowledge: bool = False,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Get a single task by ID with full details.
+
+        USE THIS WHEN: You need detailed information about a specific task.
+        This tool:
+        - Retrieves task with all fields (name, status, priority, etc.)
+        - Optionally includes related knowledge entries
+
+        Args:
+            task_id: Task ID to retrieve (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
+            project: Project ID (empty for current)
+            include_related_knowledge: Include related knowledge entries
+            user: User identifier for multi-user support (auto-detected if empty)
+
+        Returns:
+            Dict with task details and optional related knowledge
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await get_task_impl(
+            settings=_settings,
+            task_id=task_id,
+            phase=phase,
+            project=project,
+            include_related_knowledge=include_related_knowledge,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def delete_task(
+        task_id: str,
+        phase: str = "",
+        project: str = "",
+        check_dependencies: bool = True,
+        cascade_unblock: bool = True,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Delete a task with dependency handling.
+
+        USE THIS WHEN: Removing a task that is no longer needed.
+        This tool:
+        - Checks for dependent tasks (tasks blocked by this one)
+        - Automatically updates blocked_by references if cascade_unblock=True
+        - Records deletion impact
+
+        Args:
+            task_id: Task ID to delete (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
+            project: Project ID (empty for current)
+            check_dependencies: Check and warn about dependent tasks
+            cascade_unblock: Automatically remove from blocked_by lists
+            user: User identifier for multi-user support (auto-detected if empty)
+
+        Returns:
+            Dict with deletion status and updated dependent tasks
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await delete_task_impl(
+            settings=_settings,
+            task_id=task_id,
+            phase=phase,
+            project=project,
+            check_dependencies=check_dependencies,
+            cascade_unblock=cascade_unblock,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def update_task(
+        task_id: str,
+        phase: str = "",
+        name: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+        priority: str | None = None,
+        category: str | None = None,
+        blocked_by: list[str] | None = None,
+        blockers: list[str] | None = None,
+        new_phase: str | None = None,
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Update a task with any combination of fields.
+
+        USE THIS WHEN: Modifying task details, changing status, or moving phases.
+        This tool:
+        - Updates any combination of task fields
+        - Supports moving task to a different phase
+        - Validates dependencies if blocked_by is provided
+
+        Args:
+            task_id: Task ID to update (required)
+            phase: Current phase name (required if same task_id exists in multiple phases)
+            name: New task name
+            description: New description (stored in notes)
+            status: New status (not_started/in_progress/completed/blocked)
+            priority: New priority (high/medium/low)
+            category: New category
+            blocked_by: New blocked_by list (task dependencies)
+            blockers: New blockers list (obstacles)
+            new_phase: Target phase for moving the task
+            project: Project ID (empty for current)
+            user: User identifier for multi-user support (auto-detected if empty)
+
+        Returns:
+            Dict with updated fields and phase move info
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await update_task_impl(
+            settings=_settings,
+            task_id=task_id,
+            phase=phase,
+            name=name,
+            description=description,
+            status=status,
+            priority=priority,
+            category=category,
+            blocked_by=blocked_by,
+            blockers=blockers,
+            new_phase=new_phase,
+            project=project,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def move_task_to_phase(
+        task_id: str,
+        from_phase: str,
+        to_phase: str,
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Move a task from one phase to another.
+
+        USE THIS WHEN: Reorganizing tasks between phases.
+        Shortcut for update_task with new_phase.
+
+        Args:
+            task_id: Task ID to move (required)
+            from_phase: Current phase name (required)
+            to_phase: Target phase name (required)
+            project: Project ID (empty for current)
+            user: User identifier for multi-user support (auto-detected if empty)
+
+        Returns:
+            Dict with move result
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await move_task_to_phase_impl(
+            settings=_settings,
+            task_id=task_id,
+            from_phase=from_phase,
+            to_phase=to_phase,
+            project=project,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def set_task_priority(
+        task_id: str,
+        priority: str,
+        phase: str = "",
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Set task priority.
+
+        USE THIS WHEN: Changing task priority level.
+        Shortcut for update_task with priority.
+
+        Args:
+            task_id: Task ID (required)
+            priority: New priority (high/medium/low) (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
+            project: Project ID (empty for current)
+            user: User identifier for multi-user support (auto-detected if empty)
+
+        Returns:
+            Dict with update result
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await set_task_priority_impl(
+            settings=_settings,
+            task_id=task_id,
+            priority=priority,
+            phase=phase,
+            project=project,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def set_task_blockers(
+        task_id: str,
+        blocked_by: list[str],
+        phase: str = "",
+        project: str = "",
+        validate: bool = True,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Set task dependencies (blocked_by).
+
+        USE THIS WHEN: Updating task dependencies.
+        Shortcut for update_task with blocked_by.
+
+        Args:
+            task_id: Task ID (required)
+            blocked_by: List of task IDs this depends on (required)
+            phase: Phase name (required if same task_id exists in multiple phases)
+            project: Project ID (empty for current)
+            validate: Validate that blocked_by IDs exist
+            user: User identifier for multi-user support (auto-detected if empty)
+
+        Returns:
+            Dict with update result
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await set_task_blockers_impl(
+            settings=_settings,
+            task_id=task_id,
+            blocked_by=blocked_by,
+            phase=phase,
+            project=project,
+            validate=validate,
             user=user,
         )

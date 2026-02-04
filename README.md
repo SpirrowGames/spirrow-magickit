@@ -110,11 +110,26 @@ Magickit exposes high-level MCP tools that combine multiple services:
 | Tool | Description |
 |------|-------------|
 | `init_project` | Initialize project from template |
-| `add_task` / `list_tasks` | Task management |
 | `advance_phase` | Phase transitions with quality gates |
 | `add_milestone` | Milestone tracking |
 | `get_burndown` / `estimate_completion` | Progress tracking |
 | `generate_status_report` | Stakeholder reports |
+
+### Task Management
+
+| Tool | Description |
+|------|-------------|
+| `add_task` | Add task with auto-ID generation, duplicate detection |
+| `list_tasks` | List tasks with smart sorting and recommendations |
+| `get_task` | Get single task with optional related knowledge |
+| `update_task` | Update any task field, supports phase move |
+| `delete_task` | Delete task with dependency cleanup |
+| `start_task` | Start task with dependency validation |
+| `complete_task` | Complete task with learnings recording |
+| `block_task` | Block task with impact analysis |
+| `move_task_to_phase` | Shortcut for phase move |
+| `set_task_priority` | Shortcut for priority update |
+| `set_task_blockers` | Shortcut for dependency update |
 
 ### Smart Document Creation
 
