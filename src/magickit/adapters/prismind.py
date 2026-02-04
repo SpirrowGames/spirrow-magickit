@@ -149,31 +149,39 @@ class PrismindAdapter(MCPBaseAdapter):
 
         return context
 
-    async def delete(
+    async def delete_knowledge(
         self,
-        document_ids: list[str],
-        collection: str = "default",
+        knowledge_id: str,
+        project: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
-        """Delete knowledge entries.
-
-        Note: Prismind uses update_knowledge for modifications.
-        This is a placeholder for API compatibility.
+        """Delete a knowledge entry.
 
         Args:
-            document_ids: IDs of documents to delete.
-            collection: Collection name.
+            knowledge_id: ID of the knowledge entry to delete.
+            project: Project ID for validation (optional).
+            user: User identifier for multi-user support.
 
         Returns:
-            Deletion result.
+            Dict with success status and message.
         """
-        logger.warning(
-            "Delete operation not directly supported by Prismind MCP",
-            document_ids=document_ids,
+        arguments: dict[str, Any] = {"knowledge_id": knowledge_id}
+        if project:
+            arguments["project"] = project
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Deleting knowledge via MCP",
+            knowledge_id=knowledge_id,
+            project=project,
         )
-        return {
-            "deleted": 0,
-            "message": "Delete not directly supported. Use update_knowledge to modify entries.",
-        }
+
+        success, result = await self._call_tool_safe("delete_knowledge", arguments)
+        if not success:
+            raise RuntimeError(f"delete_knowledge failed: {result}")
+
+        return self._parse_json_result(result)
 
     # === Helper methods ===
 

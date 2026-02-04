@@ -55,6 +55,7 @@ src/magickit/
 │       ├── session.py   # セッション管理
 │       ├── project.py   # プロジェクト管理
 │       ├── document.py  # スマートドキュメント作成
+│       ├── document_maintenance.py  # ドキュメント整合性・クリーンアップ
 │       ├── specification.py  # AI駆動仕様策定
 │       ├── execution.py  # タスク分解・実行管理
 │       ├── lifecycle.py  # フェーズ・マイルストーン管理
@@ -634,6 +635,84 @@ smart_create_document(
 - `global`: 全プロジェクトで共有（~/.prismind_global_doc_types.json に保存）
 - `project`: 特定プロジェクトのみ（ProjectConfig.document_types に保存）
 - 同じtype_idが両方に存在する場合、プロジェクト側が優先される
+
+### ドキュメントメンテナンス (`document_maintenance.py`)
+
+ドキュメント・knowledge・ドキュメントタイプの整合性管理とクリーンアップツール。
+
+| ツール | 用途 |
+|--------|------|
+| `smart_delete_document` | ドキュメントと関連knowledgeを一括削除（dry_run対応） |
+| `detect_orphan_documents` | 孤児ドキュメント検出（削除済みプロジェクト、無効phase_task、未登録doc_type） |
+| `detect_orphan_knowledge` | 孤児knowledge検出（無効なドキュメント・タスク参照） |
+| `detect_unused_document_types` | 未使用・重複ドキュメントタイプ検出 |
+| `check_document_consistency` | 包括的な整合性チェック（全検出ツールを実行） |
+| `cleanup_documents` | バッチクリーンアップ（dry_run + confirm必須） |
+
+```python
+# 使用例: ドキュメント削除（関連knowledge含む）
+smart_delete_document(
+    doc_id="doc-12345",
+    project="my-project",
+    delete_related_knowledge=True,
+    dry_run=True  # まずプレビュー
+)
+# -> {"would_delete": {"document": "doc-12345", "knowledge_entries": [...]}}
+
+# 使用例: 孤児ドキュメント検出
+detect_orphan_documents(project="my-project")
+# -> {
+#   "orphans": [
+#     {"doc_id": "xxx", "reasons": ["deleted_project"]},
+#     {"doc_id": "yyy", "reasons": ["invalid_phase_task", "missing_doc_type"]}
+#   ],
+#   "total_orphans": 2
+# }
+
+# 使用例: 包括的整合性チェック
+check_document_consistency(project="my-project")
+# -> {
+#   "summary": {
+#     "orphan_documents": 3,
+#     "orphan_knowledge": 5,
+#     "unused_document_types": 2,
+#     "semantic_duplicate_types": 1,
+#     "total_issues": 11
+#   }
+# }
+
+# 使用例: クリーンアップ実行
+cleanup_documents(
+    cleanup_orphan_documents=True,
+    cleanup_orphan_knowledge=True,
+    project="my-project",
+    dry_run=True  # まずプレビュー
+)
+# -> {"deleted": {"documents": [...], "knowledge": [...]}, "dry_run": true}
+
+# 実際に削除
+cleanup_documents(
+    cleanup_orphan_documents=True,
+    confirm=True,  # 安全確認必須
+    dry_run=False
+)
+```
+
+**安全機能:**
+- `dry_run=True`: デフォルトでプレビューモード
+- `confirm=True`: 実削除には明示的な確認が必要
+- `permanent=False`: ドキュメントはゴミ箱移動（デフォルト）
+
+**孤児検出の種類:**
+- `deleted_project`: 削除/アーカイブ済みプロジェクトのドキュメント
+- `invalid_phase_task`: 存在しないphase_taskを参照
+- `missing_doc_type`: 未登録のドキュメントタイプを使用
+- `invalid_document_ref`: 存在しないドキュメントを参照するknowledge
+- `invalid_task_ref`: 存在しないタスクを参照するknowledge
+
+**セマンティック重複検出:**
+- RAGベースで類似度0.75以上のドキュメントタイプペアを検出
+- 例: "api_spec" と "api_specification" が重複候補として検出
 
 ### 仕様策定 (`specification.py`)
 

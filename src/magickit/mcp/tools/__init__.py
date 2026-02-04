@@ -8,6 +8,7 @@ This package contains tool implementations for the Magickit MCP server:
 - session: Session management for cross-session context persistence
 - project: Project management (init, status, clone, archive, restore)
 - document: Smart document creation with automatic type handling
+- document_maintenance: Document/knowledge cleanup and consistency checking
 - task: Task management with dependencies and recommendations
 - specification: AI-driven specification with dynamic questions
 - execution: Task decomposition and execution pipeline
@@ -25,6 +26,7 @@ from magickit.mcp.tools import (
     session,
     project,
     document,
+    document_maintenance,
     task,
     specification,
     execution,
@@ -42,6 +44,7 @@ __all__ = [
     "session",
     "project",
     "document",
+    "document_maintenance",
     "task",
     "specification",
     "execution",

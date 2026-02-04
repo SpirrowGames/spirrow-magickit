@@ -129,6 +129,31 @@ smart_create_document(
 )
 ```
 
+### Document Maintenance
+
+Tools for document and knowledge cleanup, orphan detection, and consistency checking:
+
+| Tool | Description |
+|------|-------------|
+| `smart_delete_document` | Delete document with related knowledge cleanup |
+| `detect_orphan_documents` | Find orphan documents (deleted projects, invalid refs) |
+| `detect_orphan_knowledge` | Find orphan knowledge entries |
+| `detect_unused_document_types` | Find unused/duplicate document types |
+| `check_document_consistency` | Comprehensive health check |
+| `cleanup_documents` | Batch cleanup with dry_run/confirm safety |
+
+```python
+# Preview what would be deleted
+check_document_consistency(project="my-project")
+# -> {"summary": {"orphan_documents": 3, "orphan_knowledge": 5, ...}}
+
+# Clean up with safety checks
+cleanup_documents(
+    cleanup_orphan_documents=True,
+    dry_run=True  # Preview first
+)
+```
+
 ### Orchestration Workflow
 
 Execute multi-step workflows with dependency management:

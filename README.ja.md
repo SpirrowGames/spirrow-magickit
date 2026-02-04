@@ -56,6 +56,10 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `list_projects` / `init_project` | プロジェクト管理 |
 | `get_project_status` | プロジェクト詳細ステータス |
 | `smart_create_document` | スマートドキュメント作成（RAGセマンティックマッチング） |
+| `smart_delete_document` | ドキュメントと関連knowledge一括削除 |
+| `detect_orphan_documents` / `detect_orphan_knowledge` | 孤児データ検出 |
+| `check_document_consistency` | 整合性チェック |
+| `cleanup_documents` | バッチクリーンアップ |
 | `add_task` / `list_tasks` | タスク管理 |
 | `start_task` / `complete_task` / `block_task` | タスクステータス管理 |
 | `advance_phase` / `set_phase` | フェーズ遷移管理 |
@@ -83,6 +87,39 @@ smart_create_document(
 2. マッチすれば既存タイプを使用（例: "議事録" ≈ "meeting_minutes"）
 3. マッチしなければLLMでメタデータ生成 → グローバルとして登録
 4. ドキュメント作成
+
+### ドキュメントメンテナンス
+
+ドキュメント・knowledge・ドキュメントタイプの整合性管理とクリーンアップ。
+
+| ツール | 説明 |
+|--------|------|
+| `smart_delete_document` | ドキュメントと関連knowledgeを一括削除（dry_run対応） |
+| `detect_orphan_documents` | 孤児ドキュメント検出（削除済みプロジェクト、無効phase_task等） |
+| `detect_orphan_knowledge` | 孤児knowledge検出（無効な参照） |
+| `detect_unused_document_types` | 未使用・重複ドキュメントタイプ検出 |
+| `check_document_consistency` | 包括的な整合性チェック |
+| `cleanup_documents` | バッチクリーンアップ（dry_run + confirm必須） |
+
+```python
+# ドキュメント削除（プレビュー）
+smart_delete_document(doc_id="doc-12345", dry_run=True)
+
+# 整合性チェック
+check_document_consistency(project="my-project")
+# → {"summary": {"orphan_documents": 3, "orphan_knowledge": 5, ...}}
+
+# クリーンアップ（安全確認必須）
+cleanup_documents(
+    cleanup_orphan_documents=True,
+    dry_run=True  # まずプレビュー
+)
+```
+
+**安全機能:**
+- `dry_run=True`: デフォルトでプレビューモード
+- `confirm=True`: 実削除には明示的確認が必要
+- ドキュメントはゴミ箱移動（永久削除はオプション）
 
 ### プロジェクトライフサイクル管理
 
@@ -215,7 +252,7 @@ begin_task(project="my-project", user="alice@example.com")
 | プロジェクト | `get_project_status`, `clone_project`, `delete_project`, `restore_project` |
 | リサーチ | `research_and_summarize`, `analyze_documents` |
 | 生成 | `generate_with_context` |
-| ドキュメント | `smart_create_document` |
+| ドキュメント | `smart_create_document`, `smart_delete_document`, `detect_orphan_documents`, `detect_orphan_knowledge`, `detect_unused_document_types`, `check_document_consistency`, `cleanup_documents` |
 | ワークフロー | `orchestrate_workflow` |
 | ライフサイクル | `advance_phase`, `set_phase`, `get_phase_status`, `add_milestone`, `update_milestone`, `list_milestones`, `check_milestone_status` |
 | 進捗追跡 | `get_burndown`, `estimate_completion`, `track_velocity`, `get_risk_indicators` |
@@ -318,6 +355,7 @@ src/magickit/
 │       ├── session.py   # セッション管理
 │       ├── project.py   # プロジェクト管理
 │       ├── document.py  # スマートドキュメント作成
+│       ├── document_maintenance.py  # ドキュメント整合性・クリーンアップ
 │       ├── task.py      # タスク管理
 │       ├── lifecycle.py # フェーズ・マイルストーン管理
 │       ├── progress.py  # 進捗追跡・予測

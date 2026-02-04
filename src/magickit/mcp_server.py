@@ -23,6 +23,7 @@ from magickit.mcp.tools import (
     session,
     project,
     document,
+    document_maintenance,
     specification,
     execution,
     task,
@@ -66,6 +67,7 @@ rather than calling individual services separately.""",
     session.register_tools(mcp, settings)
     project.register_tools(mcp, settings)
     document.register_tools(mcp, settings)
+    document_maintenance.register_tools(mcp, settings)
     specification.register_tools(mcp, settings)
     execution.register_tools(mcp, settings)
     task.register_tools(mcp, settings)
