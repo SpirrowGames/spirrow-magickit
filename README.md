@@ -1,363 +1,239 @@
 # Spirrow-Magickit
 
-オーケストレーションレイヤー for Spirrow Platform
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-## 概要
+**Orchestration layer for the Spirrow Platform** - A conductor that coordinates multiple MCP servers with intelligent routing and optimization.
 
-複数のMCPサーバを統合し、ローカルLLMによる知的なルーティングと最適化を行う司令塔。
-タスク管理・依存関係解決・コンテキスト最適化を担当。
+[日本語版 README](README.ja.md)
 
-**「指揮者 - 自分では演奏しない」** 各サービスへの委譲に徹する。
+## Overview
 
-## アーキテクチャ
+Magickit is the orchestration hub of the Spirrow Platform. It integrates multiple specialized services (Lexora, Prismind, Cognilens) into unified workflows, handling:
+
+- **Task Management** - Queue management with priority and dependency resolution
+- **Context Optimization** - Intelligent context compression and RAG-enhanced retrieval
+- **Project Lifecycle** - Full lifecycle support from setup to archive
+
+**Philosophy: "The Conductor - Never plays, only directs."** Magickit delegates to specialized services rather than implementing functionality itself.
+
+## Architecture
 
 ```
-Claude Code / Client
+Claude Code / MCP Client
         │
         ▼
-    Magickit (:8004)
+    Magickit (:8114 SSE / :8113 HTTP)
         │
    ┌────┼────┬────┐
    ▼    ▼    ▼    ▼
 Lexora Cognilens Prismind UnrealWise
+(:8110)  (:8111)  (:8112)   (:8115)
 ```
 
-## 技術スタック
+## Quick Start
+
+### Prerequisites
 
 - Python 3.11+
-- FastMCP (MCPサーバー)
-- FastAPI (REST API)
-- httpx (非同期HTTPクライアント)
-- Pydantic v2
+- Running instances of [Lexora](https://github.com/spirrowgames/spirrow-lexora), [Prismind](https://github.com/spirrowgames/spirrow-prismind), [Cognilens](https://github.com/spirrowgames/spirrow-cognilens)
 
-## 主要機能
+### Installation
 
-### MCPツール
+```bash
+# Clone the repository
+git clone https://github.com/spirrowgames/spirrow-magickit.git
+cd spirrow-magickit
 
-Magickitは複数サービスを組み合わせた高レベルなMCPツールを提供します。
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
 
-| ツール | 説明 |
-|--------|------|
-| `service_health` | 全サービスのヘルス状態を一括確認 |
-| `research_and_summarize` | Prismind検索 + Cognilens圧縮 |
-| `analyze_documents` | ドキュメント検索 + エッセンス抽出 |
-| `generate_with_context` | RAG強化コンテンツ生成 |
-| `intelligent_route` | タスク分析と最適サービス推奨 |
-| `orchestrate_workflow` | 複数サービスの連携ワークフロー |
-| `begin_task` / `resume` | セッションコンテキスト復元 |
-| `checkpoint` | 作業の中間保存 |
-| `handoff` | セッション終了と引き継ぎ |
-| `list_projects` / `init_project` | プロジェクト管理 |
-| `get_project_status` | プロジェクト詳細ステータス |
-| `smart_create_document` | スマートドキュメント作成（RAGセマンティックマッチング） |
-| `add_task` / `list_tasks` | タスク管理 |
-| `start_task` / `complete_task` / `block_task` | タスクステータス管理 |
-| `advance_phase` / `set_phase` | フェーズ遷移管理 |
-| `add_milestone` / `list_milestones` | マイルストーン管理 |
-| `get_burndown` / `estimate_completion` | 進捗追跡・完了予測 |
-| `define_quality_gate` / `check_quality_gate` | 品質ゲート |
-| `generate_status_report` / `generate_release_notes` | レポート生成 |
+# Install dependencies
+pip install -e ".[dev]"
 
-### スマートドキュメント作成
+# Configure services (optional - defaults work for local setup)
+export MAGICKIT_LEXORA_URL=http://localhost:8110
+export MAGICKIT_COGNILENS_URL=http://localhost:8111
+export MAGICKIT_PRISMIND_URL=http://localhost:8112
+```
 
-未登録のドキュメントタイプをRAGベースのセマンティック検索（BGE-M3埋め込み）で自動マッチング。多言語対応。
+### Running
+
+```bash
+# As MCP server (recommended)
+python -m magickit.mcp_server
+
+# As REST API server
+uvicorn magickit.main:app --port 8113
+```
+
+### Claude Code Integration
+
+Add to your `~/.claude/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "spirrow-magickit": {
+      "url": "http://localhost:8114/sse"
+    }
+  }
+}
+```
+
+## Features
+
+### MCP Tools
+
+Magickit exposes high-level MCP tools that combine multiple services:
+
+| Tool | Description |
+|------|-------------|
+| `service_health` | Check health of all services |
+| `research_and_summarize` | Prismind search + Cognilens compression |
+| `analyze_documents` | Document search + essence extraction |
+| `generate_with_context` | RAG-enhanced content generation |
+| `intelligent_route` | Task analysis and service recommendation |
+| `orchestrate_workflow` | Multi-service workflow execution |
+
+### Session Management
+
+| Tool | Description |
+|------|-------------|
+| `begin_task` / `resume` | Restore session context |
+| `checkpoint` | Save intermediate progress |
+| `handoff` | End session with handoff notes |
+
+### Project Lifecycle
+
+| Tool | Description |
+|------|-------------|
+| `init_project` | Initialize project from template |
+| `add_task` / `list_tasks` | Task management |
+| `advance_phase` | Phase transitions with quality gates |
+| `add_milestone` | Milestone tracking |
+| `get_burndown` / `estimate_completion` | Progress tracking |
+| `generate_status_report` | Stakeholder reports |
+
+### Smart Document Creation
+
+Automatically matches document types using RAG-based semantic search (BGE-M3 embeddings) with multilingual support:
 
 ```python
-# 日本語入力でも既存の英語タイプにマッチ
 smart_create_document(
     name="2024-01-15 Sprint Planning",
-    doc_type="議事録",  # → "meeting_minutes" にマッチ
+    doc_type="議事録",  # Japanese → matches "meeting_minutes"
     content="...",
     phase_task="phase1-task2"
 )
 ```
 
-**処理フロー:**
-1. RAGセマンティック検索で類似タイプを検索（閾値0.45）
-2. マッチすれば既存タイプを使用（例: "議事録" ≈ "meeting_minutes"）
-3. マッチしなければLLMでメタデータ生成 → グローバルとして登録
-4. ドキュメント作成
+### Orchestration Workflow
 
-### プロジェクトライフサイクル管理
-
-ゲーム開発など長期プロジェクトの立ち上げ→進捗管理→完了→アーカイブの全ライフサイクルをサポート。
-
-#### フェーズ・マイルストーン管理
-
-```python
-# プロジェクト初期化（テンプレート使用）
-init_project(project="my-game", template="game")
-
-# マイルストーン追加
-add_milestone(project="my-game", name="Alpha", target_date="2024-03-01", phase="production")
-add_milestone(project="my-game", name="Beta", target_date="2024-05-01", phase="polish")
-
-# フェーズ遷移（完了条件チェック付き）
-advance_phase(project="my-game")  # pre-production → production
-```
-
-#### 進捗追跡・予測
-
-```python
-# バーンダウンチャートデータ取得
-get_burndown(project="my-game", phase="production", days=14)
-
-# 完了予測（ベロシティベース）
-estimate_completion(project="my-game")
-# → {"estimated_date": "2024-03-15", "days_remaining": 30, "confidence": "medium"}
-
-# ベロシティ記録
-track_velocity(project="my-game", completed_today=3, notes="順調に進行中")
-
-# リスク指標
-get_risk_indicators(project="my-game")
-# → {"overall_risk": "low", "risk_score": 25, "indicators": [...]}
-```
-
-#### 品質ゲート
-
-```python
-# 品質ゲート定義
-define_quality_gate(
-    project="my-game",
-    phase="production",
-    criteria=[
-        {"type": "task_completion", "threshold": 80},
-        {"type": "no_critical_blockers"},
-        {"type": "milestone_achieved", "milestone": "Alpha"}
-    ]
-)
-
-# ゲートチェック
-check_quality_gate(project="my-game", phase="production")
-# → {"passed": true, "results": [...]}
-```
-
-#### レポート・分析
-
-```python
-# ステータスレポート生成
-generate_status_report(project="my-game", format="markdown")
-
-# リリースノート自動生成
-generate_release_notes(project="my-game", version="v1.0.0", from_phase="production")
-
-# 振り返り分析（LLMによるインサイト生成）
-analyze_project_performance(project="my-game", use_llm=True)
-```
-
-### オーケストレーションワークフロー
-
-`orchestrate_workflow`で複数サービスを連携したワークフローを実行。
+Execute multi-step workflows with dependency management:
 
 ```python
 steps = [
     {"service": "prismind", "action": "search",
-     "params": {"query": "AI best practices"}, "output_key": "search_results"},
+     "params": {"query": "AI best practices"}, "output_key": "results"},
     {"service": "cognilens", "action": "compress",
-     "params": {"text": "${search_results}", "max_tokens": 500},
+     "params": {"text": "${results}", "max_tokens": 500},
      "depends_on": [0], "output_key": "compressed"},
     {"service": "lexora", "action": "generate",
-     "params": {"prompt": "Based on: ${compressed}\n\nWrite a summary."},
+     "params": {"prompt": "Summarize: ${compressed}"},
      "depends_on": [1]}
 ]
+orchestrate_workflow(steps=steps)
 ```
 
-## マルチユーザー対応
+## Multi-User Support
 
-Magickitは複数ユーザーが同時に利用できるマルチユーザー環境をサポートしています。
+Magickit supports multiple concurrent users with automatic identification:
 
-### ユーザー識別
+1. `SPIRROW_USER` environment variable (highest priority)
+2. `git config user.email`
+3. OS username (fallback)
 
-ユーザーは以下の優先順位で自動識別されます：
+All tools accept an optional `user` parameter for explicit identification.
 
-1. **`SPIRROW_USER` 環境変数** - 明示的な指定（最優先）
-2. **`git config user.email`** - Gitの設定から取得
-3. **OSユーザー名** - フォールバック
+## Configuration
 
-```bash
-# 明示的にユーザーを指定する場合
-export SPIRROW_USER="alice@example.com"
-```
+Environment variables:
 
-### ツールでのユーザー指定
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAGICKIT_LEXORA_URL` | `http://localhost:8110` | Lexora service URL |
+| `MAGICKIT_COGNILENS_URL` | `http://localhost:8111` | Cognilens service URL |
+| `MAGICKIT_PRISMIND_URL` | `http://localhost:8112` | Prismind service URL |
+| `MAGICKIT_MCP_PORT` | `8114` | MCP SSE server port |
+| `MAGICKIT_PORT` | `8113` | HTTP API server port |
 
-すべてのMCPツールは `user` パラメータをサポートしています。省略時は自動検出されます。
+Or use `config/magickit_config.yaml` for file-based configuration.
 
-```python
-# 自動検出（推奨）
-begin_task(project="my-project")
-
-# 明示的に指定
-begin_task(project="my-project", user="alice@example.com")
-```
-
-### ユーザー別データ分離
-
-- セッション状態はユーザーごとに分離されます
-- `prismind:session:{project}:{user}` 形式でストレージキーが生成されます
-- 異なるユーザーが同じプロジェクトで作業しても、セッション状態が干渉しません
-
-### 対応ツール
-
-以下のツールがマルチユーザーに対応しています：
-
-| カテゴリ | ツール |
-|---------|--------|
-| セッション | `begin_task`, `checkpoint`, `handoff`, `resume` |
-| タスク管理 | `add_task`, `list_tasks`, `start_task`, `complete_task`, `block_task` |
-| プロジェクト | `get_project_status`, `clone_project`, `delete_project`, `restore_project` |
-| リサーチ | `research_and_summarize`, `analyze_documents` |
-| 生成 | `generate_with_context` |
-| ドキュメント | `smart_create_document` |
-| ワークフロー | `orchestrate_workflow` |
-| ライフサイクル | `advance_phase`, `set_phase`, `get_phase_status`, `add_milestone`, `update_milestone`, `list_milestones`, `check_milestone_status` |
-| 進捗追跡 | `get_burndown`, `estimate_completion`, `track_velocity`, `get_risk_indicators` |
-| 品質ゲート | `define_quality_gate`, `check_quality_gate`, `list_quality_gates` |
-| レポート | `generate_status_report`, `generate_release_notes`, `analyze_project_performance` |
-
-## セットアップ
-
-```bash
-# 仮想環境作成
-python -m venv .venv
-source .venv/bin/activate
-
-# 依存関係インストール
-pip install -e ".[dev]"
-
-# 環境変数設定（オプション）
-export MAGICKIT_LEXORA_URL=http://localhost:8001
-export MAGICKIT_COGNILENS_URL=http://localhost:8003
-export MAGICKIT_PRISMIND_URL=http://localhost:8002
-export MAGICKIT_PORT=8004
-```
-
-## 起動方法
-
-### MCPサーバーとして（推奨）
-
-```bash
-# mcp-proxyを使用してSSE経由で公開
-npx mcp-proxy --port 8004 --host 0.0.0.0 -- python -m magickit.mcp_server
-```
-
-### REST APIサーバーとして
-
-```bash
-# 開発
-uvicorn magickit.main:app --reload --port 8004
-
-# 本番
-python -m magickit.main
-```
-
-## 設定
-
-環境変数で設定をカスタマイズ:
-
-```bash
-# サービスURL
-MAGICKIT_LEXORA_URL=http://localhost:8001
-MAGICKIT_COGNILENS_URL=http://localhost:8003
-MAGICKIT_PRISMIND_URL=http://localhost:8002
-MAGICKIT_PORT=8004
-
-# タイムアウト
-MAGICKIT_LEXORA_TIMEOUT=60.0
-MAGICKIT_COGNILENS_TIMEOUT=30.0
-MAGICKIT_PRISMIND_TIMEOUT=30.0
-```
-
-## プロジェクト構成
+## Project Structure
 
 ```
 src/magickit/
-├── main.py              # FastAPIアプリ
-├── mcp_server.py        # MCPサーバエントリポイント
-├── config.py            # 設定 (Pydantic Settings)
-├── api/
-│   ├── routes.py        # REST APIエンドポイント
-│   └── models.py        # Request/Response
-├── mcp/
-│   └── tools/           # MCPツール
-│       ├── health.py    # ヘルスチェック
-│       ├── research.py  # 知識検索・要約
-│       ├── orchestration.py  # ルーティング・ワークフロー
-│       ├── generation.py     # RAG強化コンテンツ生成
-│       ├── session.py   # セッション管理
-│       ├── project.py   # プロジェクト管理
-│       ├── document.py  # スマートドキュメント作成
-│       ├── task.py      # タスク管理
-│       ├── lifecycle.py # フェーズ・マイルストーン管理
-│       ├── progress.py  # 進捗追跡・予測
-│       ├── quality.py   # 品質ゲート
-│       └── reporting.py # レポート・分析
-├── adapters/
-│   ├── mcp_base.py      # MCP Adapter 基底クラス
-│   ├── lexora.py        # LLM呼び出し
-│   ├── cognilens.py     # 圧縮 (MCP)
-│   └── prismind.py      # RAG検索 (MCP)
-├── core/
-│   ├── task_queue.py    # タスクキュー
-│   ├── dependency_graph.py  # 依存関係グラフ
-│   └── context_manager.py   # コンテキスト最適化
-└── utils/
-    ├── logging.py
-    └── user.py           # マルチユーザー識別
+├── main.py              # FastAPI app
+├── mcp_server.py        # MCP server entry point
+├── config.py            # Pydantic Settings
+├── mcp/tools/           # MCP tool implementations
+│   ├── health.py        # Health checks
+│   ├── research.py      # Knowledge search
+│   ├── orchestration.py # Workflow execution
+│   ├── session.py       # Session management
+│   ├── project.py       # Project lifecycle
+│   └── ...
+├── adapters/            # Service adapters
+│   ├── lexora.py        # LLM calls
+│   ├── cognilens.py     # Text compression
+│   └── prismind.py      # RAG search
+└── core/                # Core components
+    ├── task_queue.py
+    └── dependency_graph.py
 ```
 
-## REST APIエンドポイント
+## Related Services
 
-| Method | Path | 説明 |
-|--------|------|------|
-| GET | `/health` | ヘルスチェック |
-| GET | `/stats` | 統計情報 |
-| POST | `/tasks` | タスク登録 |
-| GET | `/tasks` | タスク一覧 |
-| GET | `/tasks/next` | 次タスク取得 |
-| POST | `/tasks/{id}/complete` | タスク完了 |
-| POST | `/route` | LLMベースルーティング |
-| POST | `/orchestrate` | 複合タスクオーケストレーション |
+| Service | Port | Description |
+|---------|------|-------------|
+| [Lexora](https://github.com/spirrowgames/spirrow-lexora) | 8110 | Local LLM gateway (Qwen2.5, etc.) |
+| [Prismind](https://github.com/spirrowgames/spirrow-prismind) | 8112 | Knowledge management & RAG search |
+| [Cognilens](https://github.com/spirrowgames/spirrow-cognilens) | 8111 | Text compression & summarization |
 
-## MCP Adapter API
+## Tech Stack
 
-MCPサーバとの通信を抽象化する `MCPBaseAdapter` クラスを提供。
+- **Python 3.11+**
+- **FastMCP** - MCP server framework
+- **FastAPI** - REST API
+- **httpx** - Async HTTP client
+- **Pydantic v2** - Settings & validation
 
-```python
-from magickit.adapters.prismind import PrismindAdapter
-
-adapter = PrismindAdapter(sse_url="http://localhost:8002/sse")
-
-# 動的メソッドディスパッチ（推奨）
-result = await adapter.list_projects()
-result = await adapter.search_knowledge(query="test", limit=5)
-result = await adapter.find_similar_document_type(type_query="議事録", threshold=0.45)
-
-# または明示的にcall()
-result = await adapter.call("search_knowledge", query="test", limit=5)
-```
-
-## テスト
+## Testing
 
 ```bash
-# 全テスト実行
+# Run all tests
 pytest tests/
 
-# カバレッジ付き
+# With coverage
 pytest tests/ --cov=magickit --cov-report=html
 ```
 
-## 依存サービス
+## Contributing
 
-Magickitは以下のサービスと連携します:
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-| サービス | ポート | 説明 |
-|---------|--------|------|
-| Lexora | 8001 | ローカルLLM（Qwen2.5など） |
-| Prismind | 8002 | 知識管理・RAG検索 |
-| Cognilens | 8003 | テキスト圧縮・要約 |
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-## ライセンス
+## License
 
 [MIT License](LICENSE)
+
+## Acknowledgments
+
+Part of the **Spirrow Platform** - an AI-powered development toolkit.
