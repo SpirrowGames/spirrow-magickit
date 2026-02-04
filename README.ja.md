@@ -224,6 +224,16 @@ begin_task(project="my-project", user="alice@example.com")
 
 ## セットアップ
 
+### 前提条件
+
+- Python 3.11+
+- 以下のサービスが起動していること:
+  - [Lexora](https://github.com/spirrowgames/spirrow-lexora) - ローカルLLMゲートウェイ
+  - [Prismind](https://github.com/spirrowgames/spirrow-prismind) - 知識管理・RAG検索
+  - [Cognilens](https://github.com/spirrowgames/spirrow-cognilens) - テキスト圧縮・要約
+
+### インストール
+
 ```bash
 # リポジトリをクローン
 git clone https://github.com/spirrowgames/spirrow-magickit.git
