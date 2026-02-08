@@ -61,6 +61,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         request: str,
         context: str = "",
         available_services: list[str] | None = None,
+        user: str = "",
     ) -> dict[str, Any]:
         """Analyze a request and recommend the optimal service(s) and approach.
 
@@ -80,6 +81,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             context: Optional additional context about the situation.
             available_services: Optional list of services to consider
                                (default: all services).
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -536,6 +538,7 @@ async def _call_service(
                 query=params.get("query", ""),
                 doc_id=params.get("doc_id", ""),
                 doc_type=params.get("doc_type", ""),
+                user=user,
             )
 
         # Task management actions
@@ -607,17 +610,22 @@ async def _call_service(
                 kwargs["phases"] = params["phases"]
             if params.get("categories") is not None:
                 kwargs["categories"] = params["categories"]
+            if user:
+                kwargs["user"] = user
             return await adapter.setup_project(**kwargs)
 
         elif action == "list_projects":
             return await adapter.list_projects(
                 include_archived=params.get("include_archived", False),
+                user=user,
             )
 
         elif action == "update_project":
             # Extract project and pass remaining params, excluding None values
             project = params.get("project", "")
             update_params = {k: v for k, v in params.items() if k != "project" and v is not None}
+            if user:
+                update_params["user"] = user
             return await adapter.update_project(
                 project=project,
                 **update_params,
@@ -627,6 +635,7 @@ async def _call_service(
             return await adapter.delete_project(
                 project=params.get("project", ""),
                 confirm=params.get("confirm", False),
+                user=user,
             )
 
         elif action == "get_project_config":
@@ -707,10 +716,12 @@ async def _call_service(
                 kwargs["delete_drive_file"] = True  # default: delete from Drive
             if params.get("permanent") is not None:
                 kwargs["permanent"] = params["permanent"]
+            if user:
+                kwargs["user"] = user
             return await adapter.delete_document(**kwargs)
 
         elif action == "list_document_types":
-            return await adapter.list_document_types()
+            return await adapter.list_document_types(user=user)
 
         elif action == "register_document_type":
             kwargs: dict[str, Any] = {
@@ -728,6 +739,8 @@ async def _call_service(
                 kwargs["fields"] = params["fields"]
             if params.get("create_folder") is not None:
                 kwargs["create_folder"] = params["create_folder"]
+            if user:
+                kwargs["user"] = user
             return await adapter.register_document_type(**kwargs)
 
         elif action == "delete_document_type":
@@ -736,6 +749,8 @@ async def _call_service(
             }
             # Default to global scope
             kwargs["scope"] = params.get("scope", "global")
+            if user:
+                kwargs["user"] = user
             return await adapter.delete_document_type(**kwargs)
 
         elif action == "list_documents":

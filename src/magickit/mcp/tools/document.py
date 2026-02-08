@@ -56,6 +56,7 @@ async def _find_matching_document_type(
     prismind: PrismindAdapter,
     doc_type_name: str,
     threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    user: str = "",
 ) -> dict[str, Any] | None:
     """Find a semantically similar document type using RAG-based search.
 
@@ -66,6 +67,7 @@ async def _find_matching_document_type(
         prismind: Prismind adapter instance.
         doc_type_name: The document type name to search for.
         threshold: Minimum similarity score (0.0-1.0).
+        user: User identifier for multi-user support.
 
     Returns:
         Dict with match info if found, None otherwise:
@@ -84,6 +86,7 @@ async def _find_matching_document_type(
         result = await prismind.find_similar_document_type(
             type_query=doc_type_name,
             threshold=threshold,
+            user=user,
         )
 
         if result.get("found"):
@@ -334,7 +337,7 @@ async def smart_create_document_impl(
 
     # Step 1: Get existing document types to check for exact match
     try:
-        types_result_raw = await prismind.list_document_types()
+        types_result_raw = await prismind.list_document_types(user=effective_user)
         types_result = _parse_result(types_result_raw)
         existing_types = types_result.get("document_types", [])
     except Exception as e:
@@ -360,6 +363,7 @@ async def smart_create_document_impl(
                 prismind=prismind,
                 doc_type_name=doc_type,
                 threshold=DEFAULT_SIMILARITY_THRESHOLD,
+                user=effective_user,
             )
 
             if semantic_match:
@@ -415,6 +419,7 @@ async def smart_create_document_impl(
                         scope="global",  # Register as global type for cross-project use
                         description=new_type_metadata.get("description", ""),
                         create_folder=True,
+                        user=effective_user,
                     )
                     register_result = _parse_result(register_result_raw)
 
@@ -468,6 +473,8 @@ async def smart_create_document_impl(
             create_kwargs["feature"] = feature
         if keywords is not None:
             create_kwargs["keywords"] = keywords
+        if effective_user:
+            create_kwargs["user"] = effective_user
 
         create_result_raw = await prismind.create_document(**create_kwargs)
         create_result = _parse_result(create_result_raw)

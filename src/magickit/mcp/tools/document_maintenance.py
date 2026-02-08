@@ -21,6 +21,12 @@ logger = get_logger(__name__)
 # Module-level settings reference
 _settings: Settings | None = None
 
+# System-reserved document types that don't need explicit registration
+# These are used internally by Magickit and should not be flagged as missing
+SYSTEM_RESERVED_DOC_TYPES = {
+    "task_attachment",  # Used for file attachments linked to tasks via UTID
+}
+
 
 def _parse_result(result: Any) -> dict[str, Any]:
     """Parse MCP tool result to dict."""
@@ -106,7 +112,7 @@ async def _smart_delete_document_impl(
 
     # Step 1: Verify document exists and get its info
     try:
-        doc_result_raw = await prismind.get_document(doc_id=doc_id)
+        doc_result_raw = await prismind.get_document(doc_id=doc_id, user=effective_user)
         doc_result = _parse_result(doc_result_raw)
 
         if not doc_result.get("found", False) and not doc_result.get("doc_id"):
@@ -204,6 +210,7 @@ async def _smart_delete_document_impl(
             project=project,
             delete_drive_file=delete_drive_file,
             permanent=permanent,
+            user=effective_user,
         )
         delete_result = _parse_result(delete_result_raw)
 
@@ -268,7 +275,7 @@ async def _detect_orphan_documents_impl(
 
     # Get all projects (including archived for reference)
     try:
-        projects_result = await prismind.list_projects(include_archived=True)
+        projects_result = await prismind.list_projects(include_archived=True, user=effective_user)
         projects_data = _parse_result(projects_result)
         all_projects = projects_data.get("projects", [])
         active_projects = {
@@ -290,7 +297,7 @@ async def _detect_orphan_documents_impl(
     registered_types: set[str] = set()
     if include_missing_doc_type:
         try:
-            types_result = await prismind.list_document_types()
+            types_result = await prismind.list_document_types(user=effective_user)
             types_data = _parse_result(types_result)
             for t in types_data.get("document_types", []):
                 registered_types.add(t.get("type_id", ""))
@@ -304,6 +311,7 @@ async def _detect_orphan_documents_impl(
             query="*",
             project=project,
             limit=limit,
+            user=effective_user,
         )
         documents = _parse_list_result(docs_result)
         result["total_checked"] = len(documents)
@@ -333,43 +341,91 @@ async def _detect_orphan_documents_impl(
 
         # Check 2: Invalid phase_task
         if include_invalid_phase_task and phase_task:
-            # Basic validation: phase_task should follow pattern like "phase1-task2"
-            if doc_project and doc_project in active_projects:
-                try:
-                    progress_result = await prismind.get_progress(
-                        project=doc_project,
-                        user=effective_user,
-                    )
-                    progress_data = _parse_result(progress_result)
-                    phases = progress_data.get("phases", [])
+            # phase_task can be in two formats:
+            # 1. Legacy format: "phase1-task2" ({phase_name}-{task_id})
+            # 2. UTID format: "project_uid:phase_slug:task_id" (used for task-document linking)
 
-                    # Extract valid phase-task combinations
-                    valid_phase_tasks: set[str] = set()
-                    for phase in phases:
-                        phase_name = phase.get("name", "")
-                        for task in phase.get("tasks", []):
-                            task_id = task.get("task_id", "")
-                            # Various formats: "phase1-task1", "Phase 1-T01", etc.
-                            valid_phase_tasks.add(f"{phase_name}-{task_id}".lower())
+            # Check if it's UTID format (contains ":" and has 3 parts)
+            is_utid_format = ":" in phase_task and len(phase_task.split(":")) == 3
 
-                    if phase_task.lower() not in valid_phase_tasks:
-                        orphan_reasons.append("invalid_phase_task")
-                        result["invalid_phase_task_docs"].append({
-                            "doc_id": doc_id,
-                            "phase_task": phase_task,
-                            "project": doc_project,
-                            "name": doc.get("name", ""),
-                        })
-                except Exception as e:
-                    logger.debug(
-                        "Could not validate phase_task",
-                        phase_task=phase_task,
-                        error=str(e),
-                    )
+            if is_utid_format:
+                # UTID format validation: extract task_id and validate against project
+                utid_parts = phase_task.split(":")
+                utid_phase_slug = utid_parts[1]
+                utid_task_id = utid_parts[2]
+
+                if doc_project and doc_project in active_projects:
+                    try:
+                        progress_result = await prismind.get_progress(
+                            project=doc_project,
+                            user=effective_user,
+                        )
+                        progress_data = _parse_result(progress_result)
+                        phases = progress_data.get("phases", [])
+
+                        # Check if task_id exists in any phase
+                        task_found = False
+                        for phase in phases:
+                            for task in phase.get("tasks", []):
+                                if task.get("task_id", "") == utid_task_id:
+                                    task_found = True
+                                    break
+                            if task_found:
+                                break
+
+                        if not task_found:
+                            orphan_reasons.append("invalid_phase_task")
+                            result["invalid_phase_task_docs"].append({
+                                "doc_id": doc_id,
+                                "phase_task": phase_task,
+                                "project": doc_project,
+                                "name": doc.get("name", ""),
+                            })
+                    except Exception as e:
+                        logger.debug(
+                            "Could not validate UTID phase_task",
+                            phase_task=phase_task,
+                            error=str(e),
+                        )
+            else:
+                # Legacy format validation: "phase1-task2"
+                if doc_project and doc_project in active_projects:
+                    try:
+                        progress_result = await prismind.get_progress(
+                            project=doc_project,
+                            user=effective_user,
+                        )
+                        progress_data = _parse_result(progress_result)
+                        phases = progress_data.get("phases", [])
+
+                        # Extract valid phase-task combinations
+                        valid_phase_tasks: set[str] = set()
+                        for phase in phases:
+                            phase_name = phase.get("name", "")
+                            for task in phase.get("tasks", []):
+                                task_id = task.get("task_id", "")
+                                # Various formats: "phase1-task1", "Phase 1-T01", etc.
+                                valid_phase_tasks.add(f"{phase_name}-{task_id}".lower())
+
+                        if phase_task.lower() not in valid_phase_tasks:
+                            orphan_reasons.append("invalid_phase_task")
+                            result["invalid_phase_task_docs"].append({
+                                "doc_id": doc_id,
+                                "phase_task": phase_task,
+                                "project": doc_project,
+                                "name": doc.get("name", ""),
+                            })
+                    except Exception as e:
+                        logger.debug(
+                            "Could not validate phase_task",
+                            phase_task=phase_task,
+                            error=str(e),
+                        )
 
         # Check 3: Unregistered doc_type
+        # Skip system-reserved types (e.g., task_attachment used for UTID linking)
         if include_missing_doc_type and doc_type:
-            if doc_type not in registered_types:
+            if doc_type not in registered_types and doc_type not in SYSTEM_RESERVED_DOC_TYPES:
                 orphan_reasons.append("missing_doc_type")
                 result["missing_doc_type_docs"].append({
                     "doc_id": doc_id,
@@ -475,7 +531,7 @@ async def _detect_orphan_knowledge_impl(
                 # Check cache first
                 if doc_id not in doc_exists_cache:
                     try:
-                        doc_result = await prismind.get_document(doc_id=doc_id)
+                        doc_result = await prismind.get_document(doc_id=doc_id, user=effective_user)
                         doc_data = _parse_result(doc_result)
                         doc_exists_cache[doc_id] = doc_data.get("found", False) or bool(doc_data.get("doc_id"))
                     except Exception:
@@ -625,6 +681,7 @@ async def _detect_unused_document_types_impl(
             docs_result = await prismind.search_documents(
                 query=f"doc_type:{type_id}",
                 limit=1,
+                user=effective_user,
             )
             docs = _parse_list_result(docs_result)
 
@@ -668,6 +725,7 @@ async def _detect_unused_document_types_impl(
                     match_result = await prismind.find_similar_document_type(
                         type_query=name_a,
                         threshold=duplicate_threshold,
+                        user=effective_user,
                     )
 
                     if match_result.get("found"):
@@ -973,6 +1031,7 @@ async def _cleanup_documents_impl(
                     await prismind.delete_document_type(
                         type_id=type_id,
                         scope=unused_type.get("scope", "global"),
+                        user=effective_user,
                     )
                     result["deleted"]["document_types"].append({
                         "type_id": type_id,

@@ -79,6 +79,7 @@ async def _begin_task_impl(
             query=query,
             project=project,
             limit=10,
+            user=effective_user,
         )
         knowledge_list = _parse_list_result(knowledge_results)
     except Exception as e:

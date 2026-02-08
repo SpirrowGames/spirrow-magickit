@@ -1,7 +1,7 @@
 """Adapter for Prismind knowledge management MCP service."""
 
 import json
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import BaseModel
 
@@ -9,6 +9,30 @@ from magickit.adapters.mcp_base import MCPBaseAdapter
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# === Type Definitions ===
+
+
+class SetupProjectResult(TypedDict, total=False):
+    """Result from setup_project operation."""
+
+    success: bool
+    project_id: str
+    name: str
+    root_folder_id: str  # Google Drive folder ID (unique project identifier)
+    spreadsheet_id: str
+    message: str
+
+
+class DocumentTypeInfo(TypedDict, total=False):
+    """Document type information."""
+
+    type_id: str
+    name: str
+    folder_name: str
+    scope: str  # "global" or "project"
+    description: str
 
 
 class Document(BaseModel):
@@ -254,6 +278,7 @@ class PrismindAdapter(MCPBaseAdapter):
         self,
         type_query: str,
         threshold: float = 0.75,
+        user: str = "",
     ) -> dict[str, Any]:
         """Find a document type semantically similar to the query.
 
@@ -263,6 +288,7 @@ class PrismindAdapter(MCPBaseAdapter):
         Args:
             type_query: Search query (type name, ID, or description)
             threshold: Minimum similarity score (0.0-1.0)
+            user: User identifier for multi-user support
 
         Returns:
             Dict containing:
@@ -279,9 +305,13 @@ class PrismindAdapter(MCPBaseAdapter):
             threshold=threshold,
         )
 
+        arguments: dict[str, Any] = {"type_query": type_query, "threshold": threshold}
+        if user:
+            arguments["user"] = user
+
         success, result = await self._call_tool_safe(
             "find_similar_document_type",
-            {"type_query": type_query, "threshold": threshold},
+            arguments,
         )
 
         if not success:
@@ -815,3 +845,498 @@ class PrismindAdapter(MCPBaseAdapter):
             raise RuntimeError(f"update_progress failed: {result}")
 
         return self._parse_json_result(result)
+
+    # === Project Management Methods ===
+
+    async def setup_project(
+        self,
+        project: str,
+        name: str,
+        force: bool = False,
+        user: str = "",
+    ) -> SetupProjectResult:
+        """Setup a new project in Prismind.
+
+        Args:
+            project: Project identifier.
+            name: Display name for the project.
+            force: If True, skip similar project check.
+            user: User identifier for multi-user support.
+
+        Returns:
+            SetupProjectResult containing project info including root_folder_id.
+        """
+        arguments: dict[str, Any] = {
+            "project": project,
+            "name": name,
+        }
+        if force:
+            arguments["force"] = force
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Setting up project via MCP",
+            project=project,
+            name=name,
+        )
+
+        success, result = await self._call_tool_safe("setup_project", arguments)
+        if not success:
+            raise RuntimeError(f"setup_project failed: {result}")
+
+        return self._parse_json_result(result)  # type: ignore[return-value]
+
+    async def update_project(
+        self,
+        project: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Update project metadata.
+
+        Args:
+            project: Project identifier.
+            **kwargs: Fields to update (name, categories, phases, template,
+                     status, description, project_uid, etc.)
+
+        Returns:
+            Dict with success status and message.
+        """
+        arguments: dict[str, Any] = {"project": project}
+        arguments.update(kwargs)
+
+        logger.info(
+            "Updating project via MCP",
+            project=project,
+            fields=list(kwargs.keys()),
+        )
+
+        success, result = await self._call_tool_safe("update_project", arguments)
+        if not success:
+            raise RuntimeError(f"update_project failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def delete_project(
+        self,
+        project: str,
+        confirm: bool = False,
+        delete_drive_folder: bool = False,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Delete a project.
+
+        Args:
+            project: Project identifier.
+            confirm: Must be True for permanent deletion.
+            delete_drive_folder: If True, also delete Google Drive folder.
+            user: User identifier for multi-user support.
+
+        Returns:
+            Dict with success status and deletion details.
+        """
+        arguments: dict[str, Any] = {
+            "project": project,
+            "confirm": confirm,
+        }
+        if delete_drive_folder:
+            arguments["delete_drive_folder"] = delete_drive_folder
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Deleting project via MCP",
+            project=project,
+            confirm=confirm,
+        )
+
+        success, result = await self._call_tool_safe("delete_project", arguments)
+        if not success:
+            raise RuntimeError(f"delete_project failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def list_projects(
+        self,
+        include_archived: bool = False,
+        user: str = "",
+    ) -> list[dict[str, Any]]:
+        """List all projects.
+
+        Args:
+            include_archived: If True, include archived projects.
+            user: User identifier for multi-user support.
+
+        Returns:
+            List of project info dicts.
+        """
+        arguments: dict[str, Any] = {}
+        if include_archived:
+            arguments["include_archived"] = include_archived
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Listing projects via MCP",
+            include_archived=include_archived,
+        )
+
+        success, result = await self._call_tool_safe("list_projects", arguments)
+        if not success:
+            raise RuntimeError(f"list_projects failed: {result}")
+
+        return self._parse_list_result(result)
+
+    # === Document Management Methods ===
+
+    async def create_document(
+        self,
+        doc_type: str,
+        name: str,
+        content: str,
+        phase_task: str,
+        project: str = "",
+        feature: str = "",
+        keywords: list[str] | None = None,
+        auto_register_type: bool = False,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Create a document in Prismind.
+
+        Args:
+            doc_type: Document type (e.g., "design", "api_spec").
+            name: Document name.
+            content: Document content.
+            phase_task: Phase-task identifier (e.g., "phase1-task2").
+            project: Project identifier.
+            feature: Feature name.
+            keywords: Search keywords.
+            auto_register_type: If True, auto-register unknown type.
+            user: User identifier for multi-user support.
+
+        Returns:
+            Dict with doc_id, doc_url, and status.
+        """
+        arguments: dict[str, Any] = {
+            "doc_type": doc_type,
+            "name": name,
+            "content": content,
+            "phase_task": phase_task,
+        }
+        if project:
+            arguments["project"] = project
+        if feature:
+            arguments["feature"] = feature
+        if keywords:
+            arguments["keywords"] = keywords
+        if auto_register_type:
+            arguments["auto_register_type"] = auto_register_type
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Creating document via MCP",
+            doc_type=doc_type,
+            name=name,
+            project=project,
+        )
+
+        success, result = await self._call_tool_safe("create_document", arguments)
+        if not success:
+            raise RuntimeError(f"create_document failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def get_document(
+        self,
+        doc_id: str | None = None,
+        query: str | None = None,
+        doc_type: str | None = None,
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any] | None:
+        """Get a document by ID or query.
+
+        Args:
+            doc_id: Document ID (preferred).
+            query: Search query (if doc_id not provided).
+            doc_type: Filter by document type.
+            project: Project identifier.
+            user: User identifier for multi-user support.
+
+        Returns:
+            Document dict or None if not found.
+        """
+        arguments: dict[str, Any] = {}
+        if doc_id:
+            arguments["doc_id"] = doc_id
+        if query:
+            arguments["query"] = query
+        if doc_type:
+            arguments["doc_type"] = doc_type
+        if project:
+            arguments["project"] = project
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Getting document via MCP",
+            doc_id=doc_id,
+            query=query,
+        )
+
+        success, result = await self._call_tool_safe("get_document", arguments)
+        if not success:
+            return None
+
+        parsed = self._parse_json_result(result)
+        if parsed.get("success") is False:
+            return None
+        return parsed
+
+    async def search_documents(
+        self,
+        query: str | None = None,
+        doc_type: str | None = None,
+        project: str = "",
+        phase_task: str = "",
+        limit: int = 10,
+        user: str = "",
+    ) -> list[dict[str, Any]]:
+        """Search documents.
+
+        Args:
+            query: Search query.
+            doc_type: Filter by document type.
+            project: Project identifier.
+            phase_task: Filter by phase-task ID.
+            limit: Maximum results.
+            user: User identifier for multi-user support.
+
+        Returns:
+            List of matching documents.
+        """
+        arguments: dict[str, Any] = {"limit": limit}
+        if query:
+            arguments["query"] = query
+        if doc_type:
+            arguments["doc_type"] = doc_type
+        if project:
+            arguments["project"] = project
+        if phase_task:
+            arguments["phase_task"] = phase_task
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Searching documents via MCP",
+            query=query[:50] if query else None,
+            doc_type=doc_type,
+        )
+
+        success, result = await self._call_tool_safe("search_documents", arguments)
+        if not success:
+            raise RuntimeError(f"search_documents failed: {result}")
+
+        return self._parse_list_result(result)
+
+    async def delete_document(
+        self,
+        doc_id: str,
+        project: str = "",
+        delete_drive_file: bool = False,
+        permanent: bool = False,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Delete a document.
+
+        Args:
+            doc_id: Document ID.
+            project: Project identifier.
+            delete_drive_file: If True, also delete from Google Drive.
+            permanent: If True, permanent delete (no trash).
+            user: User identifier for multi-user support.
+
+        Returns:
+            Dict with success status.
+        """
+        arguments: dict[str, Any] = {"doc_id": doc_id}
+        if project:
+            arguments["project"] = project
+        if delete_drive_file:
+            arguments["delete_drive_file"] = delete_drive_file
+        if permanent:
+            arguments["permanent"] = permanent
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Deleting document via MCP",
+            doc_id=doc_id,
+            permanent=permanent,
+        )
+
+        success, result = await self._call_tool_safe("delete_document", arguments)
+        if not success:
+            raise RuntimeError(f"delete_document failed: {result}")
+
+        return self._parse_json_result(result)
+
+    # === Document Type Management Methods ===
+
+    async def list_document_types(
+        self,
+        user: str = "",
+    ) -> list[dict[str, Any]]:
+        """List all document types (global + project).
+
+        Args:
+            user: User identifier for multi-user support.
+
+        Returns:
+            List of document type info dicts.
+        """
+        arguments: dict[str, Any] = {}
+        if user:
+            arguments["user"] = user
+
+        logger.info("Listing document types via MCP")
+
+        success, result = await self._call_tool_safe("list_document_types", arguments)
+        if not success:
+            raise RuntimeError(f"list_document_types failed: {result}")
+
+        parsed = self._parse_json_result(result)
+        return parsed.get("document_types", [])
+
+    async def register_document_type(
+        self,
+        type_id: str,
+        name: str,
+        folder_name: str,
+        scope: str = "global",
+        description: str = "",
+        create_folder: bool = True,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Register a new document type.
+
+        Args:
+            type_id: Type identifier (e.g., "api_spec").
+            name: Display name (e.g., "API Specification").
+            folder_name: Folder name in Google Drive (English, PascalCase).
+            scope: "global" for all projects or "project" for current only.
+            description: Type description.
+            create_folder: If True, create folder in Drive.
+            user: User identifier for multi-user support.
+
+        Returns:
+            Dict with success status and type info.
+        """
+        arguments: dict[str, Any] = {
+            "type_id": type_id,
+            "name": name,
+            "folder_name": folder_name,
+            "scope": scope,
+        }
+        if description:
+            arguments["description"] = description
+        if not create_folder:
+            arguments["create_folder"] = create_folder
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Registering document type via MCP",
+            type_id=type_id,
+            scope=scope,
+        )
+
+        success, result = await self._call_tool_safe(
+            "register_document_type", arguments
+        )
+        if not success:
+            raise RuntimeError(f"register_document_type failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def delete_document_type(
+        self,
+        type_id: str,
+        scope: str = "global",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Delete a document type.
+
+        Args:
+            type_id: Type identifier.
+            scope: "global" or "project".
+            user: User identifier for multi-user support.
+
+        Returns:
+            Dict with success status.
+        """
+        arguments: dict[str, Any] = {
+            "type_id": type_id,
+            "scope": scope,
+        }
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Deleting document type via MCP",
+            type_id=type_id,
+            scope=scope,
+        )
+
+        success, result = await self._call_tool_safe(
+            "delete_document_type", arguments
+        )
+        if not success:
+            raise RuntimeError(f"delete_document_type failed: {result}")
+
+        return self._parse_json_result(result)
+
+    # === Catalog Search Methods ===
+
+    async def search_catalog(
+        self,
+        query: str,
+        doc_type: str | None = None,
+        project: str = "",
+        limit: int = 10,
+        user: str = "",
+    ) -> list[dict[str, Any]]:
+        """Search the document catalog.
+
+        Args:
+            query: Search query.
+            doc_type: Filter by document type.
+            project: Project identifier.
+            limit: Maximum results.
+            user: User identifier for multi-user support.
+
+        Returns:
+            List of matching catalog entries.
+        """
+        arguments: dict[str, Any] = {
+            "query": query,
+            "limit": limit,
+        }
+        if doc_type:
+            arguments["doc_type"] = doc_type
+        if project:
+            arguments["project"] = project
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Searching catalog via MCP",
+            query=query[:50],
+        )
+
+        success, result = await self._call_tool_safe("search_catalog", arguments)
+        if not success:
+            raise RuntimeError(f"search_catalog failed: {result}")
+
+        return self._parse_list_result(result)

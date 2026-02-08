@@ -23,6 +23,33 @@ logger = get_logger(__name__)
 # Module-level settings reference
 _settings: Settings | None = None
 
+
+async def get_project_uid(project: str, prismind: PrismindAdapter, user: str = "") -> str | None:
+    """Get the project's unique ID (root_folder_id).
+
+    This is the Google Drive folder ID which serves as a globally unique identifier
+    for the project. It's used in UTIDs for task-document linking.
+
+    Args:
+        project: Project identifier.
+        prismind: PrismindAdapter instance.
+        user: User identifier for multi-user support.
+
+    Returns:
+        The project_uid (root_folder_id) or None if not found.
+    """
+    try:
+        progress = await prismind.get_progress(project=project, user=user)
+        # Check both project_uid (new) and root_folder_id (legacy)
+        return progress.get("project_uid") or progress.get("root_folder_id", "") or None
+    except Exception as e:
+        logger.warning(
+            "Failed to get project_uid",
+            project=project,
+            error=str(e),
+        )
+        return None
+
 # Project templates with predefined categories and phases
 PROJECT_TEMPLATES = {
     "game": {
@@ -51,13 +78,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     _settings = settings
 
     @mcp.tool()
-    async def list_projects(include_archived: bool = False) -> dict[str, Any]:
+    async def list_projects(include_archived: bool = False, user: str = "") -> dict[str, Any]:
         """List all projects with optional archived projects.
 
         USE THIS WHEN: You need to see available projects or check project status.
 
         Args:
             include_archived: If True, include archived projects in the list.
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -68,15 +96,18 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
+
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
             timeout=_settings.prismind_timeout,
         )
 
-        logger.info("Listing projects", include_archived=include_archived)
+        logger.info("Listing projects", include_archived=include_archived, user=effective_user)
 
         try:
-            result = await prismind.list_projects()
+            result = await prismind.list_projects(user=effective_user)
             projects = _parse_list_result(result)
         except Exception as e:
             logger.error("Failed to list projects", error=str(e))
@@ -118,6 +149,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         template: str = "game",
         name: str = "",
         description: str = "",
+        user: str = "",
     ) -> dict[str, Any]:
         """Initialize a new project with optional template.
 
@@ -133,6 +165,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             template: Template type ("game", "mcp-server", "web-app").
             name: Display name for the project (defaults to project identifier).
             description: Optional project description.
+            user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
             Dict containing:
@@ -146,6 +179,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
+
+        # Auto-detect user if not specified
+        effective_user = user or get_current_user()
 
         prismind = PrismindAdapter(
             sse_url=_settings.prismind_url,
@@ -169,7 +205,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         try:
             # Step 1: Create project in Prismind
-            setup_result = await prismind.setup_project(project=project, name=display_name)
+            setup_result = await prismind.setup_project(project=project, name=display_name, user=effective_user)
             setup_parsed = _parse_result(setup_result)
 
             # Check for error in result
@@ -186,7 +222,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
             logger.info("Prismind setup_project succeeded", project=project, result=setup_parsed)
 
-            # Step 2: Update project with template metadata
+            # Extract root_folder_id as project_uid (unique project identifier)
+            root_folder_id = setup_parsed.get("root_folder_id", "")
+
+            # Step 2: Update project with template metadata and project_uid
             update_result = await prismind.update_project(
                 project=project,
                 name=display_name,
@@ -196,6 +235,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 template=template,
                 status="active",
                 created_at=datetime.now().isoformat(),
+                project_uid=root_folder_id,  # Store root_folder_id as project_uid
+                user=effective_user,
             )
             update_parsed = _parse_result(update_result)
             logger.info("Prismind update_project result", project=project, result=update_parsed)
@@ -206,6 +247,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 name=display_name,
                 template=template,
                 categories=categories,
+                project_uid=root_folder_id,
             )
 
             return {
@@ -215,6 +257,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "template": template,
                 "categories": categories,
                 "phases": phases,
+                "project_uid": root_folder_id,
                 "message": f"Project '{project}' initialized with '{template}' template",
             }
 
@@ -376,7 +419,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             if clone_name == source_project:
                 clone_name = new_project  # Avoid duplicate names
 
-            setup_result = await prismind.setup_project(project=new_project, name=clone_name, force=True)
+            setup_result = await prismind.setup_project(project=new_project, name=clone_name, force=True, user=effective_user)
             setup_parsed = _parse_result(setup_result)
 
             # Check for error in result
@@ -402,6 +445,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 status="active",
                 created_at=datetime.now().isoformat(),
                 cloned_from=source_project,
+                user=effective_user,
             )
 
             # Step 4: Copy knowledge if requested
@@ -515,6 +559,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 update_result = await prismind.update_project(
                     project=project,
                     status="archived",
+                    user=effective_user,
                 )
                 update_parsed = _parse_result(update_result)
 
@@ -702,6 +747,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                     project=project,
                     status="active",
                     restored_at=datetime.now().isoformat(),
+                    user=effective_user,
                 )
 
                 logger.info("Project restored from archived status", project=project)
@@ -813,7 +859,7 @@ async def _import_project_impl(
     display_name = project_data.get("name", project)
 
     # Create project and verify success (force=True to skip similar project check)
-    setup_result = await prismind.setup_project(project=project, name=display_name, force=True)
+    setup_result = await prismind.setup_project(project=project, name=display_name, force=True, user=user)
     setup_parsed = _parse_result(setup_result)
 
     # Check for error in result (including validation errors)
@@ -839,6 +885,7 @@ async def _import_project_impl(
             template=project_data.get("template", "game"),
             status="active",
             restored_at=datetime.now().isoformat(),
+            user=user,
         )
         update_parsed = _parse_result(update_result)
 

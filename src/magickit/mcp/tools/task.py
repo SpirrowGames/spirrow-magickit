@@ -2,25 +2,166 @@
 
 Provides orchestrated task management with smart features:
 - Automatic task ID generation
+- UTID (Unique Task ID) for global task identification
 - Duplicate detection via knowledge search
 - Dependency validation
 - Context retrieval on task start
 - Knowledge recording on task completion
+- File attachment and refresh capabilities
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 
+from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
+from magickit.mcp.tools.document import smart_create_document_impl
 from magickit.utils.logging import get_logger
 from magickit.utils.user import get_current_user
 
 logger = get_logger(__name__)
+
+# === File Attachment Constants ===
+
+# Maximum file size for attachment (100KB)
+MAX_ATTACHMENT_FILE_SIZE = 100 * 1024
+
+# Patterns for sensitive files that should not be attached
+SENSITIVE_FILE_PATTERNS = [
+    ".env",
+    ".env.*",
+    "credentials*.json",
+    "secret*",
+    "*.key",
+    "*.pem",
+    "*.p12",
+    "*.pfx",
+    ".git/",
+    "__pycache__/",
+    "node_modules/",
+    ".venv/",
+    "venv/",
+    "*.pyc",
+    "*.so",
+    "*.dll",
+    "*.exe",
+]
+
+
+def _is_sensitive_file(file_path: str) -> bool:
+    """Check if a file matches sensitive patterns.
+
+    Args:
+        file_path: Path to check.
+
+    Returns:
+        True if the file should be excluded.
+    """
+    path = Path(file_path)
+    name = path.name
+    path_str = str(path)
+
+    for pattern in SENSITIVE_FILE_PATTERNS:
+        if pattern.endswith("/"):
+            # Directory pattern
+            if pattern.rstrip("/") in path_str.split("/"):
+                return True
+        elif "*" in pattern:
+            # Glob pattern - convert to regex
+            regex_pattern = pattern.replace(".", r"\.").replace("*", ".*")
+            if re.match(regex_pattern, name):
+                return True
+        else:
+            # Exact match
+            if name == pattern:
+                return True
+    return False
+
+
+def _calculate_file_hash(content: bytes) -> str:
+    """Calculate SHA256 hash of file content.
+
+    Args:
+        content: File content as bytes.
+
+    Returns:
+        Hex digest of SHA256 hash.
+    """
+    return hashlib.sha256(content).hexdigest()
+
+
+# === UTID (Unique Task ID) Functions ===
+
+
+def normalize_phase(phase: str) -> str:
+    """Normalize phase name to a slug format.
+
+    Args:
+        phase: Phase name (e.g., "Phase 2", "pre-production").
+
+    Returns:
+        Normalized slug (e.g., "phase2", "pre_production").
+    """
+    # Convert to lowercase
+    slug = phase.lower()
+    # Replace spaces and hyphens with nothing or underscore
+    slug = slug.replace(" ", "").replace("-", "_")
+    # Remove any non-alphanumeric characters except underscore
+    slug = re.sub(r"[^a-z0-9_]", "", slug)
+    return slug
+
+
+def generate_utid(project_uid: str, phase: str, task_id: str) -> str:
+    """Generate a Unique Task ID (UTID).
+
+    UTID format: {project_uid}:{phase_slug}:{local_task_id}
+    Example: 1AbC2dEf3GhI:phase2:T01
+
+    Args:
+        project_uid: Project's unique ID (root_folder_id from Google Drive).
+        phase: Phase name (will be normalized).
+        task_id: Local task ID (e.g., "T01").
+
+    Returns:
+        UTID string.
+    """
+    phase_slug = normalize_phase(phase)
+    return f"{project_uid}:{phase_slug}:{task_id}"
+
+
+def parse_utid(utid: str) -> tuple[str, str, str] | None:
+    """Parse a UTID into its components.
+
+    Args:
+        utid: UTID string.
+
+    Returns:
+        Tuple of (project_uid, phase_slug, local_task_id) or None if invalid.
+    """
+    parts = utid.split(":")
+    if len(parts) != 3:
+        return None
+    return (parts[0], parts[1], parts[2])
+
+
+def is_utid(task_id: str) -> bool:
+    """Check if a string is a UTID or a local task ID.
+
+    Args:
+        task_id: Task ID string to check.
+
+    Returns:
+        True if it's a UTID, False if it's a local task ID.
+    """
+    return ":" in task_id and len(task_id.split(":")) == 3
 
 
 def _parse_json_result(result: Any) -> dict[str, Any]:
@@ -209,6 +350,126 @@ def _calculate_stats(tasks: list[dict[str, Any]]) -> dict[str, int]:
     return stats
 
 
+async def _process_file_attachments(
+    settings: Settings,
+    prismind: PrismindAdapter,
+    utid: str,
+    attach_files: list[str],
+    project: str,
+    user: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Process file attachments: validate, summarize, create documents.
+
+    Args:
+        settings: Application settings.
+        prismind: Prismind adapter instance.
+        utid: UTID for the task (used as phase_task for documents).
+        attach_files: List of file paths to attach.
+        project: Project identifier.
+        user: User identifier.
+
+    Returns:
+        Tuple of (attached_files list, warnings list).
+    """
+    attached: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    cognilens = CognilensAdapter(
+        base_url=settings.cognilens_url,
+        timeout=settings.cognilens_timeout,
+    )
+
+    for file_path in attach_files:
+        path = Path(file_path)
+
+        # Validation: file exists
+        if not path.exists():
+            warnings.append(f"File not found: {file_path}")
+            continue
+
+        # Validation: not sensitive
+        if _is_sensitive_file(file_path):
+            warnings.append(f"Skipped sensitive file: {file_path}")
+            continue
+
+        # Validation: file size
+        file_size = path.stat().st_size
+        if file_size > MAX_ATTACHMENT_FILE_SIZE:
+            warnings.append(
+                f"File too large ({file_size} bytes > {MAX_ATTACHMENT_FILE_SIZE}): {file_path}"
+            )
+            continue
+
+        try:
+            # Read file content
+            content = path.read_text(encoding="utf-8", errors="replace")
+            content_bytes = path.read_bytes()
+
+            # Calculate hash
+            file_hash = _calculate_file_hash(content_bytes)
+
+            # Generate summary using Cognilens
+            logger.info(
+                "Generating summary for attached file",
+                file_path=file_path,
+                file_size=file_size,
+            )
+            summary = await cognilens.summarize(
+                text=content,
+                style="concise",
+                max_tokens=300,
+            )
+
+            # Create document using smart_create_document
+            doc_result = await smart_create_document_impl(
+                settings=settings,
+                name=f"Attachment: {path.name}",
+                doc_type="task_attachment",
+                content=f"# File: {path.name}\n\n## Summary\n{summary}\n\n## Original Content\n```\n{content[:5000]}\n```",
+                phase_task=utid,  # Use UTID as phase_task for linking
+                project=project,
+                keywords=[path.suffix.lstrip("."), "attachment", utid.split(":")[-1]],
+                user=user,
+            )
+
+            if doc_result.get("success"):
+                # Store attachment metadata as knowledge
+                attachment_info = {
+                    "file_path": str(path.absolute()),
+                    "file_name": path.name,
+                    "file_hash": file_hash,
+                    "file_size": file_size,
+                    "doc_id": doc_result.get("doc_id", ""),
+                    "utid": utid,
+                }
+
+                await prismind.add_knowledge(
+                    content=json.dumps(attachment_info),
+                    category="task_attachment",
+                    project=project,
+                    tags=[f"utid:{utid}", f"hash:{file_hash[:16]}", path.name],
+                    source=f"attachment:{utid}:{path.name}",
+                    user=user,
+                )
+
+                attached.append(attachment_info)
+                logger.info(
+                    "File attached successfully",
+                    file_path=file_path,
+                    doc_id=doc_result.get("doc_id"),
+                )
+            else:
+                warnings.append(
+                    f"Failed to create document for {file_path}: {doc_result.get('message')}"
+                )
+
+        except Exception as e:
+            logger.warning("Failed to process attachment", file_path=file_path, error=str(e))
+            warnings.append(f"Failed to attach {file_path}: {e}")
+
+    return attached, warnings
+
+
 async def add_task_impl(
     settings: Settings,
     name: str,
@@ -217,6 +478,8 @@ async def add_task_impl(
     priority: str = "medium",
     category: str = "",
     blocked_by: list[str] | None = None,
+    attach_files: list[str] | None = None,
+    attach_docs: list[str] | None = None,
     project: str = "",
     user: str = "",
 ) -> dict[str, Any]:
@@ -224,10 +487,13 @@ async def add_task_impl(
 
     Orchestration:
     1. Auto-generate task_id
-    2. Check for duplicate tasks via knowledge search
-    3. Validate blocked_by task IDs exist
-    4. Add task via Prismind
-    5. Register task info as knowledge
+    2. Generate UTID (Unique Task ID)
+    3. Check for duplicate tasks via knowledge search
+    4. Validate blocked_by task IDs exist
+    5. Add task via Prismind
+    6. Process file attachments (summarize and link)
+    7. Link existing documents
+    8. Register task info as knowledge
 
     Args:
         settings: Application settings
@@ -237,11 +503,13 @@ async def add_task_impl(
         priority: Priority (high/medium/low)
         category: Category (bug/feature/refactor/design/test)
         blocked_by: List of task IDs this depends on
+        attach_files: List of file paths to attach (will be summarized and stored)
+        attach_docs: List of existing document IDs to link
         project: Project ID
         user: User identifier for multi-user support
 
     Returns:
-        Dict with task info and warnings
+        Dict with task info, UTID, attachments, and warnings
     """
     # Auto-detect user if not specified
     effective_user = user or get_current_user()
@@ -252,6 +520,7 @@ async def add_task_impl(
     )
 
     warnings: list[str] = []
+    progress: dict[str, Any] = {}
 
     # Step 1: Get current progress for task_id generation and phase detection
     try:
@@ -268,7 +537,23 @@ async def add_task_impl(
     if not phase:
         phase = progress.get("current_phase", "Phase 1") if progress else "Phase 1"
 
-    # Step 2: Check for duplicate tasks
+    # Step 2: Generate UTID
+    project_uid = progress.get("project_uid") or progress.get("root_folder_id", "")
+    utid = ""
+    if project_uid:
+        utid = generate_utid(project_uid, phase, task_id)
+        logger.info(
+            "Generated UTID",
+            task_id=task_id,
+            utid=utid,
+        )
+    else:
+        logger.warning(
+            "No project_uid available, UTID not generated",
+            project=project,
+        )
+
+    # Step 3: Check for duplicate tasks
     try:
         search_query = f"{name} {description}"[:200]
         similar = await prismind.search_knowledge(
@@ -289,7 +574,7 @@ async def add_task_impl(
     except Exception as e:
         logger.warning("Duplicate check failed", error=str(e))
 
-    # Step 3: Validate blocked_by
+    # Step 4: Validate blocked_by
     if blocked_by:
         existing_ids = {t.get("task_id") for t in all_tasks}
         invalid_deps = [dep for dep in blocked_by if dep not in existing_ids]
@@ -300,7 +585,7 @@ async def add_task_impl(
                 "existing_task_ids": list(existing_ids),
             }
 
-    # Step 4: Add task via Prismind
+    # Step 5: Add task via Prismind
     try:
         result = await prismind.add_task(
             phase=phase,
@@ -320,10 +605,52 @@ async def add_task_impl(
             "error": f"Failed to add task: {e}",
         }
 
-    # Step 5: Register as knowledge for searchability
+    # Step 6: Process file attachments
+    attached_files: list[dict[str, Any]] = []
+    if attach_files and utid:
+        attached_files, attach_warnings = await _process_file_attachments(
+            settings=settings,
+            prismind=prismind,
+            utid=utid,
+            attach_files=attach_files,
+            project=project,
+            user=effective_user,
+        )
+        warnings.extend(attach_warnings)
+    elif attach_files and not utid:
+        warnings.append(
+            "File attachments require project_uid. Set up project with init_project first."
+        )
+
+    # Step 7: Link existing documents
+    linked_docs: list[str] = []
+    if attach_docs and utid:
+        for doc_id in attach_docs:
+            try:
+                # Record the link as knowledge
+                await prismind.add_knowledge(
+                    content=json.dumps({
+                        "type": "doc_link",
+                        "doc_id": doc_id,
+                        "utid": utid,
+                    }),
+                    category="task_doc_link",
+                    project=project,
+                    tags=[f"utid:{utid}", f"doc:{doc_id}"],
+                    source=f"doc_link:{utid}:{doc_id}",
+                    user=effective_user,
+                )
+                linked_docs.append(doc_id)
+            except Exception as e:
+                logger.warning("Failed to link document", doc_id=doc_id, error=str(e))
+                warnings.append(f"Failed to link document {doc_id}: {e}")
+
+    # Step 8: Register as knowledge for searchability
     try:
         knowledge_content = f"Task {task_id}: {name}\n{description}"
         tags = [phase, task_id]
+        if utid:
+            tags.append(f"utid:{utid}")
         if category:
             tags.append(category)
         if priority != "medium":
@@ -344,11 +671,14 @@ async def add_task_impl(
     return {
         "success": True,
         "task_id": task_id,
+        "utid": utid,
         "phase": phase,
         "name": name,
         "priority": priority,
         "category": category,
         "blocked_by": blocked_by or [],
+        "attached_files": attached_files,
+        "linked_docs": linked_docs,
         "warnings": warnings,
         "message": result.get("message", f"Task {task_id} added successfully"),
     }
@@ -431,15 +761,184 @@ async def list_tasks_impl(
     }
 
 
+async def _refresh_task_attachments(
+    settings: Settings,
+    prismind: PrismindAdapter,
+    utid: str,
+    project: str,
+    user: str,
+) -> dict[str, Any]:
+    """Check and refresh file attachments for a task.
+
+    Compares current file hashes with stored hashes and re-summarizes
+    changed files.
+
+    Args:
+        settings: Application settings.
+        prismind: Prismind adapter instance.
+        utid: UTID for the task.
+        project: Project identifier.
+        user: User identifier.
+
+    Returns:
+        Dict with attachment_status containing updated, unchanged, deleted, and errors.
+    """
+    status: dict[str, Any] = {
+        "updated": [],
+        "unchanged": [],
+        "deleted": [],
+        "errors": [],
+    }
+
+    # Find all attachments for this task by UTID tag
+    try:
+        attachments = await prismind.search_knowledge(
+            query=f"utid:{utid}",
+            category="task_attachment",
+            project=project,
+            limit=50,
+            user=user,
+        )
+    except Exception as e:
+        logger.warning("Failed to search attachments", error=str(e))
+        status["errors"].append(f"Failed to search attachments: {e}")
+        return status
+
+    if not attachments:
+        return status
+
+    cognilens = CognilensAdapter(
+        base_url=settings.cognilens_url,
+        timeout=settings.cognilens_timeout,
+    )
+
+    for attachment_entry in attachments:
+        try:
+            # Parse the attachment info from knowledge content
+            content = attachment_entry.get("content", "")
+            try:
+                attachment_info = json.loads(content)
+            except json.JSONDecodeError:
+                continue
+
+            file_path = attachment_info.get("file_path", "")
+            stored_hash = attachment_info.get("file_hash", "")
+            doc_id = attachment_info.get("doc_id", "")
+            knowledge_id = attachment_entry.get("id", attachment_entry.get("knowledge_id", ""))
+
+            if not file_path:
+                continue
+
+            path = Path(file_path)
+
+            # Check if file still exists
+            if not path.exists():
+                status["deleted"].append({
+                    "file_path": file_path,
+                    "file_name": path.name,
+                    "doc_id": doc_id,
+                })
+                logger.warning(
+                    "Attached file has been deleted",
+                    file_path=file_path,
+                    utid=utid,
+                )
+                continue
+
+            # Calculate current hash
+            try:
+                current_content = path.read_bytes()
+                current_hash = _calculate_file_hash(current_content)
+            except Exception as e:
+                status["errors"].append(f"Failed to read {file_path}: {e}")
+                continue
+
+            # Compare hashes
+            if current_hash == stored_hash:
+                status["unchanged"].append({
+                    "file_path": file_path,
+                    "file_name": path.name,
+                })
+                continue
+
+            # File has changed - re-summarize and update
+            logger.info(
+                "Refreshing changed attachment",
+                file_path=file_path,
+                utid=utid,
+            )
+
+            try:
+                text_content = path.read_text(encoding="utf-8", errors="replace")
+                new_summary = await cognilens.summarize(
+                    text=text_content,
+                    style="concise",
+                    max_tokens=300,
+                )
+
+                # Update the document content
+                await prismind.call(
+                    "update_document",
+                    doc_id=doc_id,
+                    content=f"# File: {path.name}\n\n## Summary\n{new_summary}\n\n## Original Content\n```\n{text_content[:5000]}\n```",
+                    project=project,
+                    user=user,
+                )
+
+                # Update the knowledge entry with new hash
+                new_attachment_info = {
+                    **attachment_info,
+                    "file_hash": current_hash,
+                    "file_size": path.stat().st_size,
+                }
+
+                # Delete old knowledge and add new one
+                try:
+                    await prismind.delete_knowledge(knowledge_id=knowledge_id, project=project, user=user)
+                except Exception:
+                    pass  # May not have delete permission
+
+                await prismind.add_knowledge(
+                    content=json.dumps(new_attachment_info),
+                    category="task_attachment",
+                    project=project,
+                    tags=[f"utid:{utid}", f"hash:{current_hash[:16]}", path.name],
+                    source=f"attachment:{utid}:{path.name}",
+                    user=user,
+                )
+
+                status["updated"].append({
+                    "file_path": file_path,
+                    "file_name": path.name,
+                    "doc_id": doc_id,
+                    "old_hash": stored_hash[:16],
+                    "new_hash": current_hash[:16],
+                })
+
+            except Exception as e:
+                logger.warning(
+                    "Failed to refresh attachment",
+                    file_path=file_path,
+                    error=str(e),
+                )
+                status["errors"].append(f"Failed to refresh {path.name}: {e}")
+
+        except Exception as e:
+            status["errors"].append(f"Error processing attachment: {e}")
+
+    return status
+
+
 async def start_task_impl(
     settings: Settings,
     task_id: str,
     phase: str = "",
     project: str = "",
     force: bool = False,
+    refresh_attachments: bool = True,
     user: str = "",
 ) -> dict[str, Any]:
-    """Start a task with dependency check and context retrieval.
+    """Start a task with dependency check, context retrieval, and attachment refresh.
 
     Args:
         settings: Application settings
@@ -447,10 +946,11 @@ async def start_task_impl(
         phase: Phase name (specify if task_id exists in multiple phases)
         project: Project ID
         force: Start even if dependencies not met
+        refresh_attachments: If True, check and refresh changed file attachments
         user: User identifier for multi-user support
 
     Returns:
-        Dict with task info and related context
+        Dict with task info, related context, and attachment status
     """
     # Auto-detect user if not specified
     effective_user = user or get_current_user()
@@ -562,11 +1062,42 @@ async def start_task_impl(
     except Exception as e:
         logger.warning("Failed to get related context", error=str(e))
 
+    # Refresh file attachments if enabled
+    attachment_status: dict[str, Any] = {}
+    if refresh_attachments:
+        # Generate UTID to search for attachments
+        project_uid = progress.get("project_uid") or progress.get("root_folder_id", "")
+        if project_uid:
+            utid = generate_utid(project_uid, task_phase, task_id)
+            attachment_status = await _refresh_task_attachments(
+                settings=settings,
+                prismind=prismind,
+                utid=utid,
+                project=project,
+                user=effective_user,
+            )
+
+            # Add warnings for deleted files
+            if attachment_status.get("deleted"):
+                for deleted in attachment_status["deleted"]:
+                    warnings.append(
+                        f"Attached file was deleted: {deleted.get('file_name', 'unknown')}"
+                    )
+
+            # Log updated files
+            if attachment_status.get("updated"):
+                logger.info(
+                    "Refreshed attachments",
+                    updated_count=len(attachment_status["updated"]),
+                    task_id=task_id,
+                )
+
     return {
         "success": True,
         "task_id": task_id,
         "task": target_task,
         "context": context,
+        "attachment_status": attachment_status,
         "warnings": warnings,
         "message": result.get("message", f"Task {task_id} started"),
     }
@@ -1254,16 +1785,21 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         priority: str = "medium",
         category: str = "",
         blocked_by: list[str] | None = None,
+        attach_files: list[str] | None = None,
+        attach_docs: list[str] | None = None,
         project: str = "",
         user: str = "",
     ) -> dict[str, Any]:
-        """Add a new task with automatic ID generation and validation.
+        """Add a new task with automatic ID generation, UTID, and file attachments.
 
         USE THIS WHEN: Adding a new task to the project backlog.
         This tool:
         - Auto-generates task ID (T01, T02, etc.)
+        - Generates UTID for global task identification
         - Checks for duplicate/similar tasks
         - Validates dependency task IDs
+        - Attaches source files (summarizes and stores in RAG)
+        - Links existing documents
         - Records task info as searchable knowledge
 
         Args:
@@ -1273,11 +1809,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             priority: Priority level (high/medium/low)
             category: Category (bug/feature/refactor/design/test)
             blocked_by: Task IDs this depends on
+            attach_files: File paths to attach (will be summarized and stored in RAG)
+            attach_docs: Existing document IDs to link to this task
             project: Project ID (empty for current)
             user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
-            Dict with task_id, warnings, and status
+            Dict with task_id, utid, attached_files, linked_docs, warnings, and status
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
@@ -1290,6 +1828,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             priority=priority,
             category=category,
             blocked_by=blocked_by,
+            attach_files=attach_files,
+            attach_docs=attach_docs,
             project=project,
             user=user,
         )
@@ -1341,25 +1881,28 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         phase: str = "",
         project: str = "",
         force: bool = False,
+        refresh_attachments: bool = True,
         user: str = "",
     ) -> dict[str, Any]:
-        """Start a task with dependency validation and context retrieval.
+        """Start a task with dependency validation, context retrieval, and attachment refresh.
 
         USE THIS WHEN: Beginning work on a task.
         This tool:
         - Checks if dependencies are completed
         - Retrieves related knowledge and context
         - Gets completion notes from dependency tasks
+        - Refreshes file attachments (detects changes, re-summarizes if needed)
 
         Args:
             task_id: Task ID to start (required)
             phase: Phase name (required if same task_id exists in multiple phases)
             project: Project ID (empty for current)
             force: Start even if dependencies incomplete
+            refresh_attachments: If True, check and refresh changed file attachments
             user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
-            Dict with task info, related context, and warnings
+            Dict with task info, related context, attachment_status, and warnings
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
@@ -1370,6 +1913,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             phase=phase,
             project=project,
             force=force,
+            refresh_attachments=refresh_attachments,
             user=user,
         )
 

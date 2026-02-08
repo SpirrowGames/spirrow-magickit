@@ -298,12 +298,12 @@ resume(project="trapxtrap", detail_level="standard")
 
 ### プロジェクト管理 (`project.py`)
 
-プロジェクトのライフサイクル管理ツール。
+プロジェクトのライフサイクル管理ツール。プロジェクトUID（`project_uid`）を自動生成し、タスク-ドキュメント紐付けに使用。
 
 | ツール | 用途 |
 |--------|------|
 | `list_projects` | プロジェクト一覧取得（アーカイブ含む/除外） |
-| `init_project` | テンプレートからプロジェクト初期化 |
+| `init_project` | テンプレートからプロジェクト初期化（project_uid自動生成） |
 | `get_project_status` | プロジェクトの詳細ステータス取得 |
 | `clone_project` | 既存プロジェクトを複製 |
 | `delete_project` | アーカイブ/エクスポート+削除/完全削除 |
@@ -311,10 +311,19 @@ resume(project="trapxtrap", detail_level="standard")
 
 ```python
 # 使用例
-init_project(project="my-game", template="game", name="My Game")
+result = init_project(project="my-game", template="game", name="My Game")
+# -> {"success": true, "project_uid": "1AbC2dEf3GhI", ...}
+# project_uid はGoogle DriveフォルダIDで、UTIDの生成に使用される
+
 get_project_status(project="my-game")
 delete_project(project="old-project", mode="archive")
 ```
+
+**project_uid:**
+- `init_project`で自動生成されるGoogle DriveフォルダID
+- グローバルに一意な値
+- UTID（Unique Task ID）の生成に使用
+- タスクとドキュメントの紐付けに必須
 
 **テンプレート種類:**
 - `game`: ゲーム開発（design, implementation, asset, bug, decision）
@@ -323,14 +332,14 @@ delete_project(project="old-project", mode="archive")
 
 ### タスク管理 (`task.py`)
 
-プロジェクトタスクの包括的な管理ツール。依存関係の検証、knowledge連携、影響分析を含む。
+プロジェクトタスクの包括的な管理ツール。UTID（一意タスクID）、ファイル添付、依存関係の検証、knowledge連携、影響分析を含む。
 
 | ツール | 用途 |
 |--------|------|
-| `add_task` | タスク追加（ID自動生成、重複検出、依存関係検証） |
+| `add_task` | タスク追加（ID自動生成、UTID生成、ファイル添付、重複検出、依存関係検証） |
 | `list_tasks` | タスク一覧（フィルタリング、スマートソート、推奨タスク） |
 | `get_task` | 単一タスク詳細取得（関連knowledge含む） |
-| `start_task` | タスク開始（依存関係チェック、コンテキスト取得） |
+| `start_task` | タスク開始（依存関係チェック、コンテキスト取得、添付ファイル更新検出） |
 | `complete_task` | タスク完了（learnings記録、アンブロック検出） |
 | `block_task` | タスクブロック（影響分析、カスケード効果） |
 | `delete_task` | タスク削除（依存関係クリーンアップ） |
@@ -339,8 +348,19 @@ delete_project(project="old-project", mode="archive")
 | `set_task_priority` | 優先度設定のショートカット |
 | `set_task_blockers` | 依存関係設定のショートカット |
 
+**UTID（Unique Task ID）:**
+
+タスクをグローバルに一意に識別するID。プロジェクトUID（Google DriveフォルダID）、フェーズ、ローカルタスクIDを組み合わせる。
+
+```
+形式: {project_uid}:{phase_slug}:{local_task_id}
+例:   1AbC2dEf3GhI:phase2:T01
+```
+
+UTIDにより、異なるプロジェクト間でもタスクを一意に識別でき、タスクとドキュメントの紐付けに使用される。
+
 ```python
-# 使用例: タスク追加（ID自動生成）
+# 使用例: タスク追加（ID自動生成、UTID生成）
 add_task(
     name="射撃システム実装",
     description="プレイヤーの射撃機能を実装",
@@ -350,6 +370,25 @@ add_task(
     blocked_by=["T01"],  # 依存タスク
     project="my-game"
 )
+# -> {"task_id": "T02", "utid": "1AbC2dEf:phase2:T02", ...}
+
+# 使用例: ファイル添付付きタスク追加
+add_task(
+    name="射撃システム実装",
+    description="プレイヤーの射撃機能を実装",
+    attach_files=["src/shooting.cpp", "docs/shooting-design.md"],  # ファイル添付
+    attach_docs=["doc-12345"],  # 既存ドキュメントリンク
+    project="my-game"
+)
+# -> {
+#   "task_id": "T02",
+#   "utid": "1AbC2dEf:phase2:T02",
+#   "attached_files": [
+#     {"file_path": "/path/to/src/shooting.cpp", "file_hash": "abc123...", "doc_id": "doc-new-1"}
+#   ],
+#   "linked_docs": ["doc-12345"],
+#   ...
+# }
 
 # 使用例: タスク一覧取得（フィルタリング）
 list_tasks(
@@ -359,6 +398,22 @@ list_tasks(
     project="my-game"
 )
 # -> {"tasks": [...], "recommended": {...}, "stats": {...}}
+
+# 使用例: タスク開始（添付ファイル更新検出）
+start_task(
+    task_id="T01",
+    project="my-game",
+    refresh_attachments=True  # 添付ファイルの変更を検出・更新
+)
+# -> {
+#   "task": {...},
+#   "context": {...},
+#   "attachment_status": {
+#     "updated": [{"file_name": "shooting.cpp", "old_hash": "abc...", "new_hash": "xyz..."}],
+#     "unchanged": [{"file_name": "design.md"}],
+#     "deleted": []
+#   }
+# }
 
 # 使用例: タスク取得
 get_task(task_id="T01", include_related_knowledge=True)
@@ -387,6 +442,30 @@ delete_task(
 )
 # -> {"dependent_tasks_updated": ["T02", "T03"]}
 ```
+
+**ファイル添付機能:**
+
+`attach_files`パラメータでソースコードや設計ドキュメントをタスクに紐付け。
+
+処理フロー:
+1. ファイルのバリデーション（存在確認、サイズ上限100KB、秘匿ファイル除外）
+2. SHA256ハッシュ計算
+3. Cognilensで要約生成
+4. smart_create_documentでドキュメント作成（phase_task=UTID）
+5. knowledgeにメタデータ保存
+
+除外される秘匿ファイル:
+- `.env`, `.env.*`, `credentials*.json`, `secret*`
+- `*.key`, `*.pem`, `*.p12`, `*.pfx`
+- `.git/`, `__pycache__/`, `node_modules/`, `.venv/`
+
+**添付ファイルリフレッシュ:**
+
+`start_task`で`refresh_attachments=True`（デフォルト）を指定すると:
+- 添付ファイルのハッシュを比較
+- 変更があればCognilensで再要約
+- 削除されたファイルは警告
+- `attachment_status`で変更内容を報告
 
 **スマートソート:**
 - ブロックされていないタスク優先
