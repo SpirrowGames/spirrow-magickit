@@ -178,13 +178,13 @@ class CognilensAdapter(MCPBaseAdapter):
 
     async def unify_summaries(
         self,
-        documents: list[str],
+        documents: list[dict[str, str]],
         purpose: str = "",
     ) -> str:
         """Unify multiple documents into a single coherent summary.
 
         Args:
-            documents: List of documents to unify.
+            documents: List of document dicts with "title" and "content" keys.
             purpose: Purpose of the unified summary.
 
         Returns:

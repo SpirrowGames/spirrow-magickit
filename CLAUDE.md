@@ -9,14 +9,15 @@
 ## アーキテクチャ
 
 ```
-Claude Code / Client
+Claude Code / Client (開発PC)
+        │               │
+        │ MCP            │ Phanthand (:7300)
+        ▼               ▼
+    Magickit (:8004 リモートサーバ)
         │
-        ▼
-    Magickit (:8004)
-        │
-   ┌────┼────┬────┐
-   ▼    ▼    ▼    ▼
-Lexora Cognilens Prismind UnrealWise
+   ┌────┼────┬────┬────┐
+   ▼    ▼    ▼    ▼    ▼
+Lexora Cognilens Prismind UnrealWise Phanthand(開発PC)
 ```
 
 **重要**: 「指揮者 - 自分では演奏しない」。各サービスへの委譲に徹する。
@@ -62,12 +63,14 @@ src/magickit/
 │       ├── lifecycle.py  # フェーズ・マイルストーン管理
 │       ├── progress.py   # 進捗追跡・予測
 │       ├── quality.py    # 品質ゲート管理
-│       └── reporting.py  # レポート・分析
+│       ├── reporting.py  # レポート・分析
+│       └── smart_read.py # Phanthand連携ファイル読み込み・分析
 ├── adapters/
 │   ├── base.py          # Adapter ABC
 │   ├── lexora.py        # LLM呼び出し
 │   ├── cognilens.py     # 圧縮
 │   ├── prismind.py      # RAG検索
+│   ├── phanthand.py     # 開発PCファイルアクセス（独立クラス）
 │   └── unrealwise.py    # UE操作
 └── utils/
     └── logging.py
@@ -706,6 +709,90 @@ analyze_project_performance(project="my-game", use_llm=True)
 - `bug` → Bug Fixes
 - `refactor` / `improvement` / `polish` → Improvements
 - その他 → Other Changes
+
+### スマートファイル読み込み・分析 (`smart_read.py`)
+
+Phanthand（開発PCファイルアクセスAPI）とCognilens/Lexoraを組み合わせたツール。
+ファイル内容はPhanthand→Cognilensで処理され、Claudeのコンテキストには圧縮結果のみが載る。
+
+**前提**: 開発PCでPhanthandが稼働していること（https://github.com/SpirrowGames/spirrow-phanthand）
+
+| ツール | 用途 |
+|--------|------|
+| `smart_read` | 開発PCのファイルをCognilensで処理して読み込み（コンテキスト節約） |
+| `smart_analyze` | 複数ファイルを横断分析し、質問に回答 |
+
+**PhanthandAdapter の特徴:**
+- BaseAdapterを継承しない独立クラス（`adapters/phanthand.py`）
+- 接続先は開発者ごとに異なるため、`phanthand_url`/`phanthand_api_key`はツール呼び出し時に指定
+- Magickit側に設定ファイルの変更は不要
+
+```python
+# smart_read: ファイル単位の読み込み+Cognilens処理
+smart_read(
+    files=["D:/Projects/my-app/src/auth.py", "D:/Projects/my-app/src/middleware.py"],
+    mode="essence",           # raw / summarize / essence / compress
+    focus="認証フロー",        # essence/compressで注目ポイント指定
+    phanthand_url="http://192.168.1.10:7300",
+    phanthand_api_key="your-secret-key",
+    project="my-project"
+)
+# -> {
+#   "success": true,
+#   "mode": "essence",
+#   "results": [
+#     {"file": "D:/.../auth.py", "size": 15234, "processed": "...Cognilens処理結果...", "mode": "essence"},
+#     {"file": "D:/.../middleware.py", "size": 8421, "processed": "...Cognilens処理結果...", "mode": "essence"}
+#   ],
+#   "file_count": 2,
+#   "errors": []
+# }
+
+# smart_analyze: 複数ファイルを横断分析
+smart_analyze(
+    files=["src/api/*.py"],    # globパターン対応
+    question="エラーハンドリングのパターンは？",
+    phanthand_url="http://192.168.1.10:7300",
+    phanthand_api_key="your-secret-key",
+    search_root="D:/Projects/my-app",  # glob展開のルートディレクトリ
+    max_files=20,              # 最大ファイル数（コスト制御）
+    save_to_knowledge=True,    # 分析結果をPrismindに保存
+    project="my-project"
+)
+# -> {
+#   "success": true,
+#   "question": "エラーハンドリングのパターンは？",
+#   "answer": "...Lexoraによる分析回答...",
+#   "files_analyzed": ["src/api/auth.py", "src/api/users.py", "src/api/errors.py"],
+#   "file_count": 3,
+#   "summary": "...Cognilens統合要約...",
+#   "knowledge_saved": true,
+#   "errors": []
+# }
+```
+
+**smart_read 処理モード:**
+
+| モード | Cognilens機能 | ユースケース | focus使用 |
+|--------|--------------|-------------|-----------|
+| `raw` | なし | 小さいファイルをそのまま読む | No |
+| `summarize` | summarize | 概要把握 | No |
+| `essence` | extract_essence | 設計パターン・API構造の抽出 | Yes |
+| `compress` | compress | コンテキスト節約のための圧縮 | Yes |
+
+**smart_analyze 処理フロー:**
+```
+1. ファイルリスト解決（globパターンはPhanthand searchで展開）
+2. 各ファイルをPhanthand経由で読み込み
+3. Cognilens unify_summaries で統合要約
+4. Lexora で質問に回答
+5. オプション: Prismindにknowledgeとして保存
+```
+
+**エラーハンドリング:**
+- Phanthand接続エラー → 即座に全体停止
+- ファイル単位のエラー（未存在、パス不許可等）→ スキップして他ファイルは継続
+- Lexora失敗 → Cognilens要約だけ返却（部分成功）
 
 ## ゲーム開発ワークフロー例
 

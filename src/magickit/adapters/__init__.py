@@ -4,6 +4,7 @@ from magickit.adapters.base import BaseAdapter
 from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.adapters.mcp_base import MCPBaseAdapter
+from magickit.adapters.phanthand import PhanthandAdapter
 from magickit.adapters.prismind import PrismindAdapter
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "MCPBaseAdapter",
     "CognilensAdapter",
     "LexoraAdapter",
+    "PhanthandAdapter",
     "PrismindAdapter",
 ]

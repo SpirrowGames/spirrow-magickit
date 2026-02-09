@@ -31,6 +31,7 @@ from magickit.mcp.tools import (
     progress,
     quality,
     reporting,
+    smart_read,
 )
 
 logger = get_logger(__name__)
@@ -75,6 +76,7 @@ rather than calling individual services separately.""",
     progress.register_tools(mcp, settings)
     quality.register_tools(mcp, settings)
     reporting.register_tools(mcp, settings)
+    smart_read.register_tools(mcp, settings)
 
     logger.info(
         "MCP server created",
