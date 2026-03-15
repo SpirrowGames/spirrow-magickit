@@ -271,6 +271,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         token_budget: int = 2000,
         focus_areas: list[str] | None = None,
         include_essence: bool = True,
+        project: str = "",
         user: str = "",
     ) -> dict[str, Any]:
         """Retrieve and analyze documents with intelligent essence extraction.
@@ -292,6 +293,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             token_budget: Maximum tokens for the combined output.
             focus_areas: Optional areas to focus on during essence extraction.
             include_essence: Whether to extract essence (key concepts) from documents.
+            project: Optional project filter for Prismind search.
             user: User identifier for multi-user support (auto-detected if empty).
 
         Returns:
@@ -327,6 +329,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         }
         if doc_type:
             catalog_params["doc_type"] = doc_type
+        if project:
+            catalog_params["project"] = project
         if effective_user:
             catalog_params["user"] = effective_user
 
@@ -354,12 +358,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 raw_doc = await prismind.get_document(doc_id=doc_id)
                 # Parse JSON string result to dict
                 doc = _parse_dict_result(raw_doc)
-                content = doc.get("content", "")
+                # Content is nested under "document" key in Prismind response
+                doc_data = doc.get("document", doc)
+                content = doc_data.get("content", "") if isinstance(doc_data, dict) else ""
 
                 documents.append({
                     "id": doc_id,
                     "type": entry.get("doc_type", doc_type),
-                    "title": entry.get("title", doc_id),
+                    "title": doc_data.get("name", entry.get("title", doc_id)) if isinstance(doc_data, dict) else entry.get("title", doc_id),
                     "preview": content[:500] + "..." if len(content) > 500 else content,
                 })
                 combined_content.append(content)
