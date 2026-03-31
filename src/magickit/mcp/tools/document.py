@@ -338,8 +338,13 @@ async def smart_create_document_impl(
     # Step 1: Get existing document types to check for exact match
     try:
         types_result_raw = await prismind.list_document_types(user=effective_user)
-        types_result = _parse_result(types_result_raw)
-        existing_types = types_result.get("document_types", [])
+        # list_document_types() returns a list of type dicts directly
+        if isinstance(types_result_raw, list):
+            existing_types = types_result_raw
+        else:
+            # Fallback: parse as dict with "document_types" key
+            types_result = _parse_result(types_result_raw)
+            existing_types = types_result.get("document_types", [])
     except Exception as e:
         logger.warning("Failed to list document types, assuming none", error=str(e))
         existing_types = []
@@ -440,24 +445,36 @@ async def smart_create_document_impl(
                             folder_name=new_type_metadata["folder_name"],
                         )
                     else:
-                        logger.warning(
-                            "Document type registration returned non-success",
+                        error_msg = register_result.get(
+                            "message", "Unknown registration error"
+                        )
+                        logger.error(
+                            "Document type registration failed",
                             result=register_result,
                         )
+                        return {
+                            "success": False,
+                            "doc_id": "",
+                            "doc_url": "",
+                            "doc_type": doc_type,
+                            "type_registered": False,
+                            "registered_type": None,
+                            "matched_existing": False,
+                            "message": f"Document type '{doc_type}' auto-registration failed: {error_msg}",
+                        }
 
         except Exception as e:
             logger.error("Failed to match/register document type", error=str(e))
-            if not auto_register_type:
-                return {
-                    "success": False,
-                    "doc_id": "",
-                    "doc_url": "",
-                    "doc_type": doc_type,
-                    "type_registered": False,
-                    "registered_type": None,
-                    "message": f"Document type '{doc_type}' not found and auto-registration failed: {e}",
-                }
-            # Continue with original doc_type, Prismind may handle it
+            return {
+                "success": False,
+                "doc_id": "",
+                "doc_url": "",
+                "doc_type": doc_type,
+                "type_registered": False,
+                "registered_type": None,
+                "matched_existing": False,
+                "message": f"Document type '{doc_type}' not found and auto-registration failed: {e}",
+            }
 
     # Step 4: Create the document
     try:
