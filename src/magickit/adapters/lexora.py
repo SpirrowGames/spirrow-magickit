@@ -34,7 +34,7 @@ class LexoraAdapter(BaseAdapter):
         prompt: str,
         max_tokens: int = 1000,
         temperature: float = 0.7,
-        model: str = "Qwen2.5-1.5B",
+        model: str = "medium",
         **kwargs: Any,
     ) -> str:
         """Generate text using the LLM.
@@ -43,7 +43,7 @@ class LexoraAdapter(BaseAdapter):
             prompt: Input prompt for generation.
             max_tokens: Maximum tokens to generate.
             temperature: Sampling temperature (0.0-1.0).
-            model: Model to use (default: Qwen2.5-1.5B for fast responses).
+            model: Tier name (light/medium/heavy) or model name.
             **kwargs: Additional generation parameters.
 
         Returns:
@@ -76,7 +76,7 @@ class LexoraAdapter(BaseAdapter):
         messages: list[dict[str, str]],
         max_tokens: int = 1000,
         temperature: float = 0.7,
-        model: str = "Qwen2.5-1.5B",
+        model: str = "medium",
         **kwargs: Any,
     ) -> str:
         """Chat with the LLM using message format.
@@ -85,7 +85,7 @@ class LexoraAdapter(BaseAdapter):
             messages: List of chat messages with 'role' and 'content'.
             max_tokens: Maximum tokens to generate.
             temperature: Sampling temperature (0.0-1.0).
-            model: Model to use (default: Qwen2.5-1.5B for fast responses).
+            model: Tier name (light/medium/heavy) or model name.
             **kwargs: Additional chat parameters.
 
         Returns:
