@@ -624,49 +624,8 @@ async def add_task_impl(
 
     # Use the canonical project id Prismind resolved to (e.g. display
     # name "Spirrow-VoxelWorld" → "spirrow-voxelworld") for downstream
-    # calls so verification reads from the same project as the write.
+    # calls so they target the same project as the write.
     resolved_project = result.get("project") or project
-
-    # Verify the task is actually visible after the write. Catches
-    # silent-loss bugs (e.g. Sheets table-detection shift) even when
-    # Prismind's response says success.
-    try:
-        verify_progress = await prismind.get_progress(
-            project=resolved_project, user=effective_user
-        )
-        verify_tasks = _extract_tasks_from_progress(verify_progress)
-        verified = any(
-            t.get("task_id") == task_id
-            and t.get("phase") == phase
-            and t.get("name") == name
-            for t in verify_tasks
-        )
-    except Exception as e:
-        logger.warning("Post-write verification failed", error=str(e))
-        verified = None
-        warnings.append(f"Could not verify task was persisted: {e}")
-
-    if verified is False:
-        logger.error(
-            "Task reported added but not found in re-fetch",
-            task_id=task_id,
-            phase=phase,
-            project=resolved_project,
-        )
-        return {
-            "success": False,
-            "task_id": task_id,
-            "phase": phase,
-            "name": name,
-            "project": resolved_project,
-            "error": (
-                "Verification failed: Prismind reported success but the new "
-                "task_id is not visible in the project after re-fetch. This "
-                "indicates a silent write failure (column shift, sheet "
-                "permission, or Sheets API caching)."
-            ),
-            "prismind_response": result,
-        }
 
     # Step 6: Process file attachments
     attached_files: list[dict[str, Any]] = []
@@ -1799,29 +1758,11 @@ async def set_task_blockers_impl(
     Returns:
         Dict with update result
     """
-    effective_user = user or get_current_user()
-
-    prismind = PrismindAdapter(
-        sse_url=settings.prismind_url,
-        timeout=settings.prismind_timeout,
-    )
-
-    # Validate dependencies if requested
-    if validate and blocked_by:
-        try:
-            progress = await prismind.get_progress(project=project, user=effective_user)
-            all_tasks = _extract_tasks_from_progress(progress)
-            existing_ids = {t.get("task_id") for t in all_tasks}
-
-            invalid_deps = [dep for dep in blocked_by if dep not in existing_ids]
-            if invalid_deps:
-                return {
-                    "success": False,
-                    "error": f"Invalid blocked_by task IDs: {invalid_deps}",
-                    "existing_task_ids": list(existing_ids),
-                }
-        except Exception as e:
-            logger.warning("Failed to validate dependencies", error=str(e))
+    # update_task_impl already validates blocked_by; the outer validation
+    # here would be a redundant get_progress round-trip. The `validate`
+    # parameter is kept for backward compatibility but is now a no-op
+    # because the inner validation always runs.
+    _ = validate
 
     return await update_task_impl(
         settings=settings,
