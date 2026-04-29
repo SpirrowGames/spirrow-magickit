@@ -121,11 +121,15 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if not include_archived:
             projects = [p for p in projects if p.get("status") != "archived"]
 
-        # Build response with basic info for each project
+        # Build response with basic info for each project.
+        # Both project (canonical id) and name (display) are returned so
+        # callers know which value to pass back as the project= argument.
         project_list = []
         for p in projects:
+            project_id = p.get("project_id") or p.get("project") or ""
             project_list.append({
-                "name": p.get("name", p.get("project", "")),
+                "project": project_id,
+                "name": p.get("name", project_id),
                 "status": p.get("status", "active"),
                 "created_at": p.get("created_at", ""),
                 "knowledge_count": p.get("knowledge_count", 0),

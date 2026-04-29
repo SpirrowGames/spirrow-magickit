@@ -605,6 +605,69 @@ async def add_task_impl(
             "error": f"Failed to add task: {e}",
         }
 
+    # Bail early if Prismind itself reports failure.
+    if not result.get("success", True):
+        logger.warning(
+            "Prismind add_task reported failure",
+            task_id=task_id,
+            project=project,
+            message=result.get("message"),
+        )
+        return {
+            "success": False,
+            "task_id": task_id,
+            "phase": phase,
+            "name": name,
+            "error": result.get("message") or "Prismind add_task reported failure",
+            "prismind_response": result,
+        }
+
+    # Use the canonical project id Prismind resolved to (e.g. display
+    # name "Spirrow-VoxelWorld" → "spirrow-voxelworld") for downstream
+    # calls so verification reads from the same project as the write.
+    resolved_project = result.get("project") or project
+
+    # Verify the task is actually visible after the write. Catches
+    # silent-loss bugs (e.g. Sheets table-detection shift) even when
+    # Prismind's response says success.
+    try:
+        verify_progress = await prismind.get_progress(
+            project=resolved_project, user=effective_user
+        )
+        verify_tasks = _extract_tasks_from_progress(verify_progress)
+        verified = any(
+            t.get("task_id") == task_id
+            and t.get("phase") == phase
+            and t.get("name") == name
+            for t in verify_tasks
+        )
+    except Exception as e:
+        logger.warning("Post-write verification failed", error=str(e))
+        verified = None
+        warnings.append(f"Could not verify task was persisted: {e}")
+
+    if verified is False:
+        logger.error(
+            "Task reported added but not found in re-fetch",
+            task_id=task_id,
+            phase=phase,
+            project=resolved_project,
+        )
+        return {
+            "success": False,
+            "task_id": task_id,
+            "phase": phase,
+            "name": name,
+            "project": resolved_project,
+            "error": (
+                "Verification failed: Prismind reported success but the new "
+                "task_id is not visible in the project after re-fetch. This "
+                "indicates a silent write failure (column shift, sheet "
+                "permission, or Sheets API caching)."
+            ),
+            "prismind_response": result,
+        }
+
     # Step 6: Process file attachments
     attached_files: list[dict[str, Any]] = []
     if attach_files and utid:
@@ -613,7 +676,7 @@ async def add_task_impl(
             prismind=prismind,
             utid=utid,
             attach_files=attach_files,
-            project=project,
+            project=resolved_project,
             user=effective_user,
         )
         warnings.extend(attach_warnings)
@@ -635,7 +698,7 @@ async def add_task_impl(
                         "utid": utid,
                     }),
                     category="task_doc_link",
-                    project=project,
+                    project=resolved_project,
                     tags=[f"utid:{utid}", f"doc:{doc_id}"],
                     source=f"doc_link:{utid}:{doc_id}",
                     user=effective_user,
@@ -645,7 +708,9 @@ async def add_task_impl(
                 logger.warning("Failed to link document", doc_id=doc_id, error=str(e))
                 warnings.append(f"Failed to link document {doc_id}: {e}")
 
-    # Step 8: Register as knowledge for searchability
+    # Step 8: Register as knowledge for searchability.
+    # Only runs after verification — keeps RAG free of orphans pointing
+    # to tasks that never persisted.
     try:
         knowledge_content = f"Task {task_id}: {name}\n{description}"
         tags = [phase, task_id]
@@ -659,7 +724,7 @@ async def add_task_impl(
         await prismind.add_knowledge(
             content=knowledge_content,
             category="task",
-            project=project,
+            project=resolved_project,
             tags=tags,
             source=f"task:{task_id}",
             user=effective_user,
@@ -674,6 +739,7 @@ async def add_task_impl(
         "utid": utid,
         "phase": phase,
         "name": name,
+        "project": resolved_project,
         "priority": priority,
         "category": category,
         "blocked_by": blocked_by or [],
