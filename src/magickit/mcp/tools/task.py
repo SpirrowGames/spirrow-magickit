@@ -1620,23 +1620,32 @@ async def update_task_impl(
         except Exception as e:
             logger.warning("Failed to validate dependencies", error=str(e))
 
-    # Update task via Prismind
+    # Update task via Prismind. Drop None-valued optional fields so the
+    # MCP-layer JSON schema validator on Prismind's side (which declares
+    # these as plain `string`/`array`, not nullable) doesn't reject the
+    # call before our tool handler runs.
+    update_args: dict[str, Any] = {
+        "task_id": task_id,
+        "phase": phase,
+        "project": project,
+        "user": effective_user,
+    }
+    optional_args = {
+        "name": name,
+        "description": description,
+        "status": status,
+        "priority": priority,
+        "category": category,
+        "blocked_by": blocked_by,
+        "blockers": blockers,
+        "new_phase": new_phase,
+    }
+    for key, value in optional_args.items():
+        if value is not None:
+            update_args[key] = value
+
     try:
-        raw_result = await prismind.call(
-            "update_task",
-            task_id=task_id,
-            phase=phase,
-            name=name,
-            description=description,
-            status=status,
-            priority=priority,
-            category=category,
-            blocked_by=blocked_by,
-            blockers=blockers,
-            new_phase=new_phase,
-            project=project,
-            user=effective_user,
-        )
+        raw_result = await prismind.call("update_task", **update_args)
         result = _parse_json_result(raw_result)
     except Exception as e:
         logger.error("Failed to update task", error=str(e))
