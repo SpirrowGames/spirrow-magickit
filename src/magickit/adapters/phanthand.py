@@ -61,13 +61,25 @@ class PhanthandAdapter:
         timeout: Request timeout in seconds.
     """
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        timeout: float = 60.0,
+        read_timeout: float = 240.0,
+    ) -> None:
         """Initialize the adapter.
 
         Args:
-            timeout: Default request timeout in seconds.
+            timeout: Default timeout for connect/write/pool in seconds.
+            read_timeout: Timeout for reading responses in seconds.
+                Set higher than timeout because file transfers over
+                WAN (e.g. Tailscale) can be slow for large files.
         """
-        self._timeout = timeout
+        self._timeout = httpx.Timeout(
+            connect=timeout,
+            read=read_timeout,
+            write=timeout,
+            pool=timeout,
+        )
 
     async def _request(
         self,
@@ -112,7 +124,7 @@ class PhanthandAdapter:
 
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(self._timeout),
+                timeout=self._timeout,
             ) as client:
                 response = await client.post(
                     full_url,
@@ -192,7 +204,7 @@ class PhanthandAdapter:
 
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(self._timeout),
+                timeout=self._timeout,
             ) as client:
                 response = await client.get(full_url)
 

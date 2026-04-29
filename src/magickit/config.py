@@ -12,7 +12,7 @@ class ServiceConfig(BaseSettings):
     """Configuration for an external service."""
 
     url: str
-    timeout: float = 30.0
+    timeout: float = 60.0
 
 
 class DatabaseConfig(BaseSettings):
@@ -56,16 +56,16 @@ class Settings(BaseSettings):
     # higher ceilings exist for heavy paths like smart_create_document
     # where Drive API + BGE-M3 embedding + Qdrant write run serially.
     lexora_url: str = Field(default="http://localhost:8001")
-    lexora_timeout: float = Field(default=120.0)
+    lexora_timeout: float = Field(default=240.0)
 
     cognilens_url: str = Field(default="http://localhost:8003")
-    cognilens_timeout: float = Field(default=120.0)
+    cognilens_timeout: float = Field(default=240.0)
 
     prismind_url: str = Field(default="http://localhost:8002")
-    prismind_timeout: float = Field(default=180.0)
+    prismind_timeout: float = Field(default=360.0)
 
     unrealwise_url: str = Field(default="http://localhost:8005")
-    unrealwise_timeout: float = Field(default=60.0)
+    unrealwise_timeout: float = Field(default=120.0)
 
     # Database
     db_path: str = Field(default="data/magickit.db")
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     auth_enabled: bool = Field(default=True)
 
     # Phase 2: Webhook settings
-    webhook_timeout: float = Field(default=10.0)
+    webhook_timeout: float = Field(default=20.0)
     webhook_max_retries: int = Field(default=3)
 
     # Phase 2: WebSocket settings

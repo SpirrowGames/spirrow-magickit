@@ -15,13 +15,13 @@ services:
   # embedding + Qdrant write serially and can take 60-120s.
   lexora:
     url: "http://localhost:8110"
-    timeout: 120.0
+    timeout: 240.0
   cognilens:
     url: "http://localhost:8111"
-    timeout: 120.0
+    timeout: 240.0
   prismind:
     url: "http://localhost:8112"
-    timeout: 180.0
+    timeout: 360.0
 
 database:
   path: "data/magickit.db"
