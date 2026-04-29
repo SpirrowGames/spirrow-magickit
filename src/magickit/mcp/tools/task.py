@@ -12,9 +12,11 @@ Provides orchestrated task management with smart features:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +191,18 @@ def _parse_json_result(result: Any) -> dict[str, Any]:
 
 # Module-level settings reference
 _settings: Settings | None = None
+
+# Per-project locks serialize the get_progress -> generate_id -> add_task
+# critical section so concurrent add_task calls cannot all read the same
+# max(task_id) snapshot and emit duplicate ids. dict.setdefault on a Lock
+# instance is safe under asyncio (no awaits in the path), so we don't need
+# a meta-lock to gate creation.
+_project_add_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_project_add_lock(project: str) -> asyncio.Lock:
+    """Return the asyncio.Lock that serializes add_task for `project`."""
+    return _project_add_locks.setdefault(project, asyncio.Lock())
 
 
 def _extract_tasks_from_progress(progress: dict[str, Any]) -> list[dict[str, Any]]:
@@ -522,88 +536,100 @@ async def add_task_impl(
     warnings: list[str] = []
     progress: dict[str, Any] = {}
 
-    # Step 1: Get current progress for task_id generation and phase detection
-    try:
-        progress = await prismind.get_progress(project=project, user=effective_user)
-        all_tasks = _extract_tasks_from_progress(progress)
-    except Exception as e:
-        logger.warning("Failed to get progress, using T01", error=str(e))
-        all_tasks = []
-
-    # Auto-generate task_id
-    task_id = _generate_next_task_id(all_tasks)
-
-    # Determine phase
-    if not phase:
-        phase = progress.get("current_phase", "Phase 1") if progress else "Phase 1"
-
-    # Step 2: Generate UTID
-    project_uid = progress.get("project_uid") or progress.get("root_folder_id", "")
-    utid = ""
-    if project_uid:
-        utid = generate_utid(project_uid, phase, task_id)
-        logger.info(
-            "Generated UTID",
-            task_id=task_id,
-            utid=utid,
-        )
-    else:
-        logger.warning(
-            "No project_uid available, UTID not generated",
-            project=project,
-        )
-
-    # Step 3: Check for duplicate tasks
-    try:
-        search_query = f"{name} {description}"[:200]
-        similar = await prismind.search_knowledge(
-            query=search_query,
-            category="task",
-            project=project,
-            limit=3,
-            user=effective_user,
-        )
-        if similar:
-            for item in similar:
-                score = item.get("score", item.get("similarity", 0))
-                if score > 0.8:
-                    warnings.append(
-                        f"Similar task found: {item.get('content', '')[:100]}... "
-                        f"(similarity: {score:.2f})"
-                    )
-    except Exception as e:
-        logger.warning("Duplicate check failed", error=str(e))
-
-    # Step 4: Validate blocked_by
-    if blocked_by:
-        existing_ids = {t.get("task_id") for t in all_tasks}
-        invalid_deps = [dep for dep in blocked_by if dep not in existing_ids]
-        if invalid_deps:
+    # Steps 1 + 5 (read-then-write) must be serialized per project, otherwise
+    # parallel add_task calls all see the same max(task_id) snapshot and emit
+    # the same id. Hold the lock from get_progress through Prismind.add_task,
+    # then release it before the slower follow-up steps (file attach, knowledge
+    # save) which don't affect uniqueness.
+    add_lock = _get_project_add_lock(project)
+    async with add_lock:
+        # Step 1: Get current progress for task_id generation and phase detection
+        try:
+            progress = await prismind.get_progress(project=project, user=effective_user)
+            all_tasks = _extract_tasks_from_progress(progress)
+        except Exception as e:
+            logger.error("Failed to get progress; aborting add_task", error=str(e))
             return {
                 "success": False,
-                "error": f"Invalid blocked_by task IDs: {invalid_deps}",
-                "existing_task_ids": list(existing_ids),
+                "error": f"Failed to read project progress before assigning task_id: {e}",
             }
 
-    # Step 5: Add task via Prismind
-    try:
-        result = await prismind.add_task(
-            phase=phase,
-            task_id=task_id,
-            name=name,
-            description=description,
-            project=project,
-            priority=priority,
-            category=category,
-            blocked_by=blocked_by,
-            user=effective_user,
-        )
-    except Exception as e:
-        logger.error("Failed to add task", error=str(e))
-        return {
-            "success": False,
-            "error": f"Failed to add task: {e}",
-        }
+        # Auto-generate task_id
+        task_id = _generate_next_task_id(all_tasks)
+
+        # Determine phase
+        if not phase:
+            phase = progress.get("current_phase", "Phase 1") if progress else "Phase 1"
+
+        # Step 2: Generate UTID
+        project_uid = progress.get("project_uid") or progress.get("root_folder_id", "")
+        utid = ""
+        if project_uid:
+            utid = generate_utid(project_uid, phase, task_id)
+            logger.info(
+                "Generated UTID",
+                task_id=task_id,
+                utid=utid,
+            )
+        else:
+            logger.warning(
+                "No project_uid available, UTID not generated",
+                project=project,
+            )
+
+        # Step 3: Check for duplicate tasks via knowledge search.
+        # Held inside the lock for simplicity; this is a single Prismind
+        # call (typically <1s) so it doesn't materially extend serialization.
+        try:
+            search_query = f"{name} {description}"[:200]
+            similar = await prismind.search_knowledge(
+                query=search_query,
+                category="task",
+                project=project,
+                limit=3,
+                user=effective_user,
+            )
+            if similar:
+                for item in similar:
+                    score = item.get("score", item.get("similarity", 0))
+                    if score > 0.8:
+                        warnings.append(
+                            f"Similar task found: {item.get('content', '')[:100]}... "
+                            f"(similarity: {score:.2f})"
+                        )
+        except Exception as e:
+            logger.warning("Duplicate check failed", error=str(e))
+
+        # Step 4: Validate blocked_by
+        if blocked_by:
+            existing_ids = {t.get("task_id") for t in all_tasks}
+            invalid_deps = [dep for dep in blocked_by if dep not in existing_ids]
+            if invalid_deps:
+                return {
+                    "success": False,
+                    "error": f"Invalid blocked_by task IDs: {invalid_deps}",
+                    "existing_task_ids": list(existing_ids),
+                }
+
+        # Step 5: Add task via Prismind
+        try:
+            result = await prismind.add_task(
+                phase=phase,
+                task_id=task_id,
+                name=name,
+                description=description,
+                project=project,
+                priority=priority,
+                category=category,
+                blocked_by=blocked_by,
+                user=effective_user,
+            )
+        except Exception as e:
+            logger.error("Failed to add task", error=str(e))
+            return {
+                "success": False,
+                "error": f"Failed to add task: {e}",
+            }
 
     # Bail early if Prismind itself reports failure.
     if not result.get("success", True):
@@ -626,6 +652,37 @@ async def add_task_impl(
     # name "Spirrow-VoxelWorld" → "spirrow-voxelworld") for downstream
     # calls so they target the same project as the write.
     resolved_project = result.get("project") or project
+
+    # Layer 2: post-write verify. The per-project lock above prevents
+    # races within this magickit-mcp process, but cannot guard against
+    # a parallel writer in another process / via the REST API. Re-read
+    # the sheet and count occurrences of the freshly-assigned task_id;
+    # if >1, surface a clear warning so the caller knows cleanup is
+    # needed. We deliberately do NOT auto-delete duplicate rows here
+    # because the wrong row could be removed.
+    try:
+        verify_progress = await prismind.get_progress(
+            project=resolved_project,
+            user=effective_user,
+        )
+        verify_tasks = _extract_tasks_from_progress(verify_progress)
+        same_id_count = sum(1 for t in verify_tasks if t.get("task_id") == task_id)
+        if same_id_count > 1:
+            dup_warning = (
+                f"task_id {task_id!r} now appears {same_id_count} times in "
+                f"project {resolved_project!r}; a concurrent writer likely "
+                f"raced this add_task. Inspect via detect_task_duplicates "
+                f"and rename the redundant rows."
+            )
+            logger.error(
+                "Post-write duplicate detected",
+                task_id=task_id,
+                project=resolved_project,
+                count=same_id_count,
+            )
+            warnings.append(dup_warning)
+    except Exception as e:
+        logger.warning("Post-write verify failed", error=str(e))
 
     # Step 6: Process file attachments
     attached_files: list[dict[str, Any]] = []
@@ -1784,6 +1841,109 @@ async def set_task_blockers_impl(
     )
 
 
+async def detect_task_duplicates_impl(
+    settings: Settings,
+    project: str = "",
+    user: str = "",
+) -> dict[str, Any]:
+    """Find task_ids that occur more than once in a project.
+
+    Walks every phase in get_progress and reports:
+    - within_phase_duplicates: same task_id appearing more than once in
+      the same phase (most concerning — a true id collision)
+    - cross_phase_repeats: same task_id appearing in multiple phases
+      (less concerning if phase scopes the id, but still ambiguous for
+      tools that use task_id as a primary key)
+
+    Args:
+        settings: Application settings
+        project: Project ID (empty for current)
+        user: User identifier (auto-detected if empty)
+
+    Returns:
+        Dict with per-phase counts, cross-phase repeats, top-N
+        globally-repeated ids, and a total redundancy score.
+    """
+    effective_user = user or get_current_user()
+
+    prismind = PrismindAdapter(
+        sse_url=settings.prismind_url,
+        timeout=settings.prismind_timeout,
+    )
+
+    try:
+        progress = await prismind.get_progress(project=project, user=effective_user)
+    except Exception as e:
+        logger.error("Failed to get progress for duplicate detection", error=str(e))
+        return {
+            "success": False,
+            "error": f"Failed to get progress: {e}",
+        }
+
+    all_tasks = _extract_tasks_from_progress(progress)
+    total_tasks = len(all_tasks)
+
+    per_phase_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    global_counts: Counter[str] = Counter()
+    by_id_phases: dict[str, list[str]] = defaultdict(list)
+
+    for task in all_tasks:
+        tid = task.get("task_id", "")
+        ph = task.get("phase", "")
+        per_phase_counts[ph][tid] += 1
+        global_counts[tid] += 1
+        by_id_phases[tid].append(ph)
+
+    within_phase: list[dict[str, Any]] = []
+    redundant_count = 0
+    for ph, counts in per_phase_counts.items():
+        for tid, n in counts.items():
+            if n > 1:
+                names = [
+                    t.get("name", "")
+                    for t in all_tasks
+                    if t.get("task_id") == tid and t.get("phase") == ph
+                ]
+                within_phase.append({
+                    "task_id": tid,
+                    "phase": ph,
+                    "count": n,
+                    "names": names,
+                })
+                redundant_count += n - 1
+
+    cross_phase: list[dict[str, Any]] = []
+    for tid, phases_list in by_id_phases.items():
+        unique_phases = sorted(set(phases_list))
+        if len(unique_phases) > 1:
+            cross_phase.append({
+                "task_id": tid,
+                "occurrences": len(phases_list),
+                "phases": unique_phases,
+            })
+
+    top_repeated = [
+        {"task_id": tid, "count": n}
+        for tid, n in global_counts.most_common(10)
+        if n > 1
+    ]
+
+    return {
+        "success": True,
+        "project": progress.get("project") or project,
+        "total_tasks": total_tasks,
+        "distinct_task_ids": len(global_counts),
+        "redundant_count": redundant_count,
+        "within_phase_duplicates": sorted(
+            within_phase, key=lambda d: -d["count"]
+        ),
+        "cross_phase_repeats": sorted(
+            cross_phase, key=lambda d: -d["occurrences"]
+        ),
+        "top_repeated_globally": top_repeated,
+    }
+
+
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
     """Register task management tools with the MCP server.
 
@@ -2260,5 +2420,32 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             phase=phase,
             project=project,
             validate=validate,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def detect_task_duplicates(
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Detect duplicated task_ids within a project.
+
+        USE THIS WHEN: Auditing data integrity, before migrations, or
+        whenever a task_id reference looks ambiguous.
+
+        Args:
+            project: Project ID (empty for current)
+            user: User identifier (auto-detected if empty)
+
+        Returns:
+            Dict with within_phase_duplicates, cross_phase_repeats,
+            top_repeated_globally, and totals.
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await detect_task_duplicates_impl(
+            settings=_settings,
+            project=project,
             user=user,
         )
