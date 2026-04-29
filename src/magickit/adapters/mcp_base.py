@@ -40,7 +40,13 @@ class MCPBaseAdapter(ABC):
             Connected MCP ClientSession.
         """
         logger.debug("Connecting to MCP server", url=self.sse_url)
-        async with sse_client(self.sse_url) as (read, write):
+        # sse_read_timeout bounds how long we wait for a single tool's
+        # SSE response. Without this, mcp's default of 300s applies and
+        # the configured prismind_timeout in Settings is silently
+        # ignored. The 5s HTTP connect timeout is left at the default.
+        async with sse_client(
+            self.sse_url, sse_read_timeout=self.timeout
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 logger.debug("MCP session initialized", url=self.sse_url)

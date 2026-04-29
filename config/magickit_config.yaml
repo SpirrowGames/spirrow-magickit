@@ -10,15 +10,18 @@ mcp:
   port: 8114
 
 services:
+  # Timeouts cover worst-case latency, not typical latency.
+  # smart_create_document on a 40KB body hits Drive API + BGE-M3
+  # embedding + Qdrant write serially and can take 60-120s.
   lexora:
     url: "http://localhost:8110"
-    timeout: 30.0
+    timeout: 120.0
   cognilens:
     url: "http://localhost:8111"
-    timeout: 30.0
+    timeout: 120.0
   prismind:
     url: "http://localhost:8112"
-    timeout: 30.0
+    timeout: 180.0
 
 database:
   path: "data/magickit.db"
