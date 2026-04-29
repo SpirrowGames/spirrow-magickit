@@ -1654,6 +1654,7 @@ async def update_task_impl(
         "old_phase": result.get("old_phase", ""),
         "new_phase": result.get("new_phase", ""),
         "message": result.get("message"),
+        "error": result.get("error"),
     }
 
 
