@@ -26,5 +26,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run unit tests
+        # Integration tests require live prismind / lexora / cognilens services
+        # and are run manually against the dev cluster, not in CI.
+        run: pytest tests/unit -v

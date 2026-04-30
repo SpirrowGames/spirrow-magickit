@@ -82,19 +82,27 @@ def _make_settings() -> MagicMock:
 
 
 def _register_and_get_tools(settings: MagicMock) -> dict[str, Any]:
-    """Register tools and extract the tool functions."""
-    from fastmcp import FastMCP
+    """Register tools and capture the inner functions via a mock @mcp.tool().
 
-    mcp = FastMCP(name="test")
+    Avoids touching FastMCP's private `_tool_manager` (which has been
+    renamed/removed across 2.x minor versions) by intercepting the
+    decorator itself.
+    """
+    registered: dict[str, Any] = {}
+
+    def fake_tool(*args, **kwargs):
+        def decorator(fn):
+            registered[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+    mock_mcp = MagicMock()
+    mock_mcp.tool = fake_tool
 
     from magickit.mcp.tools.smart_read import register_tools
-    register_tools(mcp, settings)
-
-    # Extract registered tool functions from FastMCP
-    tools = {}
-    for tool in mcp._tool_manager._tools.values():
-        tools[tool.name] = tool.fn
-    return tools
+    register_tools(mock_mcp, settings)
+    return registered
 
 
 @pytest.fixture
