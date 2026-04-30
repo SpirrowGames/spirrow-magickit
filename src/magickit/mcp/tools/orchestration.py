@@ -681,23 +681,30 @@ async def _call_service(
             )
 
         elif action == "update_document":
-            # Prismind uses: doc_id, content, name, feature, keywords
-            # Build kwargs, excluding None values to avoid validation errors
+            # Prismind accepts: doc_id, content, append, doc_type, phase_task,
+            # feature, project, user. Build kwargs excluding None to avoid
+            # validation errors.
             metadata = params.get("metadata") or {}
             kwargs: dict[str, Any] = {
                 "doc_id": params.get("doc_id", ""),
             }
             if params.get("content") is not None:
                 kwargs["content"] = params["content"]
-            name = params.get("name", params.get("title"))
-            if name is not None:
-                kwargs["name"] = name
+            if params.get("append") is not None:
+                kwargs["append"] = params["append"]
+            doc_type = params.get("doc_type", metadata.get("doc_type"))
+            if doc_type:
+                kwargs["doc_type"] = doc_type
+            phase_task = params.get("phase_task", metadata.get("phase_task"))
+            if phase_task:
+                kwargs["phase_task"] = phase_task
             feature = params.get("feature", metadata.get("feature"))
             if feature:
                 kwargs["feature"] = feature
-            keywords = params.get("keywords", metadata.get("keywords"))
-            if keywords is not None:
-                kwargs["keywords"] = keywords
+            if params.get("project"):
+                kwargs["project"] = params["project"]
+            if user:
+                kwargs["user"] = user
             return await adapter.update_document(**kwargs)
 
         elif action == "delete_document":

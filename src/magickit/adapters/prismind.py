@@ -1047,6 +1047,60 @@ class PrismindAdapter(MCPBaseAdapter):
 
         return self._parse_json_result(result)
 
+    async def update_document(
+        self,
+        doc_id: str,
+        content: str | None = None,
+        append: bool = False,
+        doc_type: str | None = None,
+        phase_task: str | None = None,
+        feature: str | None = None,
+        project: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Update a document in Prismind.
+
+        Args:
+            doc_id: Document ID.
+            content: New content (None to keep existing).
+            append: If True, append content. If False, replace.
+            doc_type: New document type (moves to corresponding folder).
+            phase_task: New phase-task value.
+            feature: New feature value.
+            project: Project identifier.
+            user: User identifier for multi-user support.
+
+        Returns:
+            Dict with success, doc_id, updated_fields, message.
+        """
+        arguments: dict[str, Any] = {"doc_id": doc_id}
+        if content is not None:
+            arguments["content"] = content
+        if append:
+            arguments["append"] = append
+        if doc_type:
+            arguments["doc_type"] = doc_type
+        if phase_task:
+            arguments["phase_task"] = phase_task
+        if feature:
+            arguments["feature"] = feature
+        if project:
+            arguments["project"] = project
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Updating document via MCP",
+            doc_id=doc_id,
+            project=project,
+        )
+
+        success, result = await self._call_tool_safe("update_document", arguments)
+        if not success:
+            raise RuntimeError(f"update_document failed: {result}")
+
+        return self._parse_json_result(result)
+
     async def get_document(
         self,
         doc_id: str | None = None,

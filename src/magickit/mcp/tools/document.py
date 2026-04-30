@@ -536,6 +536,227 @@ async def smart_create_document_impl(
         }
 
 
+async def smart_update_document_impl(
+    settings: Settings,
+    doc_id: str,
+    content: str | None = None,
+    append: bool = False,
+    doc_type: str | None = None,
+    phase_task: str | None = None,
+    feature: str | None = None,
+    project: str = "",
+    auto_register_type: bool = True,
+    user: str = "",
+) -> dict[str, Any]:
+    """Smart document update that handles unknown document types.
+
+    When a doc_type is provided that is not registered, this function:
+    1. Uses RAG semantic search (BGE-M3) to find similar existing types
+    2. If a match is found, uses existing type
+    3. If no match and auto_register_type is True, generates and registers a new type
+    4. Updates the document with the resolved doc_type
+
+    Args:
+        settings: Application settings.
+        doc_id: Document ID.
+        content: New content (None to keep).
+        append: If True, append content. If False, replace.
+        doc_type: New document type (can be unregistered).
+        phase_task: New phase-task value.
+        feature: New feature value.
+        project: Project identifier.
+        auto_register_type: Whether to auto-register unknown types.
+        user: User identifier for multi-user support.
+
+    Returns:
+        Dict containing:
+        - success: Whether update succeeded
+        - doc_id: Document ID
+        - updated_fields: List of fields that were updated
+        - doc_type: Used document type (may differ from input if matched existing)
+        - type_registered: Whether a new type was registered
+        - registered_type: Details of registered type (if any)
+        - matched_existing: Whether an existing type was matched semantically
+        - message: Status message
+    """
+    effective_user = user or get_current_user()
+
+    prismind = PrismindAdapter(
+        sse_url=settings.prismind_url,
+        timeout=settings.prismind_timeout,
+    )
+
+    type_registered = False
+    registered_type = None
+    matched_existing = False
+    resolved_doc_type = doc_type
+
+    logger.info(
+        "Smart document update",
+        doc_id=doc_id,
+        doc_type=doc_type,
+        project=project,
+    )
+
+    # Resolve doc_type only if user explicitly provided one
+    if doc_type and auto_register_type:
+        try:
+            types_result_raw = await prismind.list_document_types(user=effective_user)
+            if isinstance(types_result_raw, list):
+                existing_types = types_result_raw
+            else:
+                types_result = _parse_result(types_result_raw)
+                existing_types = types_result.get("document_types", [])
+        except Exception as e:
+            logger.warning(
+                "Failed to list document types, assuming none", error=str(e)
+            )
+            existing_types = []
+
+        existing_type_ids = [t.get("type_id", "") for t in existing_types]
+        type_exists = doc_type in existing_type_ids
+
+        if not type_exists:
+            try:
+                semantic_match = await _find_matching_document_type(
+                    prismind=prismind,
+                    doc_type_name=doc_type,
+                    threshold=DEFAULT_SIMILARITY_THRESHOLD,
+                    user=effective_user,
+                )
+
+                if semantic_match:
+                    resolved_doc_type = semantic_match["matched_type_id"]
+                    matched_existing = True
+                    logger.info(
+                        "Using existing document type (RAG semantic match)",
+                        original_type=doc_type,
+                        matched_type_id=resolved_doc_type,
+                        similarity=semantic_match.get("similarity", 0.0),
+                    )
+                else:
+                    lexora = LexoraAdapter(
+                        base_url=settings.lexora_url,
+                        timeout=settings.lexora_timeout,
+                    )
+
+                    new_type_metadata = await _generate_new_type_metadata(
+                        lexora=lexora,
+                        doc_type_name=doc_type,
+                        content_preview=content or "",
+                    )
+
+                    if new_type_metadata.get("type_id") in existing_type_ids:
+                        resolved_doc_type = new_type_metadata["type_id"]
+                        matched_existing = True
+                    else:
+                        register_result_raw = await prismind.register_document_type(
+                            type_id=new_type_metadata["type_id"],
+                            name=new_type_metadata["name"],
+                            folder_name=new_type_metadata["folder_name"],
+                            scope="global",
+                            description=new_type_metadata.get("description", ""),
+                            create_folder=True,
+                            user=effective_user,
+                        )
+                        register_result = _parse_result(register_result_raw)
+
+                        if register_result.get("success"):
+                            type_registered = True
+                            registered_type = {
+                                "type_id": new_type_metadata["type_id"],
+                                "name": new_type_metadata["name"],
+                                "folder_name": new_type_metadata["folder_name"],
+                                "description": new_type_metadata.get(
+                                    "description", ""
+                                ),
+                            }
+                            resolved_doc_type = new_type_metadata["type_id"]
+                        else:
+                            error_msg = register_result.get(
+                                "message", "Unknown registration error"
+                            )
+                            return {
+                                "success": False,
+                                "doc_id": doc_id,
+                                "updated_fields": [],
+                                "doc_type": doc_type,
+                                "type_registered": False,
+                                "registered_type": None,
+                                "matched_existing": False,
+                                "message": f"Document type '{doc_type}' auto-registration failed: {error_msg}",
+                            }
+
+            except Exception as e:
+                logger.error("Failed to match/register document type", error=str(e))
+                return {
+                    "success": False,
+                    "doc_id": doc_id,
+                    "updated_fields": [],
+                    "doc_type": doc_type,
+                    "type_registered": False,
+                    "registered_type": None,
+                    "matched_existing": False,
+                    "message": f"Document type '{doc_type}' not found and auto-registration failed: {e}",
+                }
+
+    # Update the document
+    try:
+        update_kwargs: dict[str, Any] = {"doc_id": doc_id}
+        if content is not None:
+            update_kwargs["content"] = content
+        if append:
+            update_kwargs["append"] = append
+        if resolved_doc_type:
+            update_kwargs["doc_type"] = resolved_doc_type
+        if phase_task:
+            update_kwargs["phase_task"] = phase_task
+        if feature:
+            update_kwargs["feature"] = feature
+        if project:
+            update_kwargs["project"] = project
+        if effective_user:
+            update_kwargs["user"] = effective_user
+
+        update_result_raw = await prismind.update_document(**update_kwargs)
+        update_result = _parse_result(update_result_raw)
+
+        success = update_result.get("success", False)
+        updated_fields = update_result.get("updated_fields", [])
+        message = update_result.get("message", "Document updated")
+
+        logger.info(
+            "Document updated",
+            doc_id=doc_id,
+            updated_fields=updated_fields,
+            type_registered=type_registered,
+        )
+
+        return {
+            "success": success,
+            "doc_id": doc_id,
+            "updated_fields": updated_fields,
+            "doc_type": resolved_doc_type or "",
+            "type_registered": type_registered,
+            "registered_type": registered_type,
+            "matched_existing": matched_existing,
+            "message": message,
+        }
+
+    except Exception as e:
+        logger.error("Document update failed", error=str(e))
+        return {
+            "success": False,
+            "doc_id": doc_id,
+            "updated_fields": [],
+            "doc_type": resolved_doc_type or "",
+            "type_registered": type_registered,
+            "registered_type": registered_type,
+            "matched_existing": matched_existing,
+            "message": f"Document update failed: {e}",
+        }
+
+
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
     """Register document management tools with the MCP server.
 
@@ -607,6 +828,78 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project=project,
             feature=feature,
             keywords=keywords,
+            auto_register_type=auto_register_type,
+            user=user,
+        )
+
+    @mcp.tool()
+    async def smart_update_document(
+        doc_id: str,
+        content: str | None = None,
+        append: bool = False,
+        doc_type: str | None = None,
+        phase_task: str | None = None,
+        feature: str | None = None,
+        project: str = "",
+        auto_register_type: bool = True,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Update a document with automatic document type handling.
+
+        USE THIS WHEN: Updating documents where you may want to change the
+        document type to a possibly unregistered type. This tool:
+        - Updates content (replace by default, or append=True to append)
+        - If doc_type is provided and unregistered, uses RAG semantic search
+          (BGE-M3) to find similar types (e.g., "api仕様" matches "api_spec")
+        - If match found, uses existing type; otherwise generates new type metadata
+        - Updates phase_task / feature metadata if provided
+        - Moves the document to the new doc_type's folder if doc_type changes
+
+        DO NOT USE WHEN:
+        - You only need to change content/metadata with a known doc_type
+          -> use Prismind update_document directly
+        - You want to register a type without updating a document
+          -> use register_document_type
+
+        Args:
+            doc_id: Document ID (required).
+            content: New content. None to keep existing.
+            append: If True, append content. If False, replace (default).
+            doc_type: New document type. Can be unregistered when
+                auto_register_type is True.
+            phase_task: New phase-task value (e.g., "phase1-task2").
+            feature: New feature value.
+            project: Project identifier.
+            auto_register_type: If True, auto-register unknown types
+                (default: True).
+            user: User identifier for multi-user support
+                (auto-detected if empty).
+
+        Returns:
+            Dict containing:
+            - success: Whether update succeeded
+            - doc_id: Document ID
+            - updated_fields: List of fields that were updated
+            - doc_type: The document type used (may differ if matched existing)
+            - type_registered: Whether a new type was registered
+            - registered_type: Details of registered type
+              (type_id, name, folder_name, description)
+            - matched_existing: Whether an existing type was matched
+              semantically
+            - message: Status message
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        return await smart_update_document_impl(
+            settings=_settings,
+            doc_id=doc_id,
+            content=content,
+            append=append,
+            doc_type=doc_type,
+            phase_task=phase_task,
+            feature=feature,
+            project=project,
             auto_register_type=auto_register_type,
             user=user,
         )
