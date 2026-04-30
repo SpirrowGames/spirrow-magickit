@@ -2055,7 +2055,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def start_task(
         task_id: str,
-        phase: str = "",
+        phase: str,
         project: str = "",
         force: bool = False,
         refresh_attachments: bool = True,
@@ -2072,7 +2072,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to start (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             project: Project ID (empty for current)
             force: Start even if dependencies incomplete
             refresh_attachments: If True, check and refresh changed file attachments
@@ -2097,7 +2097,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def complete_task(
         task_id: str,
-        phase: str = "",
+        phase: str,
         notes: str = "",
         learnings: str = "",
         project: str = "",
@@ -2114,7 +2114,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to complete (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             notes: Completion notes
             learnings: Key learnings to record as knowledge
             project: Project ID (empty for current)
@@ -2140,7 +2140,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def block_task(
         task_id: str,
         reason: str,
-        phase: str = "",
+        phase: str,
         blocked_by: list[str] | None = None,
         project: str = "",
         user: str = "",
@@ -2157,7 +2157,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             task_id: Task ID to block (required)
             reason: Reason for blocking (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             blocked_by: Task IDs causing the block
             project: Project ID (empty for current)
             user: User identifier for multi-user support (auto-detected if empty)
@@ -2181,7 +2181,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def get_task(
         task_id: str,
-        phase: str = "",
+        phase: str,
         project: str = "",
         include_related_knowledge: bool = False,
         user: str = "",
@@ -2195,7 +2195,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to retrieve (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             project: Project ID (empty for current)
             include_related_knowledge: Include related knowledge entries
             user: User identifier for multi-user support (auto-detected if empty)
@@ -2218,7 +2218,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def delete_task(
         task_id: str,
-        phase: str = "",
+        phase: str,
         project: str = "",
         check_dependencies: bool = True,
         cascade_unblock: bool = True,
@@ -2234,7 +2234,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to delete (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             project: Project ID (empty for current)
             check_dependencies: Check and warn about dependent tasks
             cascade_unblock: Automatically remove from blocked_by lists
@@ -2259,7 +2259,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def update_task(
         task_id: str,
-        phase: str = "",
+        phase: str,
         name: str | None = None,
         description: str | None = None,
         status: str | None = None,
@@ -2281,7 +2281,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Args:
             task_id: Task ID to update (required)
-            phase: Current phase name (required if same task_id exists in multiple phases)
+            phase: Current phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             name: New task name
             description: New description (stored in notes)
             status: New status (not_started/in_progress/completed/blocked)
@@ -2354,7 +2354,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def set_task_priority(
         task_id: str,
         priority: str,
-        phase: str = "",
+        phase: str,
         project: str = "",
         user: str = "",
     ) -> dict[str, Any]:
@@ -2366,7 +2366,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             task_id: Task ID (required)
             priority: New priority (high/medium/low) (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             project: Project ID (empty for current)
             user: User identifier for multi-user support (auto-detected if empty)
 
@@ -2389,7 +2389,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def set_task_blockers(
         task_id: str,
         blocked_by: list[str],
-        phase: str = "",
+        phase: str,
         project: str = "",
         validate: bool = True,
         user: str = "",
@@ -2402,7 +2402,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             task_id: Task ID (required)
             blocked_by: List of task IDs this depends on (required)
-            phase: Phase name (required if same task_id exists in multiple phases)
+            phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             project: Project ID (empty for current)
             validate: Validate that blocked_by IDs exist
             user: User identifier for multi-user support (auto-detected if empty)

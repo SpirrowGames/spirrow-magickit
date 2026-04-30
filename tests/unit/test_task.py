@@ -1,5 +1,6 @@
 """Tests for task management tools."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -243,6 +244,72 @@ class TestAddTask:
 
             assert result["success"] is False
             assert "Invalid blocked_by" in result["error"]
+
+
+class TestAddTaskRace:
+    """Verify the L1 lock prevents task_id duplication under concurrent add_task.
+
+    Regression guard for the T173 incident: 21 occurrences of the same
+    auto-assigned task_id across four phases when parallel add_task calls
+    all read the same get_progress snapshot. The fix is the per-project
+    asyncio.Lock in add_task_impl serializing get_progress -> add_task.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.mock_settings = MagicMock()
+        self.mock_settings.prismind_url = "http://localhost:8112"
+        self.mock_settings.prismind_timeout = 30.0
+        task._settings = self.mock_settings
+        # Isolate from other tests that may have populated the lock dict.
+        task._project_add_locks.clear()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_add_task_no_duplicate_ids(self):
+        """50 concurrent add_task calls produce 50 distinct task_ids."""
+        added_tasks: list[dict] = []
+        sheet_lock = asyncio.Lock()
+
+        async def fake_get_progress(**kwargs):
+            # A small await encourages the scheduler to interleave calls,
+            # surfacing the race if the L1 lock were removed.
+            await asyncio.sleep(0)
+            return {
+                "current_phase": "Phase 1",
+                "phases": [{"phase": "Phase 1", "tasks": list(added_tasks)}],
+            }
+
+        async def fake_add_task(**kwargs):
+            await asyncio.sleep(0)
+            async with sheet_lock:
+                added_tasks.append({"task_id": kwargs["task_id"]})
+            return {"success": True, "message": "ok"}
+
+        with patch.object(task, "PrismindAdapter") as mock_adapter_class:
+            mock_adapter = AsyncMock()
+            mock_adapter.get_progress = fake_get_progress
+            mock_adapter.search_knowledge = AsyncMock(return_value=[])
+            mock_adapter.add_task = fake_add_task
+            mock_adapter.add_knowledge = AsyncMock(return_value={"success": True})
+            mock_adapter_class.return_value = mock_adapter
+
+            num = 50
+            results = await asyncio.gather(*[
+                task.add_task_impl(
+                    settings=self.mock_settings,
+                    name=f"Task {i}",
+                    project="race_test",
+                )
+                for i in range(num)
+            ])
+
+        assigned_ids = [r["task_id"] for r in results if r.get("success")]
+        assert len(assigned_ids) == num, (
+            f"Expected {num} successful adds, got {len(assigned_ids)}: {results}"
+        )
+        assert len(set(assigned_ids)) == num, (
+            f"Duplicate task_ids detected: {sorted(assigned_ids)}"
+        )
 
 
 class TestListTasks:
@@ -880,5 +947,48 @@ class TestRegisterTools:
 
         task.register_tools(mock_mcp, mock_settings)
 
-        # Should register 11 tools (5 original + 3 new + 3 shortcuts)
-        assert mock_mcp.tool.call_count == 11
+        # Should register 12 tools (5 original + 3 new + 3 shortcuts + detect_task_duplicates)
+        assert mock_mcp.tool.call_count == 12
+
+    def test_lookup_tools_require_phase(self):
+        """Lookup tools must declare phase as a required parameter (no default).
+
+        Catches regression where phase becomes optional and silent task_id
+        ambiguity reappears (the T173 race fallout).
+        """
+        import inspect
+
+        registered: dict[str, callable] = {}
+
+        # Capture the decorated function under each `@mcp.tool()` call.
+        def fake_tool_factory():
+            def decorator(fn):
+                registered[fn.__name__] = fn
+                return fn
+
+            return decorator
+
+        mock_mcp = MagicMock()
+        mock_mcp.tool.side_effect = fake_tool_factory
+        mock_settings = MagicMock()
+
+        task.register_tools(mock_mcp, mock_settings)
+
+        lookup_tools = [
+            "start_task",
+            "complete_task",
+            "block_task",
+            "get_task",
+            "delete_task",
+            "update_task",
+            "set_task_priority",
+            "set_task_blockers",
+        ]
+        for name in lookup_tools:
+            assert name in registered, f"{name} was not registered"
+            sig = inspect.signature(registered[name])
+            assert "phase" in sig.parameters, f"{name} missing phase parameter"
+            phase_param = sig.parameters["phase"]
+            assert phase_param.default is inspect.Parameter.empty, (
+                f"{name}.phase must be required (no default), got default={phase_param.default!r}"
+            )
