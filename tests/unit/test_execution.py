@@ -39,7 +39,7 @@ class TestDecomposeSpecification:
             )
             mock_lexora_class.return_value = mock_lexora
 
-            result = await execution.decompose_specification(
+            result = await execution.spec_executor_decompose(
                 specification={"specification": {"title": "Test"}},
             )
 
@@ -74,7 +74,7 @@ class TestDecomposeSpecification:
             )
             mock_lexora_class.return_value = mock_lexora
 
-            result = await execution.decompose_specification(
+            result = await execution.spec_executor_decompose(
                 specification={"specification": {"title": "Add caching"}},
             )
 
@@ -93,7 +93,7 @@ class TestDecomposeSpecification:
             )
             mock_lexora_class.return_value = mock_lexora
 
-            result = await execution.decompose_specification(
+            result = await execution.spec_executor_decompose(
                 specification={"specification": {"title": "Test"}},
             )
 
@@ -111,7 +111,7 @@ class TestDecomposeSpecification:
             mock_lexora.chat = AsyncMock(side_effect=Exception("LLM error"))
             mock_lexora_class.return_value = mock_lexora
 
-            result = await execution.decompose_specification(
+            result = await execution.spec_executor_decompose(
                 specification={
                     "specification": {
                         "title": "Test",
@@ -133,7 +133,7 @@ class TestDecomposeSpecification:
             )
             mock_lexora_class.return_value = mock_lexora
 
-            result = await execution.decompose_specification(
+            result = await execution.spec_executor_decompose(
                 specification={"specification": {"title": "Test"}},
             )
 
@@ -180,7 +180,7 @@ class TestGetNextTask:
     @pytest.mark.asyncio
     async def test_returns_first_task_without_dependencies(self):
         """Test that task without dependencies is returned first."""
-        result = await execution.get_next_task(self.execution_id)
+        result = await execution.spec_executor_next_task(self.execution_id)
 
         assert result["has_task"] is True
         assert result["task"]["id"] == "task-1"
@@ -189,7 +189,7 @@ class TestGetNextTask:
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_session(self):
         """Test error for unknown execution ID."""
-        result = await execution.get_next_task("exec-unknown")
+        result = await execution.spec_executor_next_task("exec-unknown")
 
         assert result["has_task"] is False
         assert "not found" in result["error"]
@@ -201,7 +201,7 @@ class TestGetNextTask:
         session = execution._execution_sessions[self.execution_id]
         session["tasks"][0]["status"] = "in_progress"
 
-        result = await execution.get_next_task(self.execution_id)
+        result = await execution.spec_executor_next_task(self.execution_id)
 
         # Should not return task-2 since task-1 is not completed
         assert result["has_task"] is False
@@ -215,7 +215,7 @@ class TestGetNextTask:
         session["tasks"][0]["status"] = "completed"
         session["completed_tasks"].append(session["tasks"][0])
 
-        result = await execution.get_next_task(self.execution_id)
+        result = await execution.spec_executor_next_task(self.execution_id)
 
         assert result["has_task"] is True
         assert result["task"]["id"] == "task-2"
@@ -255,7 +255,7 @@ class TestCompleteTask:
     @pytest.mark.asyncio
     async def test_marks_task_as_completed(self):
         """Test that task is marked as completed."""
-        result = await execution.complete_task(
+        result = await execution.spec_executor_complete_task(
             execution_id=self.execution_id,
             task_id="task-1",
             success=True,
@@ -272,7 +272,7 @@ class TestCompleteTask:
     @pytest.mark.asyncio
     async def test_marks_task_as_failed(self):
         """Test that failed task is recorded."""
-        result = await execution.complete_task(
+        result = await execution.spec_executor_complete_task(
             execution_id=self.execution_id,
             task_id="task-1",
             success=False,
@@ -286,7 +286,7 @@ class TestCompleteTask:
     @pytest.mark.asyncio
     async def test_returns_next_task_after_completion(self):
         """Test that next task is returned after completion."""
-        result = await execution.complete_task(
+        result = await execution.spec_executor_complete_task(
             execution_id=self.execution_id,
             task_id="task-1",
             success=True,
@@ -299,7 +299,7 @@ class TestCompleteTask:
     async def test_reports_completion_when_all_done(self):
         """Test completion status when all tasks are done."""
         # Complete first task
-        await execution.complete_task(
+        await execution.spec_executor_complete_task(
             execution_id=self.execution_id,
             task_id="task-1",
             success=True,
@@ -309,7 +309,7 @@ class TestCompleteTask:
         session = execution._execution_sessions[self.execution_id]
         session["tasks"][1]["status"] = "in_progress"
 
-        result = await execution.complete_task(
+        result = await execution.spec_executor_complete_task(
             execution_id=self.execution_id,
             task_id="task-2",
             success=True,
@@ -321,7 +321,7 @@ class TestCompleteTask:
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_task(self):
         """Test error for unknown task ID."""
-        result = await execution.complete_task(
+        result = await execution.spec_executor_complete_task(
             execution_id=self.execution_id,
             task_id="task-unknown",
             success=True,
@@ -356,7 +356,7 @@ class TestGetExecutionStatus:
     @pytest.mark.asyncio
     async def test_returns_status_summary(self):
         """Test that status summary is returned."""
-        result = await execution.get_execution_status(self.execution_id)
+        result = await execution.spec_executor_status(self.execution_id)
 
         assert result["found"] is True
         assert result["status"] == "in_progress"
@@ -368,7 +368,7 @@ class TestGetExecutionStatus:
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_session(self):
         """Test error for unknown execution ID."""
-        result = await execution.get_execution_status("exec-unknown")
+        result = await execution.spec_executor_status("exec-unknown")
 
         assert result["found"] is False
         assert "not found" in result["error"]
@@ -376,7 +376,7 @@ class TestGetExecutionStatus:
     @pytest.mark.asyncio
     async def test_calculates_progress_percent(self):
         """Test that progress percentage is calculated."""
-        result = await execution.get_execution_status(self.execution_id)
+        result = await execution.spec_executor_status(self.execution_id)
 
         # 1 completed out of 3 = 33.3%
         assert result["progress"]["percent"] == 33.3
@@ -473,7 +473,7 @@ class TestFinalizeExecution:
     @pytest.mark.asyncio
     async def test_generates_summary(self):
         """Test that execution summary is generated."""
-        result = await execution.finalize_execution(
+        result = await execution.spec_executor_finalize(
             execution_id=self.execution_id,
             save_to_knowledge=False,
         )
@@ -485,7 +485,7 @@ class TestFinalizeExecution:
     @pytest.mark.asyncio
     async def test_returns_statistics(self):
         """Test that statistics are returned."""
-        result = await execution.finalize_execution(
+        result = await execution.spec_executor_finalize(
             execution_id=self.execution_id,
             save_to_knowledge=False,
         )
@@ -497,7 +497,7 @@ class TestFinalizeExecution:
     @pytest.mark.asyncio
     async def test_returns_handoff_info(self):
         """Test that handoff information is returned."""
-        result = await execution.finalize_execution(
+        result = await execution.spec_executor_finalize(
             execution_id=self.execution_id,
             save_to_knowledge=False,
         )
@@ -514,7 +514,7 @@ class TestFinalizeExecution:
             mock_prismind.add_knowledge = AsyncMock(return_value={"success": True})
             mock_prismind_class.return_value = mock_prismind
 
-            result = await execution.finalize_execution(
+            result = await execution.spec_executor_finalize(
                 execution_id=self.execution_id,
                 project="test-project",
                 save_to_knowledge=True,
@@ -527,7 +527,7 @@ class TestFinalizeExecution:
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_session(self):
         """Test error for unknown execution ID."""
-        result = await execution.finalize_execution(
+        result = await execution.spec_executor_finalize(
             execution_id="exec-unknown",
             save_to_knowledge=False,
         )
@@ -563,7 +563,7 @@ class TestGenerateExecutionReport:
     @pytest.mark.asyncio
     async def test_generates_markdown_report(self):
         """Test markdown format report generation."""
-        result = await execution.generate_execution_report(
+        result = await execution.spec_executor_report(
             execution_id=self.execution_id,
             format="markdown",
         )
@@ -576,7 +576,7 @@ class TestGenerateExecutionReport:
     @pytest.mark.asyncio
     async def test_generates_changelog_report(self):
         """Test changelog format report generation."""
-        result = await execution.generate_execution_report(
+        result = await execution.spec_executor_report(
             execution_id=self.execution_id,
             format="changelog",
         )
@@ -589,7 +589,7 @@ class TestGenerateExecutionReport:
     @pytest.mark.asyncio
     async def test_generates_brief_report(self):
         """Test brief format report generation."""
-        result = await execution.generate_execution_report(
+        result = await execution.spec_executor_report(
             execution_id=self.execution_id,
             format="brief",
         )
@@ -601,7 +601,7 @@ class TestGenerateExecutionReport:
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_session(self):
         """Test error for unknown execution ID."""
-        result = await execution.generate_execution_report(
+        result = await execution.spec_executor_report(
             execution_id="exec-unknown",
         )
 
@@ -634,7 +634,7 @@ class TestRunFullWorkflow:
                 "status": "questions_ready",
             }
 
-            result = await execution.run_full_workflow(
+            result = await execution.spec_executor_run(
                 target="src/api.py",
                 request="Add caching",
                 auto_approve=False,
@@ -661,7 +661,7 @@ class TestRunFullWorkflow:
             )
             mock_lexora_class.return_value = mock_lexora
 
-            result = await execution.run_full_workflow(
+            result = await execution.spec_executor_run(
                 target="src/api.py",
                 request="Add caching",
                 auto_approve=True,
@@ -678,7 +678,7 @@ class TestRunFullWorkflow:
         execution._settings = None
 
         with pytest.raises(RuntimeError, match="Settings not initialized"):
-            await execution.run_full_workflow(
+            await execution.spec_executor_run(
                 target="src/api.py",
                 request="Add caching",
             )

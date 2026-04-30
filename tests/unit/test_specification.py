@@ -134,11 +134,12 @@ class TestStartSpecification:
                 feature_type="cache",
             )
 
-            mock_prismind.search_knowledge.assert_called_once_with(
-                query="spec_template:cache",
-                category="spec_template",
-                limit=1,
-            )
+            # user kwarg is auto-detected from git config; ignore its value here
+            mock_prismind.search_knowledge.assert_called_once()
+            call_kwargs = mock_prismind.search_knowledge.call_args.kwargs
+            assert call_kwargs["query"] == "spec_template:cache"
+            assert call_kwargs["category"] == "spec_template"
+            assert call_kwargs["limit"] == 1
 
     @pytest.mark.asyncio
     async def test_fallback_questions_on_llm_error(self):
