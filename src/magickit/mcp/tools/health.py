@@ -11,6 +11,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.adapters.lexora import LexoraAdapter
@@ -64,10 +65,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             _check_cognilens(_settings),
             _check_prismind(_settings),
             _check_lexora(_settings),
+            _check_conclair(_settings),
             return_exceptions=True,
         )
 
-        service_names = ["cognilens", "prismind", "lexora"]
+        service_names = ["cognilens", "prismind", "lexora", "conclair"]
         healthy_count = 0
 
         for name, result in zip(service_names, checks):
@@ -192,5 +194,31 @@ async def _check_lexora(settings: Settings) -> dict[str, Any]:
             "status": "error",
             "response_time_ms": round(elapsed * 1000, 2),
             "url": settings.lexora_url,
+            "error": str(e),
+        }
+
+
+async def _check_conclair(settings: Settings) -> dict[str, Any]:
+    """Check Conclair (chatroom backend) service health."""
+    start = asyncio.get_event_loop().time()
+    try:
+        adapter = ChatroomAdapter(
+            base_url=settings.conclair_url,
+            timeout=settings.conclair_timeout,
+        )
+        healthy = await adapter.health_check()
+        elapsed = asyncio.get_event_loop().time() - start
+        await adapter.close()
+        return {
+            "status": "healthy" if healthy else "unhealthy",
+            "response_time_ms": round(elapsed * 1000, 2),
+            "url": settings.conclair_url,
+        }
+    except Exception as e:
+        elapsed = asyncio.get_event_loop().time() - start
+        return {
+            "status": "error",
+            "response_time_ms": round(elapsed * 1000, 2),
+            "url": settings.conclair_url,
             "error": str(e),
         }

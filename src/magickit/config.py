@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     unrealwise_url: str = Field(default="http://localhost:8005")
     unrealwise_timeout: float = Field(default=120.0)
 
+    conclair_url: str = Field(default="http://localhost:8115")
+    conclair_timeout: float = Field(default=30.0)
+
     # Database
     db_path: str = Field(default="data/magickit.db")
 
