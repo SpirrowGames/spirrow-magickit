@@ -15,12 +15,14 @@ Claude Code / Client (開発PC)
         ▼               ▼
     Magickit (:8004 リモートサーバ)
         │
-   ┌────┼────┬────┬────┐
-   ▼    ▼    ▼    ▼    ▼
-Lexora Cognilens Prismind UnrealWise Phanthand(開発PC)
+   ┌────┼────┬────┬────┬────┐
+   ▼    ▼    ▼    ▼    ▼    ▼
+Lexora Cognilens Prismind UnrealWise Phanthand(開発PC) Conclair
 ```
 
 **重要**: 「指揮者 - 自分では演奏しない」。各サービスへの委譲に徹する。
+
+`Conclair` (:8115) は AI 間 chatroom (議論 / handoff / decision) の永続化バックエンド。`PostgreSQL` (infra-stack コンテナ) が裏側で動く。詳細は [spirrow-conclair](https://github.com/SpirrowGames/spirrow-conclair)、設計は magickit project の `chatroom-archive-tool: System Design v2`。
 
 ## 技術スタック
 
@@ -64,13 +66,15 @@ src/magickit/
 │       ├── progress.py   # 進捗追跡・予測
 │       ├── quality.py    # 品質ゲート管理
 │       ├── reporting.py  # レポート・分析
-│       └── smart_read.py # Phanthand連携ファイル読み込み・分析
+│       ├── smart_read.py # Phanthand連携ファイル読み込み・分析
+│       └── chatroom.py   # spirrow-conclair 連携 chatroom 7 ツール
 ├── adapters/
 │   ├── base.py          # Adapter ABC
 │   ├── lexora.py        # LLM呼び出し
 │   ├── cognilens.py     # 圧縮
 │   ├── prismind.py      # RAG検索
 │   ├── phanthand.py     # 開発PCファイルアクセス（独立クラス）
+│   ├── chatroom.py      # spirrow-conclair (chatroom backend) 連携
 │   └── unrealwise.py    # UE操作
 └── utils/
     └── logging.py
@@ -151,6 +155,19 @@ class CognilensAdapter(BaseAdapter):
 class PrismindAdapter(BaseAdapter):
     async def search(query: str, n: int) -> list[Document]
     async def find_similar_document_type(type_query: str, threshold: float) -> dict
+
+class ChatroomAdapter(BaseAdapter):
+    # spirrow-conclair (port 8115) HTTP API のラッパー。
+    # conclair の error envelope ({error_type, error, details}) は
+    # 4xx/5xx 時にそのまま forward (raise せず dict 返却) されるので、
+    # 上位 (MCP ツール) で error_type を見て分岐できる。
+    async def open_thread(*, project, thread_id, title, owner, propose_content, ...) -> dict
+    async def post_message(*, project, thread_id, type, author, content, ...) -> dict
+    async def close_thread(*, project, thread_id, summary_content, author, ...) -> dict
+    async def list_threads(*, project, status_filter=None, owner=None, ...) -> dict
+    async def get_thread(*, project, thread_id, mode="full") -> dict
+    async def list_events(*, project, thread_id=None, action=None, since=None, ...) -> dict
+    async def check_integrity(*, project) -> dict
 ```
 
 ## API エンドポイント
@@ -841,6 +858,96 @@ generate_release_notes(project="my-game", version="v0.1.0-alpha")
 analyze_project_performance(project="my-game", use_llm=True)
 delete_project(project="my-game", mode="archive")
 ```
+
+### chatroom 連携 (`chatroom.py`)
+
+AI 間 chatroom (議論 / handoff / decision) の永続化を spirrow-conclair (FastAPI + PostgreSQL) に委譲する MCP ツール群。conclair の HTTP API を `ChatroomAdapter` 経由でそのまま wrap し、conclair の error envelope (`error_type` / `error` / `details`) はツール戻り値に passthrough される。
+
+| ツール | 用途 |
+|--------|------|
+| `chatroom_open_thread` | 新規 thread を立てる (propose msg を 1 transaction で同時 INSERT) |
+| `chatroom_post_message` | thread に msg を追加 (status 自動遷移: handoff→awaiting_reply / ack→active / decide+closes_thread→resolved) |
+| `chatroom_close_thread` | thread を resolved 化 (owner only、shortcut for decide+closes_thread) |
+| `chatroom_list_threads` | thread 一覧 (status / owner filter, pagination) |
+| `chatroom_get_thread` | thread + msgs (mode=full|summary、resolved & summary なら decide msg のみ) |
+| `chatroom_list_events` | audit log (action / thread_id / since/until filter) |
+| `chatroom_check_integrity` | invariant audit report (常に 200) |
+
+```python
+# 使用例: thread を立てて議論を開始
+chatroom_open_thread(
+    project="spirrow-voxelworld",
+    thread_id="T-D4-radius",
+    title="radius 値の検討",
+    owner="claude.ai",
+    propose_content="radius を 5 にする案を検討したい",
+    tags=["design"]
+)
+# → {"thread": {...status='active'...}, "msg": {...msg_id='msg-001'...}}
+
+# 使用例: handoff -> awaiting_reply
+chatroom_post_message(
+    project="spirrow-voxelworld",
+    thread_id="T-D4-radius",
+    type="handoff",
+    author="claude.ai",
+    content="claude-code に実装を依頼"
+)
+# → {"msg": {...}, "thread_status_changed_to": "awaiting_reply"}
+
+# 使用例: ack で active に戻す
+chatroom_post_message(
+    project="spirrow-voxelworld", thread_id="T-D4-radius",
+    type="ack", author="claude-code", content="着手します"
+)
+
+# 使用例: thread を close (owner のみ)
+chatroom_close_thread(
+    project="spirrow-voxelworld",
+    thread_id="T-D4-radius",
+    summary_content="## Resolution\n\n結論: radius=5 採用",
+    author="claude.ai",
+    affects_threads=["T-D5-vocabulary"]
+)
+# → {"thread": {...status='resolved'...}, "decide_msg": {...}}
+
+# 使用例: session 開始時の context 復元
+chatroom_list_threads(
+    project="spirrow-voxelworld",
+    status_filter=["active", "awaiting_reply"],
+    owner="claude.ai"
+)
+chatroom_list_threads(
+    project="spirrow-voxelworld",
+    status_filter=["awaiting_reply"]  # 自分宛の handoff 待ち
+)
+
+# 使用例: resolved thread を最小 context で読む
+chatroom_get_thread(
+    project="spirrow-voxelworld",
+    thread_id="T-D4-radius",
+    mode="summary"  # decide msg だけ返却 (token 節約)
+)
+```
+
+**重要な動作:**
+- 全 write 系ツールは conclair 側で 1 transaction で完結 (msg INSERT + thread UPDATE + event INSERT を atomic)
+- msg_id 採番は conclair 側で `pg_advisory_xact_lock(hashtext(project))` により直列化、衝突なし
+- error envelope は `success: bool` 形式ではなく **`error_type` 文字列の有無**で判定: `if "error_type" in result: ... else: ... `
+- close は thread.owner と一致する author のみ実行可能 (それ以外は `error_type=ChatroomPermissionError`)
+- summary mode は resolved 時のみ filter 効果あり (active/awaiting_reply では full と同じ)
+
+**msg type 一覧** (chatroom 仕様より):
+| type | 用途 | status 遷移 |
+|---|---|---|
+| `propose` | 議論の起点 (thread 開設時のみ) | (open_thread が処理) |
+| `question` / `answer` | 確認 / 回答 | なし |
+| `report` | 進捗・結果報告 | なし |
+| `handoff` | 相手 AI に作業を渡す | active → awaiting_reply |
+| `ack` | handoff を受領 | awaiting_reply → active |
+| `decide` | 結論 (closes_thread と組で thread close) | (closed thread に投げると `ChatroomStateError`) |
+
+詳細は spirrow-conclair の `docs/api-design.md` および `docs/usage-cheatsheet.md`、設計判断は magickit project の `chatroom-archive-tool: System Design v2`。
 
 ### ドキュメント管理 (`document.py`)
 

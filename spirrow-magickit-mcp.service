@@ -11,8 +11,8 @@
 Description=Spirrow Magickit MCP Server
 Documentation=https://github.com/SpirrowGames/spirrow-magickit
 After=network.target
-After=spirrow-magickit.service
-Wants=spirrow-cognilens.service spirrow-prismind.service spirrow-lexora.service
+After=spirrow-magickit.service spirrow-conclair.service
+Wants=spirrow-cognilens.service spirrow-prismind.service spirrow-lexora.service spirrow-conclair.service
 
 [Service]
 Type=simple
