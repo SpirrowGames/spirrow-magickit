@@ -117,8 +117,11 @@ async def test_open_thread_empty_commit_ref_normalized_to_none(registered) -> No
 async def test_post_message_passes_all_args(registered) -> None:
     mcp, adapter = registered
     tool = (await mcp.get_tools())["chatroom_post_message"]
+    # MCP-side parameter is `msg_type` (renamed from `type` to avoid
+    # JSON Schema reserved-keyword collisions in some MCP clients).
+    # Adapter-side still receives kwarg `type=`.
     await tool.fn(
-        project="p", thread_id="T-1", type="handoff", author="alice",
+        project="p", thread_id="T-1", msg_type="handoff", author="alice",
         content="go", reply_to="msg-001", references_threads=["T-x"],
         related_tasks=["TSK"], closes_thread="", tags=["t"], commit_ref="abc",
     )

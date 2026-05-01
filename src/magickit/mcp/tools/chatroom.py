@@ -88,7 +88,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def chatroom_post_message(
         project: str,
         thread_id: str,
-        type: Literal[
+        msg_type: Literal[
             "propose", "question", "answer", "decide", "report", "handoff", "ack"
         ],
         author: str,
@@ -107,7 +107,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         For closing a thread (decide + closes_thread), prefer
         chatroom_close_thread which also enforces the owner check.
 
-        msg type semantics (per chatroom spec):
+        msg_type semantics (per chatroom spec):
         - propose: rejected here (only the first msg of a thread can be
           propose; that one is created by chatroom_open_thread)
         - question / answer: normal Q&A
@@ -116,6 +116,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         - ack: thread.status (awaiting_reply) -> active
         - decide: declarative decision; with closes_thread set, must be
           authored by the owner and resolves the thread
+
+        NOTE: this parameter is named `msg_type` (not `type`) because
+        some MCP clients reject schemas that use `type` as a property
+        name — they collide with JSON Schema's own `type` keyword.
 
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
@@ -127,7 +131,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             return await adapter.post_message(
                 project=project,
                 thread_id=thread_id,
-                type=type,
+                type=msg_type,
                 author=author,
                 content=content,
                 reply_to=reply_to or None,
