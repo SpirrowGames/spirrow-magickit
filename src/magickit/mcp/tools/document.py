@@ -147,7 +147,9 @@ async def _generate_new_type_metadata(
     has_valid_type_id = bool(normalized_type_id)
 
     if has_valid_type_id:
-        prompt = f"""You are a document type metadata generator.
+        prompt = f"""Respond with JSON ONLY. Start your response with "{{". Do NOT include any preamble, explanation, reasoning, or markdown code fences.
+
+You are a document type metadata generator.
 
 Generate metadata for a NEW document type named "{doc_type_name}".
 
@@ -163,7 +165,7 @@ The type_id MUST be "{normalized_type_id}" exactly (already normalized).
 - folder_name: English only, PascalCase (e.g., "MeetingNotes", "APISpecs")
 - description: Brief description (1 sentence)
 
-【Output Format】JSON only, no explanation.
+【Output Format】JSON only. Begin immediately with `{{`.
 {{
     "type_id": "{normalized_type_id}",
     "name": "Meeting Notes",
@@ -172,7 +174,9 @@ The type_id MUST be "{normalized_type_id}" exactly (already normalized).
 }}"""
     else:
         # Non-ASCII input (e.g., Japanese) - LLM must generate English type_id
-        prompt = f"""You are a document type metadata generator.
+        prompt = f"""Respond with JSON ONLY. Start your response with "{{". Do NOT include any preamble, explanation, reasoning, or markdown code fences.
+
+You are a document type metadata generator.
 
 Generate metadata for a NEW document type named "{doc_type_name}" (translate to English).
 
@@ -194,7 +198,7 @@ type_id MUST be lowercase ASCII English with underscores only.
 - "設計書" → type_id: "design"
 - "仕様書" → type_id: "specification"
 
-【Output Format】JSON only, no explanation.
+【Output Format】JSON only. Begin immediately with `{{`.
 {{
     "type_id": "meeting_notes",
     "name": "議事録",
@@ -210,7 +214,7 @@ type_id MUST be lowercase ASCII English with underscores only.
     try:
         response = await lexora.generate(
             prompt=prompt,
-            max_tokens=200,
+            max_tokens=600,
             temperature=0.3,
         )
 
