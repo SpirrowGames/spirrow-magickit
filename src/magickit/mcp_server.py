@@ -6,36 +6,64 @@ allowing Claude Code and other MCP clients to use multi-service workflows.
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
+import os
+from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
 from magickit.config import get_settings
-from magickit.utils.logging import configure_logging, get_logger
 
 # Import tool modules (will be registered via decorators)
 from magickit.mcp.tools import (
-    health,
-    research,
-    orchestration,
-    generation,
-    session,
-    project,
+    chatroom,
     document,
     document_maintenance,
-    specification,
     execution,
-    task,
+    generation,
+    health,
     lifecycle,
+    orchestration,
     progress,
+    project,
     quality,
     reporting,
+    research,
+    session,
     smart_read,
-    chatroom,
+    specification,
+    task,
 )
+from magickit.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+
+def _build_auth_provider():
+    """Build the FastMCP auth provider.
+
+    Returns None when MAGICKIT_AUTH_DISABLED=1 so the server can boot before
+    GCP OAuth credentials are provisioned.
+    """
+    if os.environ.get("MAGICKIT_AUTH_DISABLED") == "1":
+        logger.warning("Auth disabled via MAGICKIT_AUTH_DISABLED=1")
+        return None
+
+    from fastmcp.server.auth.providers.google import GoogleProvider
+
+    return GoogleProvider(
+        client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
+        base_url=os.environ["GOOGLE_OAUTH_BASE_URL"],
+        required_scopes=[
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+        ],
+        allowed_client_redirect_uris=[
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://claude.com/api/mcp/auth_callback",
+        ],
+        jwt_signing_key=os.environ["JWT_SIGNING_KEY"],
+    )
 
 
 def create_mcp_server() -> FastMCP:
@@ -59,6 +87,7 @@ def create_mcp_server() -> FastMCP:
 It provides tools that combine multiple services (Cognilens, Prismind, Lexora)
 into optimized workflows. Use these tools when you need multi-service operations
 rather than calling individual services separately.""",
+        auth=_build_auth_provider(),
     )
 
     # Register tools from modules
@@ -95,25 +124,52 @@ rather than calling individual services separately.""",
 mcp = create_mcp_server()
 
 
+def _run_dual(host: str, port: int) -> None:
+    """Serve Streamable HTTP (/mcp) and legacy SSE (/sse, /messages/) in one process."""
+    import uvicorn
+    from starlette.applications import Starlette
+
+    http_app = mcp.http_app(transport="http")  # exposes /mcp
+    sse_app = mcp.http_app(transport="sse")    # exposes /sse and /messages/
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with http_app.router.lifespan_context(app):
+            async with sse_app.router.lifespan_context(app):
+                yield
+
+    app = Starlette(
+        routes=list(http_app.routes) + list(sse_app.routes),
+        lifespan=lifespan,
+    )
+
+    uvicorn.run(app, host=host, port=port, log_config=None)
+
+
 def main() -> None:
     """Run the MCP server."""
     settings = get_settings()
 
-    # Get MCP port from config (default 8114)
-    mcp_port = getattr(settings, "mcp_port", 8114)
+    host = os.environ.get("MAGICKIT_HOST", settings.host)
+    port = int(os.environ.get("MAGICKIT_MCP_PORT", getattr(settings, "mcp_port", 8114)))
+    transport_mode = os.environ.get("MAGICKIT_TRANSPORT_MODE", "dual")
 
     logger.info(
         "Starting Magickit MCP server",
-        host=settings.host,
-        port=mcp_port,
+        host=host,
+        port=port,
+        transport=transport_mode,
+        auth_disabled=os.environ.get("MAGICKIT_AUTH_DISABLED") == "1",
     )
 
-    # Run SSE server
-    mcp.run(
-        transport="sse",
-        host=settings.host,
-        port=mcp_port,
-    )
+    if transport_mode == "http":
+        mcp.run(transport="http", host=host, port=port)
+    elif transport_mode == "sse":
+        mcp.run(transport="sse", host=host, port=port)
+    elif transport_mode == "dual":
+        _run_dual(host, port)
+    else:
+        raise ValueError(f"Unknown MAGICKIT_TRANSPORT_MODE: {transport_mode}")
 
 
 if __name__ == "__main__":
