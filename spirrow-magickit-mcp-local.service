@@ -1,0 +1,37 @@
+[Unit]
+Description=Spirrow Magickit MCP Server (local, no-auth, tailscale 100.79.84.62:8117)
+Documentation=https://github.com/spirrow/spirrow-magickit
+After=network.target
+After=spirrow-magickit.service spirrow-conclair.service
+Wants=spirrow-cognilens.service spirrow-prismind.service spirrow-lexora.service spirrow-conclair.service
+
+[Service]
+Type=simple
+User=sgadmin
+Group=sgadmin
+WorkingDirectory=/home/sgadmin/services/spirrow/spirrow-magickit
+ExecStart=/home/sgadmin/services/spirrow/spirrow-magickit/venv/bin/python -m magickit.mcp_server
+Restart=always
+RestartSec=5
+MemoryMax=512M
+
+# Local-only instance: auth disabled, bind 127.0.0.1, port 8115, http-only
+# Reachable only from sg-ai-server-01 itself (SSH access is the gate)
+Environment=PYTHONPATH=/home/sgadmin/services/spirrow/spirrow-magickit/src
+Environment=MAGICKIT_LOG_LEVEL=INFO
+Environment=MAGICKIT_AUTH_DISABLED=1
+Environment=MAGICKIT_HOST=100.79.84.62
+Environment=MAGICKIT_MCP_PORT=8117
+Environment=MAGICKIT_TRANSPORT_MODE=http
+# Distinct oauth-storage path so it doesn't try to share with the public instance
+Environment=MAGICKIT_OAUTH_STORAGE_DIR=/home/sgadmin/services/spirrow/spirrow-magickit/data/oauth-storage-local
+
+# Hardening (mirror of public instance)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/sgadmin/services/spirrow/spirrow-magickit/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
