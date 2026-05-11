@@ -48,7 +48,21 @@ def _build_auth_provider():
         logger.warning("Auth disabled via MAGICKIT_AUTH_DISABLED=1")
         return None
 
+    from pathlib import Path
+
     from fastmcp.server.auth.providers.google import GoogleProvider
+    from key_value.aio.stores.disk import DiskStore
+
+    # GoogleProvider's default storage uses platformdirs (~/.local/share/...),
+    # which is read-only under systemd ProtectHome=read-only. Pin storage under
+    # an explicit ReadWritePaths-allowed location instead.
+    storage_dir = Path(
+        os.environ.get(
+            "MAGICKIT_OAUTH_STORAGE_DIR",
+            "/home/sgadmin/services/spirrow/spirrow-magickit/data/oauth-storage",
+        )
+    )
+    storage_dir.mkdir(parents=True, exist_ok=True)
 
     return GoogleProvider(
         client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
@@ -63,6 +77,7 @@ def _build_auth_provider():
             "https://claude.com/api/mcp/auth_callback",
         ],
         jwt_signing_key=os.environ["JWT_SIGNING_KEY"],
+        client_storage=DiskStore(directory=storage_dir),
     )
 
 
