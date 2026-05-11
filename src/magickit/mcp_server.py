@@ -147,6 +147,12 @@ def _run_dual(host: str, port: int) -> None:
     http_app = mcp.http_app(transport="http")  # exposes /mcp
     sse_app = mcp.http_app(transport="sse")    # exposes /sse and /messages/
 
+    # http_app() calls auth.set_mcp_path() as a side effect; the sse call would
+    # otherwise overwrite the auth's resource URL to /sse, causing OAuth clients
+    # that request resource=<base>/mcp (e.g. claude.ai) to fail with invalid_target.
+    if mcp.auth is not None:
+        mcp.auth.set_mcp_path("/mcp")
+
     @asynccontextmanager
     async def lifespan(app):
         async with http_app.router.lifespan_context(app):
