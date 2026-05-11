@@ -41,6 +41,9 @@ htmlcov/
 *.db
 *.sqlite3
 
+# Runtime data (FastMCP OAuth client storage etc.)
+data/oauth-storage*/
+
 # Environment
 .env
 .env.local
