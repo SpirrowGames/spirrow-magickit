@@ -7,7 +7,6 @@ allowing Claude Code and other MCP clients to use multi-service workflows.
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
@@ -139,41 +138,13 @@ rather than calling individual services separately.""",
 mcp = create_mcp_server()
 
 
-def _run_dual(host: str, port: int) -> None:
-    """Serve Streamable HTTP (/mcp) and legacy SSE (/sse, /messages/) in one process."""
-    import uvicorn
-    from starlette.applications import Starlette
-
-    http_app = mcp.http_app(transport="http")  # exposes /mcp
-    sse_app = mcp.http_app(transport="sse")    # exposes /sse and /messages/
-
-    # http_app() calls auth.set_mcp_path() as a side effect; the sse call would
-    # otherwise overwrite the auth's resource URL to /sse, causing OAuth clients
-    # that request resource=<base>/mcp (e.g. claude.ai) to fail with invalid_target.
-    if mcp.auth is not None:
-        mcp.auth.set_mcp_path("/mcp")
-
-    @asynccontextmanager
-    async def lifespan(app):
-        async with http_app.router.lifespan_context(app):
-            async with sse_app.router.lifespan_context(app):
-                yield
-
-    app = Starlette(
-        routes=list(http_app.routes) + list(sse_app.routes),
-        lifespan=lifespan,
-    )
-
-    uvicorn.run(app, host=host, port=port, log_config=None)
-
-
 def main() -> None:
     """Run the MCP server."""
     settings = get_settings()
 
     host = os.environ.get("MAGICKIT_HOST", settings.host)
     port = int(os.environ.get("MAGICKIT_MCP_PORT", getattr(settings, "mcp_port", 8114)))
-    transport_mode = os.environ.get("MAGICKIT_TRANSPORT_MODE", "dual")
+    transport_mode = os.environ.get("MAGICKIT_TRANSPORT_MODE", "http")
 
     logger.info(
         "Starting Magickit MCP server",
@@ -187,8 +158,6 @@ def main() -> None:
         mcp.run(transport="http", host=host, port=port)
     elif transport_mode == "sse":
         mcp.run(transport="sse", host=host, port=port)
-    elif transport_mode == "dual":
-        _run_dual(host, port)
     else:
         raise ValueError(f"Unknown MAGICKIT_TRANSPORT_MODE: {transport_mode}")
 
