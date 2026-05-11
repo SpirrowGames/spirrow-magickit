@@ -126,25 +126,25 @@ GET /health
 
 server:
   host: "0.0.0.0"
-  port: 8004
+  port: 8113      # FastAPI HTTP API; MCP server is on 8114
 
 services:
   lexora:
-    url: "http://localhost:8001"
+    url: "http://localhost:8110"
     priority: 1
-    
+
   cognilens:
-    url: "http://localhost:8003"
+    url: "http://localhost:8111"
     auto_compress: true
     compression_threshold: 4000  # tokens
-    
+
   prismind:
-    url: "http://localhost:8002"
+    url: "http://localhost:8112"
     auto_rag: true
     rag_threshold: 0.7  # relevance score
-    
+
   unrealwise:
-    url: "http://localhost:8005"
+    url: "http://localhost:8005"  # not currently deployed
 
 orchestration:
   max_context_tokens: 8000
