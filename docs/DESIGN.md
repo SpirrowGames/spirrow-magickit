@@ -407,7 +407,7 @@ spirrow-magickit/
 
 | 経路 | プロトコル |
 |------|-----------|
-| Claude Code → Magickit | MCP over HTTP/SSE |
+| Claude Code → Magickit | MCP over Streamable HTTP (`http`) / legacy SSE (`sse`) は env で切替 |
 | Magickit → UnrealWise | HTTP API |
 | Magickit → Lexora/Cognilens/Prismind | HTTP API（内部） |
 

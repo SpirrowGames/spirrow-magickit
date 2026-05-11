@@ -13,7 +13,7 @@ Claude Code / Client (開発PC)
         │               │
         │ MCP            │ Phanthand (:7300)
         ▼               ▼
-    Magickit (:8004 リモートサーバ)
+    Magickit (:8113 FastAPI / :8114 MCP, リモートサーバ)
         │
    ┌────┼────┬────┬────┬────┐
    ▼    ▼    ▼    ▼    ▼    ▼
@@ -1270,21 +1270,31 @@ generate_with_context(
 `config/magickit_config.yaml` を参照。環境変数でオーバーライド可能。
 
 ```bash
-MAGICKIT_LEXORA_URL=http://localhost:8001
-MAGICKIT_COGNILENS_URL=http://localhost:8003
-MAGICKIT_PRISMIND_URL=http://localhost:8002
-MAGICKIT_PORT=8004
+MAGICKIT_LEXORA_URL=http://localhost:8110
+MAGICKIT_COGNILENS_URL=http://localhost:8111
+MAGICKIT_PRISMIND_URL=http://localhost:8112
+MAGICKIT_PORT=8113            # FastAPI HTTP API
+MAGICKIT_MCP_PORT=8114        # MCP server (Streamable HTTP)
+MAGICKIT_TRANSPORT_MODE=http  # http (default) | sse (legacy)
+MAGICKIT_AUTH_DISABLED=0      # 1 to bypass Google OAuth on the MCP endpoint
 ```
 
 ## 起動方法
 
-```bash
-# 開発
-uvicorn magickit.main:app --reload --port 8004
+本番運用は **systemd 経由のみ**(SSH セッションでの uvicorn 直起動は禁止 — 過去の OOM 事案あり)。
 
-# 本番
-python -m magickit.main
+```bash
+# FastAPI HTTP API
+sudo systemctl restart spirrow-magickit.service          # main.py @ 0.0.0.0:8113
+
+# MCP server (Cloudflare Tunnel 経由で claude.ai web に公開、auth ON)
+sudo systemctl restart spirrow-magickit-mcp.service      # mcp_server.py @ 127.0.0.1:8114
+
+# MCP server (tailnet 内の Claude Code CLI 用、auth OFF)
+sudo systemctl restart spirrow-magickit-mcp-local.service # mcp_server.py @ 100.79.84.62:8117
 ```
+
+開発時にローカル一時起動が必要なら `systemd-run --user --property=MemoryMax=2G python -m magickit.mcp_server` のように transient unit にする(global CLAUDE.md ルール準拠)。
 
 ## Phase 1 スコープ
 

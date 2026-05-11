@@ -20,7 +20,7 @@
 Claude Code / MCPクライアント
         │
         ▼
-    Magickit (:8114 SSE / :8113 HTTP)
+    Magickit (:8114 MCP Streamable HTTP / :8113 FastAPI)
         │
    ┌────┼────┬────┐
    ▼    ▼    ▼    ▼
@@ -296,7 +296,7 @@ export MAGICKIT_PRISMIND_URL=http://localhost:8112
 ### MCPサーバーとして（推奨）
 
 ```bash
-# SSEサーバーとして起動（ポート8114）
+# Streamable HTTPサーバーとして起動（ポート8114）
 python -m magickit.mcp_server
 ```
 
@@ -318,7 +318,8 @@ python -m magickit.main
 {
   "mcpServers": {
     "spirrow-magickit": {
-      "url": "http://localhost:8114/sse"
+      "type": "http",
+      "url": "http://localhost:8114/mcp"
     }
   }
 }
@@ -333,8 +334,10 @@ python -m magickit.main
 | `MAGICKIT_LEXORA_URL` | `http://localhost:8110` | Lexora URL |
 | `MAGICKIT_COGNILENS_URL` | `http://localhost:8111` | Cognilens URL |
 | `MAGICKIT_PRISMIND_URL` | `http://localhost:8112` | Prismind URL |
-| `MAGICKIT_MCP_PORT` | `8114` | MCP SSEサーバーポート |
-| `MAGICKIT_PORT` | `8113` | HTTP APIサーバーポート |
+| `MAGICKIT_MCP_PORT` | `8114` | MCP Streamable HTTP サーバーポート |
+| `MAGICKIT_PORT` | `8113` | FastAPI HTTP API サーバーポート |
+| `MAGICKIT_TRANSPORT_MODE` | `http` | MCP transport: `http` (Streamable HTTP) または `sse` (旧式) |
+| `MAGICKIT_AUTH_DISABLED` | `0` | `1` で Google OAuth をバイパス(ローカル限定デプロイ向け) |
 
 またはファイルベースの設定: `config/magickit_config.yaml`
 

@@ -23,7 +23,7 @@ Magickit is the orchestration hub of the Spirrow Platform. It integrates multipl
 Claude Code / MCP Client
         │
         ▼
-    Magickit (:8114 SSE / :8113 HTTP)
+    Magickit (:8114 MCP Streamable HTTP / :8113 FastAPI)
         │
    ┌────┼────┬────┐
    ▼    ▼    ▼    ▼
@@ -76,7 +76,8 @@ Add to your `~/.claude/mcp.json`:
 {
   "mcpServers": {
     "spirrow-magickit": {
-      "url": "http://localhost:8114/sse"
+      "type": "http",
+      "url": "http://localhost:8114/mcp"
     }
   }
 }
@@ -206,8 +207,10 @@ Environment variables:
 | `MAGICKIT_LEXORA_URL` | `http://localhost:8110` | Lexora service URL |
 | `MAGICKIT_COGNILENS_URL` | `http://localhost:8111` | Cognilens service URL |
 | `MAGICKIT_PRISMIND_URL` | `http://localhost:8112` | Prismind service URL |
-| `MAGICKIT_MCP_PORT` | `8114` | MCP SSE server port |
-| `MAGICKIT_PORT` | `8113` | HTTP API server port |
+| `MAGICKIT_MCP_PORT` | `8114` | MCP Streamable HTTP server port |
+| `MAGICKIT_PORT` | `8113` | FastAPI HTTP API server port |
+| `MAGICKIT_TRANSPORT_MODE` | `http` | MCP transport: `http` (Streamable HTTP) or `sse` (legacy) |
+| `MAGICKIT_AUTH_DISABLED` | `0` | Set to `1` to bypass Google OAuth (local-only deployments) |
 
 Or use `config/magickit_config.yaml` for file-based configuration.
 
