@@ -34,6 +34,7 @@ async def _begin_task_impl(
     task_description: str = "",
     max_tokens: int = 2000,
     user: str = "",
+    author: str = "",
 ) -> dict[str, Any]:
     """Internal implementation for begin_task logic.
 
@@ -45,6 +46,7 @@ async def _begin_task_impl(
         task_description: Description of current task
         max_tokens: Maximum tokens for context
         user: User identifier for multi-user support
+        author: Context author/role partition (empty for default context)
     """
     if _settings is None:
         raise RuntimeError("Settings not initialized")
@@ -66,7 +68,9 @@ async def _begin_task_impl(
 
     # Step 1: Start session in Prismind
     try:
-        session_result = await prismind.start_session(project=project, user=effective_user)
+        session_result = await prismind.start_session(
+            project=project, user=effective_user, author=author
+        )
         session_data = _parse_result(session_result)
     except Exception as e:
         logger.error("Failed to start session", project=project, error=str(e))
@@ -151,6 +155,7 @@ async def _begin_task_impl(
     response: dict[str, Any] = {
         "project": project,
         "user": effective_user,
+        "author": session_data.get("author", author) if isinstance(session_data, dict) else author,
         "session_id": session_data.get("session_id", "") if isinstance(session_data, dict) else "",
         "current_phase": session_data.get("current_phase", "") if isinstance(session_data, dict) else "",
         "current_task": session_data.get("current_task", "") if isinstance(session_data, dict) else "",
@@ -189,6 +194,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         task_description: str = "",
         max_tokens: int = 2000,
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Start a task session and restore relevant context from previous sessions.
 
@@ -207,10 +213,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             task_description: Optional description of the current task for context retrieval.
             max_tokens: Maximum tokens for the restored context.
             user: User identifier for multi-user support (empty for default user).
+            author: Context author/role partition to restore. Use this when
+                multiple roles (e.g. "claude.ai", "claude-code") keep separate
+                contexts for the same project. Empty restores the default
+                context. Call list_context_authors first to see which authors
+                already have saved context and avoid naming-variation duplicates.
 
         Returns:
             Dict containing:
             - project: Project identifier
+            - author: Context author/role this context belongs to
             - session_id: New session ID
             - current_phase: Current project phase
             - current_task: Current active task
@@ -224,7 +236,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - notes: Session notes from prior work
             - user: User identifier
         """
-        return await _begin_task_impl(project, task_description, max_tokens, user)
+        return await _begin_task_impl(project, task_description, max_tokens, user, author)
 
     @mcp.tool()
     async def checkpoint(
@@ -237,6 +249,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         next_action: str = "",
         auto_extract: bool = True,
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Save intermediate progress during a session.
 
@@ -260,6 +273,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             next_action: What to do next (saved for session continuity).
             auto_extract: If True, use Cognilens to extract essence from long summaries.
             user: User identifier for multi-user support (empty for default user).
+            author: Context author/role partition to save under. Use the same
+                author you intend to resume() with. Empty saves to the default
+                context. Call list_context_authors to reuse an existing author
+                name instead of introducing a naming-variation duplicate.
 
         Returns:
             Dict containing:
@@ -327,6 +344,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             if project:
                 save_args["project"] = project
             save_args["user"] = effective_user
+            if author:
+                save_args["author"] = author
 
             await prismind.save_session(**save_args)
             saved_to.append("session")
@@ -340,13 +359,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             if not project:
                 logger.warning("No project specified, decisions will not be saved")
             else:
+                decision_tags = ["checkpoint", "decision"]
+                if author:
+                    decision_tags.append(f"author:{author}")
                 for decision in decisions:
                     try:
                         await prismind.add_knowledge(
                             content=decision,
                             category="decision",
                             project=project,
-                            tags=["checkpoint", "decision"],
+                            tags=decision_tags,
                             user=effective_user,
                         )
                         knowledge_added += 1
@@ -379,6 +401,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         blockers: list[str] | None = None,
         save_insights: bool = True,
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """End a session and prepare handoff for the next session.
 
@@ -400,6 +423,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             blockers: List of blockers that need resolution.
             save_insights: If True, extract and save session insights as knowledge.
             user: User identifier for multi-user support (empty for default user).
+            author: Context author/role partition to hand off. The next session
+                restores it via resume(author=...). Empty uses the default
+                context.
 
         Returns:
             Dict containing:
@@ -464,6 +490,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             if project:
                 end_args["project"] = project
             end_args["user"] = effective_user
+            if author:
+                end_args["author"] = author
 
             session_result = await prismind.end_session(**end_args)
             session_data = _parse_result(session_result)
@@ -499,13 +527,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                     if isinstance(essence_result, dict):
                         # Save key concepts as session insights
                         key_concepts = essence_result.get("key_concepts", [])
+                        insight_tags = ["handoff", "insight"]
+                        if author:
+                            insight_tags.append(f"author:{author}")
                         for concept in key_concepts[:5]:  # Limit to 5 insights
                             try:
                                 await prismind.add_knowledge(
                                     content=concept,
                                     category="session_insight",
                                     project=project,
-                                    tags=["handoff", "insight"],
+                                    tags=insight_tags,
                                     user=effective_user,
                                 )
                                 insights_saved += 1
@@ -541,6 +572,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         detail_level: str = "standard",
         task_description: str = "",
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Resume work on a project with preset detail levels.
 
@@ -556,6 +588,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             detail_level: Amount of context to restore ("minimal", "standard", "full").
             task_description: Optional description of the task to focus context retrieval.
             user: User identifier for multi-user support (empty for default user).
+            author: Context author/role partition to resume. Use the same author
+                the context was checkpoint()/handoff()'d under. Empty resumes
+                the default context. Call list_context_authors to see which
+                authors have saved context for this project.
 
         Returns:
             Same structure as begin_task.
@@ -568,6 +604,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             detail_level=detail_level,
             max_tokens=max_tokens,
             user=user or "default",
+            author=author or "default",
         )
 
         # Delegate to internal implementation
@@ -576,6 +613,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             task_description=task_description,
             max_tokens=max_tokens,
             user=user,
+            author=author,
         )
 
     @mcp.tool()
@@ -586,6 +624,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         completed_task: str = "",
         blockers: list[str] | None = None,
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Update progress in the current session.
 
@@ -603,6 +642,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             completed_task: Task that was just completed.
             blockers: Updated list of blockers.
             user: User identifier for multi-user support (empty for default user).
+            author: Context author/role partition to update (empty for the
+                default context).
 
         Returns:
             Dict containing:
@@ -638,6 +679,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 blockers=blockers,
                 project=project,
                 user=effective_user,
+                author=author,
             )
 
             saved_to = result.get("saved_to", [])
@@ -655,6 +697,65 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "saved_to": [],
                 "message": f"Failed to update progress: {e}",
             }
+
+    @mcp.tool()
+    async def list_context_authors(
+        project: str,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """List the context authors/roles that have saved context for a project.
+
+        USE THIS WHEN: Before checkpoint/handoff/resume with an `author`, to:
+        - Reuse an existing author name instead of creating a near-duplicate
+          from a naming variation (e.g. "claude-code" vs "claude_code").
+        - Check whether your own role's context has already been saved.
+
+        Each project+user can hold multiple independent contexts, one per
+        author. An empty author ("") is the default/legacy context.
+
+        Args:
+            project: Project identifier to inspect.
+            user: Optional user filter (empty = all users on the project).
+
+        Returns:
+            Dict containing:
+            - success: Whether the lookup succeeded
+            - project: Project identifier
+            - authors: List of {author, user, current_phase, current_task,
+              updated_at}, most-recently-updated first
+            - total_count: Number of distinct authors
+            - message: Status message
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        prismind = PrismindAdapter(
+            sse_url=_settings.prismind_url,
+            timeout=_settings.prismind_timeout,
+        )
+
+        logger.info("Listing context authors", project=project, user=user or "all")
+
+        try:
+            result = await prismind.list_context_authors(project=project, user=user)
+        except Exception as e:
+            logger.error("Failed to list context authors", error=str(e))
+            return {
+                "success": False,
+                "project": project,
+                "authors": [],
+                "total_count": 0,
+                "message": f"Failed to list context authors: {e}",
+            }
+
+        authors = result.get("authors", []) if isinstance(result, dict) else []
+        return {
+            "success": result.get("success", True) if isinstance(result, dict) else True,
+            "project": project,
+            "authors": authors,
+            "total_count": result.get("total_count", len(authors)) if isinstance(result, dict) else len(authors),
+            "message": result.get("message", "") if isinstance(result, dict) else "",
+        }
 
 
 def _parse_result(result: Any) -> dict[str, Any]:

@@ -242,3 +242,79 @@ class TestSessionTools:
             handoff_result.get("success"),
             resume_result,
         ])
+
+
+async def _require_author_capable_prismind(mock_mcp):
+    """Skip if the live Prismind has not been redeployed with author support.
+
+    The context-author feature needs the updated spirrow-prismind service; an
+    older running service does not expose list_context_authors. These
+    integration tests auto-activate once Prismind is redeployed.
+    """
+    probe = await mock_mcp.tools["list_context_authors"](
+        project="test-context-author-capability-probe",
+    )
+    if not probe.get("success"):
+        pytest.skip(
+            "live spirrow-prismind lacks list_context_authors "
+            f"(redeploy required): {probe.get('message')}"
+        )
+
+
+class TestContextAuthorPartition:
+    """Integration tests for context-author partitioned contexts."""
+
+    @pytest.mark.asyncio
+    async def test_author_isolation_and_listing(self, settings, mock_mcp):
+        """Two authors keep isolated contexts; list_context_authors sees both."""
+        session.register_tools(mock_mcp, settings)
+        await _require_author_capable_prismind(mock_mcp)
+        project = "test-context-author"
+
+        await mock_mcp.tools["checkpoint"](
+            summary="architect context",
+            project=project,
+            current_task="T-arch",
+            auto_extract=False,
+            user=TEST_USER,
+            author="claude.ai",
+        )
+        await mock_mcp.tools["checkpoint"](
+            summary="implementer context",
+            project=project,
+            current_task="T-impl",
+            auto_extract=False,
+            user=TEST_USER,
+            author="claude-code",
+        )
+
+        # Each author resumes its own context
+        arch = await mock_mcp.tools["resume"](
+            project=project, user=TEST_USER, author="claude.ai",
+        )
+        impl = await mock_mcp.tools["resume"](
+            project=project, user=TEST_USER, author="claude-code",
+        )
+        assert arch.get("author") == "claude.ai"
+        assert impl.get("author") == "claude-code"
+
+        # list_context_authors surfaces both
+        listed = await mock_mcp.tools["list_context_authors"](
+            project=project, user=TEST_USER,
+        )
+        assert listed["success"] is True
+        authors = {a.get("author") for a in listed["authors"]}
+        assert {"claude.ai", "claude-code"}.issubset(authors)
+        print(f"\nlist_context_authors: {listed}")
+
+    @pytest.mark.asyncio
+    async def test_list_context_authors_empty_project(self, settings, mock_mcp):
+        """list_context_authors returns success with no authors for unknown project."""
+        session.register_tools(mock_mcp, settings)
+        await _require_author_capable_prismind(mock_mcp)
+        result = await mock_mcp.tools["list_context_authors"](
+            project="test-context-author-nonexistent-xyz",
+            user=TEST_USER,
+        )
+        assert result["success"] is True
+        assert result["total_count"] == 0

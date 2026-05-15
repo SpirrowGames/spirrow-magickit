@@ -677,12 +677,14 @@ class PrismindAdapter(MCPBaseAdapter):
         self,
         project: str = "",
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Start a session and load saved state.
 
         Args:
             project: Project ID (empty for current)
             user: User identifier for multi-user support
+            author: Context author/role partition (empty for default context)
 
         Returns:
             Dict with session context (project, current_phase, current_task, etc.)
@@ -692,6 +694,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["project"] = project
         if user:
             arguments["user"] = user
+        if author:
+            arguments["author"] = author
 
         logger.info("Starting session via MCP", project=project, user=user)
 
@@ -709,6 +713,7 @@ class PrismindAdapter(MCPBaseAdapter):
         notes: str = "",
         project: str = "",
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """End the session and save state.
 
@@ -719,6 +724,7 @@ class PrismindAdapter(MCPBaseAdapter):
             notes: Notes to pass to next session
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
+            author: Context author/role partition (empty for default context)
 
         Returns:
             Dict with success status and session duration
@@ -736,6 +742,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["project"] = project
         if user:
             arguments["user"] = user
+        if author:
+            arguments["author"] = author
 
         logger.info("Ending session via MCP", project=project, user=user)
 
@@ -755,6 +763,7 @@ class PrismindAdapter(MCPBaseAdapter):
         current_task: str = "",
         project: str = "",
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Save session state without ending.
 
@@ -767,6 +776,7 @@ class PrismindAdapter(MCPBaseAdapter):
             current_task: Update current task
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
+            author: Context author/role partition (empty for default context)
 
         Returns:
             Dict with success status
@@ -788,6 +798,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["project"] = project
         if user:
             arguments["user"] = user
+        if author:
+            arguments["author"] = author
 
         logger.info("Saving session via MCP", project=project, user=user)
 
@@ -805,6 +817,7 @@ class PrismindAdapter(MCPBaseAdapter):
         blockers: list[str] | None = None,
         project: str = "",
         user: str = "",
+        author: str = "",
     ) -> dict[str, Any]:
         """Update progress in the session.
 
@@ -815,6 +828,7 @@ class PrismindAdapter(MCPBaseAdapter):
             blockers: Updated blockers
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
+            author: Context author/role partition (empty for default context)
 
         Returns:
             Dict with success status
@@ -832,6 +846,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["project"] = project
         if user:
             arguments["user"] = user
+        if author:
+            arguments["author"] = author
 
         logger.info(
             "Updating progress via MCP",
@@ -843,6 +859,32 @@ class PrismindAdapter(MCPBaseAdapter):
         success, result = await self._call_tool_safe("update_progress", arguments)
         if not success:
             raise RuntimeError(f"update_progress failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def list_context_authors(
+        self,
+        project: str,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """List the distinct context authors saved for a project.
+
+        Args:
+            project: Project ID to inspect
+            user: Optional user filter (empty for all users)
+
+        Returns:
+            Dict with success status and an ``authors`` list
+        """
+        arguments: dict[str, Any] = {"project": project}
+        if user:
+            arguments["user"] = user
+
+        logger.info("Listing context authors via MCP", project=project, user=user)
+
+        success, result = await self._call_tool_safe("list_context_authors", arguments)
+        if not success:
+            raise RuntimeError(f"list_context_authors failed: {result}")
 
         return self._parse_json_result(result)
 
