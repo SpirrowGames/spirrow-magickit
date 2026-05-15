@@ -202,11 +202,19 @@ Claudeセッション間でコンテキストを維持するためのツール�
 | `handoff` | セッション終了と次回への引き継ぎ情報保存 |
 | `resume` | `begin_task`のエイリアス（detail_levelプリセット付き） |
 | `update_progress` | 進捗更新（phase/task/blockers）軽量版 |
+| `list_context_authors` | プロジェクトにコンテキストを保存済みの author 一覧 |
 
 **セッション引き継ぎの仕組み:**
 - `handoff`で`summary`と`next_action`を保存
 - 次回セッションで`begin_task`/`resume`時に`last_summary`と`next_action`を復元
 - MCP Memory Serverに状態を永続化
+
+**コンテキスト author（ロール）分割:**
+- `checkpoint`/`handoff`/`resume`/`begin_task`/`update_progress` は任意の `author` を受け取り、1つの project+user に対して **author ごとに独立したコンテキスト** を保存・復元できる（保存キー: `prismind:session:{project}:{user}:{author}`）
+- `author` 空＝デフォルト（レガシー）コンテキスト。後方互換のため既存のキー形式を維持
+- 用途: 複数ロール（例 `claude.ai` / `claude-code`）が同じプロジェクトで別々の引き継ぎを持つ
+- `list_context_authors` で保存済み author 一覧を取得し、**表記揺れによる重複を防止**・**自分の author のコンテキスト有無を確認** してから checkpoint/resume すること
+- `checkpoint`/`handoff` が抽出する knowledge には `author:{name}` タグが付与される
 
 ```python
 # 使用例
@@ -238,6 +246,21 @@ handoff(
 # 次回セッション開始
 resume(project="trapxtrap", detail_level="standard")
 # → last_summary, next_action が復元される
+
+# --- author（ロール）分割の例 ---
+# まず保存済み author を確認（表記揺れ防止 / 自分の context 有無確認）
+list_context_authors(project="trapxtrap")
+# → {"authors": [{"author": "claude.ai", ...}, {"author": "claude-code", ...}], ...}
+
+# 自分のロールで保存
+checkpoint(
+    summary="設計レビュー完了",
+    project="trapxtrap",
+    current_task="T05: 設計",
+    author="claude.ai"
+)
+# 同じ author で復元（他 author の context とは独立）
+resume(project="trapxtrap", author="claude.ai")
 ```
 
 **checkpointパラメータ:**
@@ -248,6 +271,7 @@ resume(project="trapxtrap", detail_level="standard")
 - `current_phase`: 現在のフェーズ（例: "Phase 2"）
 - `current_task`: 現在のタスク（例: "T01: 機能実装"）
 - `next_action`: 次にやること
+- `author`: コンテキスト author（ロール）分割。空でデフォルト
 
 **handoffパラメータ:**
 - `next_action`: 次回セッションへの推奨アクション（必須）
@@ -256,6 +280,12 @@ resume(project="trapxtrap", detail_level="standard")
 - `notes`: 追加メモ
 - `blockers`: ブロッカーリスト
 - `save_insights`: インサイトをknowledgeに保存するか
+- `author`: コンテキスト author（ロール）分割。空でデフォルト
+
+**list_context_authorsパラメータ:**
+- `project`: 対象プロジェクトID（必須）
+- `user`: user フィルタ（空＝プロジェクトの全 user）
+- 返り値: `authors`（`author`/`user`/`current_phase`/`current_task`/`updated_at` を含み、更新が新しい順）, `total_count`
 
 ### リサーチ (`research.py`)
 
