@@ -180,6 +180,37 @@ handoff(
 )
 ```
 
+### 2.5 ロール（author）別コンテキスト
+
+複数のロール（例: 設計担当 `claude.ai` と実装担当 `claude-code`）が
+同じプロジェクトで**独立した引き継ぎ**を持ちたい場合、
+`resume` / `checkpoint` / `handoff` / `update_progress` に `author` を指定する。
+1つの project に対し author ごとに独立したコンテキストが保存・復元される
+（保存キー: `prismind:session:{project}:{user}:{author}`、`author` 空はデフォルト）。
+
+```python
+# まず保存済み author を確認（表記揺れ重複防止 / 自分の context 有無確認）
+list_context_authors(project="space-rogue")
+# -> {"authors": [
+#      {"author": "claude.ai",   "current_task": "T05: 設計", "updated_at": "..."},
+#      {"author": "claude-code", "current_task": "T06: 実装", "updated_at": "..."}
+#    ], "total_count": 2}
+
+# 自分のロールで保存
+checkpoint(
+    summary="敵AI設計レビュー完了",
+    project="space-rogue",
+    current_task="T05: 敵AI設計",
+    author="claude.ai"
+)
+
+# 同じ author で復元（他ロールの context とは干渉しない）
+resume(project="space-rogue", author="claude.ai")
+```
+
+> **注意**: 新しい author 名を作る前に必ず `list_context_authors` で既存名を確認し、
+> `claude-code` と `claude_code` のような表記揺れによる重複を避けること。
+
 ---
 
 ## 3. タスク管理

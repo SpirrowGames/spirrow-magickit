@@ -102,9 +102,10 @@ Magickit exposes high-level MCP tools that combine multiple services:
 
 | Tool | Description |
 |------|-------------|
-| `begin_task` / `resume` | Restore session context |
-| `checkpoint` | Save intermediate progress |
-| `handoff` | End session with handoff notes |
+| `begin_task` / `resume` | Restore session context (optional `author` for role-partitioned context) |
+| `checkpoint` | Save intermediate progress (optional `author`) |
+| `handoff` | End session with handoff notes (optional `author`) |
+| `list_context_authors` | List context authors/roles saved for a project |
 
 ### Project Lifecycle
 

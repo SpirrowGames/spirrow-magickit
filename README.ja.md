@@ -50,9 +50,10 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `generate_with_context` | RAG強化コンテンツ生成 |
 | `intelligent_route` | タスク分析と最適サービス推奨 |
 | `orchestrate_workflow` | 複数サービスの連携ワークフロー |
-| `begin_task` / `resume` | セッションコンテキスト復元 |
-| `checkpoint` | 作業の中間保存 |
-| `handoff` | セッション終了と引き継ぎ |
+| `begin_task` / `resume` | セッションコンテキスト復元（任意 `author` でロール別分割） |
+| `checkpoint` | 作業の中間保存（任意 `author`） |
+| `handoff` | セッション終了と引き継ぎ（任意 `author`） |
+| `list_context_authors` | プロジェクトに保存済みのコンテキスト author（ロール）一覧 |
 | `list_projects` / `init_project` | プロジェクト管理 |
 | `get_project_status` | プロジェクト詳細ステータス |
 | `smart_create_document` | スマートドキュメント作成（RAGセマンティックマッチング） |
@@ -242,6 +243,7 @@ begin_task(project="my-project", user="alice@example.com")
 - セッション状態はユーザーごとに分離されます
 - `prismind:session:{project}:{user}` 形式でストレージキーが生成されます
 - 異なるユーザーが同じプロジェクトで作業しても、セッション状態が干渉しません
+- さらに任意の `author`（ロール）を指定すると `prismind:session:{project}:{user}:{author}` となり、1つの project+user 内で author ごとに独立したコンテキストを保持できます（`author` 空はレガシーキーを維持。保存済み author は `list_context_authors` で確認）
 
 ### 対応ツール
 
@@ -249,7 +251,7 @@ begin_task(project="my-project", user="alice@example.com")
 
 | カテゴリ | ツール |
 |---------|--------|
-| セッション | `begin_task`, `checkpoint`, `handoff`, `resume` |
+| セッション | `begin_task`, `checkpoint`, `handoff`, `resume`, `update_progress`, `list_context_authors` |
 | タスク管理 | `add_task`, `list_tasks`, `start_task`, `complete_task`, `block_task` |
 | プロジェクト | `get_project_status`, `clone_project`, `delete_project`, `restore_project` |
 | リサーチ | `research_and_summarize`, `analyze_documents` |
