@@ -1,4 +1,4 @@
-"""Passthrough dispatcher for the proxied github-mcp tools.
+"""Passthrough dispatcher for the github-mcp container.
 
 Claude connectors freeze the MCP tool list at connection time and ignore
 tools/list_changed, so dynamically revealing toolsets is impossible. To keep
@@ -9,26 +9,34 @@ lookup, instead of being exposed individually.
 - ``github(operation, arguments)``: Claude picks the operation name and builds
   the arguments; the call is forwarded to the github-mcp container.
 - ``github_operations(name_filter)``: returns the exact upstream input schemas
-  for matching operations, so Claude can confirm argument shapes on demand.
-  This is a normal tool result, so it works under the connector's fixed tool
-  list (unlike tools/list_changed).
+  on demand (a normal tool result, so it works under the connector's fixed
+  tool list, unlike tools/list_changed).
+
+Upstream transport: a minimal, **stateless per-call** httpx JSON-RPC client.
+We deliberately avoid FastMCP's StreamableHttp client here: its stateful
+session + SSE GET stream (which github-mcp answers with 405, triggering an
+endless reconnect loop) was the suspected cause of intermittent 400s in the
+long-lived service. github-mcp's HTTP endpoint accepts a plain initialize +
+request flow, which is all we need.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
-from fastmcp import Client, FastMCP
-from fastmcp.client.transports import StreamableHttpTransport
+import httpx
 
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+_PROTOCOL_VERSION = "2025-06-18"
+
 # Compact operation catalog. Toolsets are fixed at repos,issues,pull_requests;
-# names are the upstream github-mcp tool names (no prefix). Keep this in sync
-# if the container's --toolsets change.
+# names are the upstream github-mcp tool names (no prefix). Keep in sync if the
+# container's --toolsets change.
 _CATALOG = """\
 Available `operation` values (github-mcp; toolsets repos/issues/pull_requests).
 Arguments follow github-mcp's own schema — call github_operations(name_filter)
@@ -47,7 +55,99 @@ releases/tags: get_latest_release, get_release_by_tag, list_releases,
   get_tag, list_tags, get_label"""
 
 
-def install_github_dispatch(mcp: FastMCP) -> None:
+class _UpstreamError(RuntimeError):
+    """github-mcp returned a non-2xx or a JSON-RPC error."""
+
+
+def _parse_mcp_response(resp: httpx.Response) -> Any:
+    """Extract the JSON-RPC ``result`` from a JSON or SSE response body."""
+    ctype = resp.headers.get("content-type", "")
+    if "text/event-stream" in ctype:
+        payload = None
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                payload = json.loads(line[5:].strip())
+        if payload is None:
+            raise _UpstreamError("empty SSE stream from github-mcp")
+    else:
+        payload = resp.json()
+    if isinstance(payload, dict) and payload.get("error"):
+        raise _UpstreamError(f"JSON-RPC error: {payload['error']}")
+    return payload.get("result") if isinstance(payload, dict) else payload
+
+
+async def _mcp_call(method: str, params: dict[str, Any]) -> Any:
+    """One stateless MCP exchange: initialize, then the requested method.
+
+    Raises:
+        _UpstreamError: github-mcp returned an HTTP or JSON-RPC error. The
+            message includes the upstream status and body snippet so the
+            failure is self-diagnosing in logs and tool results.
+    """
+    url = os.environ.get("GITHUB_MCP_URL", "http://127.0.0.1:8116/mcp")
+    pat = os.environ["GITHUB_MCP_PAT"]
+    headers = {
+        "Authorization": f"Bearer {pat}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Mcp-Protocol-Version": _PROTOCOL_VERSION,
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        init = await client.post(
+            url,
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": _PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "magickit-dispatch", "version": "1"},
+                },
+            },
+        )
+        if init.status_code >= 400:
+            raise _UpstreamError(
+                f"initialize HTTP {init.status_code}: {init.text[:300]}"
+            )
+        sid = init.headers.get("mcp-session-id")
+        if sid:
+            headers["Mcp-Session-Id"] = sid
+
+        await client.post(
+            url,
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        )
+
+        resp = await client.post(
+            url,
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        )
+        if resp.status_code >= 400:
+            raise _UpstreamError(
+                f"{method} HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        return _parse_mcp_response(resp)
+
+
+def _err(e: Exception) -> dict:
+    """Uniform error envelope for both tools."""
+    return {
+        "error": f"{type(e).__name__}: {str(e)[:400]}",
+        "hint": (
+            "If this is an HTTP/JSON-RPC error the github-mcp upstream is the "
+            "problem (status/body included above), not the operation name. "
+            "Otherwise check the operation name or call "
+            "github_operations(name_filter) for the exact input schema."
+        ),
+    }
+
+
+def install_github_dispatch(mcp) -> None:
     """Register the github dispatcher and schema-lookup tools.
 
     No-op unless GITHUB_MCP_PAT is set, so the no-auth tailnet instance and
@@ -56,15 +156,9 @@ def install_github_dispatch(mcp: FastMCP) -> None:
     Args:
         mcp: The Magickit FastMCP server.
     """
-    pat = os.environ.get("GITHUB_MCP_PAT")
-    if not pat:
+    if not os.environ.get("GITHUB_MCP_PAT"):
         logger.info("github dispatcher disabled (GITHUB_MCP_PAT unset)")
         return
-
-    url = os.environ.get("GITHUB_MCP_URL", "http://127.0.0.1:8116/mcp")
-    transport = StreamableHttpTransport(
-        url, headers={"Authorization": f"Bearer {pat}"}
-    )
 
     @mcp.tool(
         name="github",
@@ -76,19 +170,17 @@ def install_github_dispatch(mcp: FastMCP) -> None:
     )
     async def github(operation: str, arguments: dict | None = None) -> Any:
         try:
-            async with Client(transport) as c:
-                res = await c.call_tool(operation, arguments or {})
-        except Exception as e:  # noqa: BLE001 - surface as guidance to caller
-            return {
-                "error": f"{type(e).__name__}: {e}",
-                "hint": (
-                    "Check the operation name, or call "
-                    "github_operations(name_filter) for the exact input schema."
-                ),
-            }
-        if getattr(res, "data", None) is not None:
-            return res.data
-        return [getattr(b, "text", str(b)) for b in (res.content or [])]
+            result = await _mcp_call(
+                "tools/call",
+                {"name": operation, "arguments": arguments or {}},
+            )
+        except Exception as e:  # noqa: BLE001 - surfaced as guidance to caller
+            logger.warning("github dispatch failed", op=operation, err=str(e))
+            return _err(e)
+        content = result.get("content") if isinstance(result, dict) else None
+        if content:
+            return [c.get("text", c) for c in content]
+        return result
 
     @mcp.tool(
         name="github_operations",
@@ -98,18 +190,21 @@ def install_github_dispatch(mcp: FastMCP) -> None:
             "(e.g. 'pull_request', 'issue', 'file')."
         ),
     )
-    async def github_operations(name_filter: str | None = None) -> list[dict]:
-        async with Client(transport) as c:
-            tools = await c.list_tools()
+    async def github_operations(name_filter: str | None = None) -> Any:
+        try:
+            result = await _mcp_call("tools/list", {})
+        except Exception as e:  # noqa: BLE001 - same envelope as github()
+            logger.warning("github_operations failed", err=str(e))
+            return _err(e)
         nf = (name_filter or "").lower()
         return [
             {
-                "operation": t.name,
-                "description": (t.description or "")[:200],
-                "input_schema": t.inputSchema,
+                "operation": t.get("name"),
+                "description": (t.get("description") or "")[:200],
+                "input_schema": t.get("inputSchema"),
             }
-            for t in tools
-            if nf in t.name.lower()
+            for t in result.get("tools", [])
+            if nf in (t.get("name") or "").lower()
         ]
 
-    logger.info("github dispatcher installed", url=url)
+    logger.info("github dispatcher installed (stateless httpx client)")
