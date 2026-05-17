@@ -80,6 +80,40 @@ def _build_auth_provider():
     )
 
 
+def _mount_github_proxy(mcp: FastMCP) -> None:
+    """Mount the local github-mcp container as a proxied sub-server.
+
+    No-op unless GITHUB_MCP_PAT is set, so the no-auth tailnet instance and
+    the test suite are unaffected. The github-mcp container runs in HTTP mode
+    and expects the GitHub token in the per-request Authorization header; we
+    inject it here so the public OAuth-gated Magickit endpoint is the only
+    way in. The container is started with --dynamic-toolsets, so only a small
+    set of meta-tools is exposed until a toolset is enabled on demand.
+
+    Args:
+        mcp: The Magickit FastMCP server to mount the proxy onto.
+    """
+    pat = os.environ.get("GITHUB_MCP_PAT")
+    if not pat:
+        logger.info("github-mcp proxy disabled (GITHUB_MCP_PAT unset)")
+        return
+
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    url = os.environ.get("GITHUB_MCP_URL", "http://127.0.0.1:8116/mcp")
+    github_proxy = FastMCP.as_proxy(
+        Client(
+            StreamableHttpTransport(
+                url,
+                headers={"Authorization": f"Bearer {pat}"},
+            )
+        )
+    )
+    mcp.mount(github_proxy, prefix="github")
+    logger.info("github-mcp proxy mounted", url=url, prefix="github")
+
+
 def create_mcp_server() -> FastMCP:
     """Create and configure the FastMCP server.
 
@@ -122,6 +156,9 @@ rather than calling individual services separately.""",
     reporting.register_tools(mcp, settings)
     smart_read.register_tools(mcp, settings)
     chatroom.register_tools(mcp, settings)
+
+    # Mount the local github-mcp container (no-op unless GITHUB_MCP_PAT set)
+    _mount_github_proxy(mcp)
 
     logger.info(
         "MCP server created",
