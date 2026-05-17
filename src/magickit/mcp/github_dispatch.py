@@ -147,6 +147,39 @@ def _err(e: Exception) -> dict:
     }
 
 
+async def upstream_health() -> dict:
+    """Liveness probe for the github-mcp container, for service_health.
+
+    Returns a dict in the same shape the health tool uses for other
+    services. Reports ``disabled`` (not an error) when GITHUB_MCP_PAT is
+    unset, so the no-auth tailnet instance does not look unhealthy.
+    """
+    import time
+
+    url = os.environ.get("GITHUB_MCP_URL", "http://127.0.0.1:8116/mcp")
+    if not os.environ.get("GITHUB_MCP_PAT"):
+        return {"status": "disabled", "url": url, "reason": "GITHUB_MCP_PAT unset"}
+
+    start = time.monotonic()
+    try:
+        result = await _mcp_call("tools/list", {})
+        elapsed = (time.monotonic() - start) * 1000
+        return {
+            "status": "healthy",
+            "response_time_ms": round(elapsed, 2),
+            "url": url,
+            "operation_count": len(result.get("tools", [])),
+        }
+    except Exception as e:  # noqa: BLE001 - reported as health status
+        elapsed = (time.monotonic() - start) * 1000
+        return {
+            "status": "error",
+            "response_time_ms": round(elapsed, 2),
+            "url": url,
+            "error": str(e)[:300],
+        }
+
+
 def install_github_dispatch(mcp) -> None:
     """Register the github dispatcher and schema-lookup tools.
 

@@ -16,6 +16,7 @@ from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.config import Settings
+from magickit.mcp.github_dispatch import upstream_health as _github_upstream_health
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -66,11 +67,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             _check_prismind(_settings),
             _check_lexora(_settings),
             _check_conclair(_settings),
+            _check_github_mcp(),
             return_exceptions=True,
         )
 
-        service_names = ["cognilens", "prismind", "lexora", "conclair"]
+        service_names = ["cognilens", "prismind", "lexora", "conclair", "github_mcp"]
         healthy_count = 0
+        active_count = 0  # services that count toward overall status
 
         for name, result in zip(service_names, checks):
             if isinstance(result, Exception):
@@ -78,13 +81,19 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                     "status": "error",
                     "error": str(result),
                 }
+                active_count += 1
             else:
                 results["services"][name] = result
+                # "disabled" services (e.g. github_mcp without a PAT) are
+                # reported but excluded from the health ratio.
+                if result.get("status") == "disabled":
+                    continue
+                active_count += 1
                 if result.get("status") == "healthy":
                     healthy_count += 1
 
-        # Determine overall status
-        if healthy_count == len(service_names):
+        # Determine overall status (over active, non-disabled services)
+        if active_count == 0 or healthy_count == active_count:
             results["status"] = "healthy"
         elif healthy_count > 0:
             results["status"] = "degraded"
@@ -222,3 +231,12 @@ async def _check_conclair(settings: Settings) -> dict[str, Any]:
             "url": settings.conclair_url,
             "error": str(e),
         }
+
+
+async def _check_github_mcp() -> dict[str, Any]:
+    """Check the github-mcp container (proxied by the github dispatcher).
+
+    Returns ``disabled`` when GITHUB_MCP_PAT is unset (no-auth instance),
+    so it is reported but excluded from the overall health ratio.
+    """
+    return await _github_upstream_health()
