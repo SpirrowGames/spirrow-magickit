@@ -91,12 +91,13 @@ Magickit exposes high-level MCP tools that combine multiple services:
 
 | Tool | Description |
 |------|-------------|
-| `service_health` | Check health of all services |
+| `service_health` | Check health of all services (incl. github-mcp) |
 | `research_and_summarize` | Prismind search + Cognilens compression |
 | `analyze_documents` | Document search + essence extraction |
 | `generate_with_context` | RAG-enhanced content generation |
 | `intelligent_route` | Task analysis and service recommendation |
 | `orchestrate_workflow` | Multi-service workflow execution |
+| `github` / `github_operations` | Passthrough dispatcher for the github-mcp server (GitHub repos/issues/PRs) |
 
 ### Session Management
 

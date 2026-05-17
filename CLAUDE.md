@@ -24,6 +24,8 @@ Lexora Cognilens Prismind UnrealWise Phanthand(開発PC) Conclair
 
 `Conclair` (:8115) は AI 間 chatroom (議論 / handoff / decision) の永続化バックエンド。`PostgreSQL` (infra-stack コンテナ) が裏側で動く。詳細は [spirrow-conclair](https://github.com/SpirrowGames/spirrow-conclair)、設計は magickit project の `chatroom-archive-tool: System Design v2`。
 
+`github-mcp` は GitHub 公式 MCP サーバ ([github/github-mcp-server](https://github.com/github/github-mcp-server)) を Docker (`127.0.0.1:8116`, toolsets `repos,issues,pull_requests`, 約35ツール) で動かし、Magickit が **パススルーディスパッチャ** (`github` / `github_operations` の2ツール) で中継する。claude.ai コネクタは接続時にツール定義を固定し `tools/list_changed` を反映しないため、35ツールを個別公開せず2ツールに集約してコンテキストを節約する設計。詳細は「GitHub 連携 (`github_dispatch.py`)」節を参照。
+
 ## 技術スタック
 
 - Python 3.11+
@@ -50,6 +52,7 @@ src/magickit/
 │   ├── project_manager.py   # プロジェクト管理
 │   └── scheduler.py     # スケジューラ
 ├── mcp/
+│   ├── github_dispatch.py  # github-mcp パススルーディスパッチャ
 │   └── tools/           # MCPツール
 │       ├── health.py    # ヘルスチェック
 │       ├── research.py  # 知識検索・要約
@@ -1262,18 +1265,49 @@ workflow = spec_executor_run(
 - カテゴリ: `実装記録`, `実装詳細`
 - 次回セッションで`resume`時に参照可能
 
+### GitHub 連携 (`github_dispatch.py`)
+
+ローカルの github-mcp コンテナ (`127.0.0.1:8116`, toolsets `repos,issues,pull_requests`) を **2ツールに集約**して中継する。`GITHUB_MCP_PAT` 未設定時は無効 (no-auth tailnet インスタンス・テストは無影響)。
+
+| ツール | 用途 |
+|--------|------|
+| `github` | GitHub 操作を実行。`operation` に操作名、`arguments` にその引数を渡す。説明文に全35操作のカタログ内蔵 |
+| `github_operations` | 各操作の正確な JSON 入力スキーマを返す。`name_filter` で部分一致フィルタ |
+
+```python
+# スキーマ確認（複雑な引数のとき）
+github_operations(name_filter="pull_request")
+# -> [{"operation": "create_pull_request", "input_schema": {...required: [owner,repo,title,head,base]}}, ...]
+
+# 操作実行
+github(operation="search_repositories", arguments={"query": "user:spirrowgames-ops"})
+github(operation="list_issues", arguments={"owner": "SpirrowGames", "repo": "spirrow-magickit"})
+
+# エラー時は github / github_operations 共通の包絡
+# -> {"error": "_UpstreamError: ...(上流HTTPステータス+本文)", "hint": "..."}
+```
+
+**設計背景:**
+- claude.ai コネクタは接続時にツール定義を固定し `tools/list_changed` を会話中に反映しない (新セッションで再取得)。よって動的 toolset 展開は不可、35ツール個別公開はコンテキストを圧迫するため2ツールに集約
+- 操作・引数の選択は **Claude 自身が行う** (弱いモデルへのルーティング委譲なし)。GitHub API は Claude の事前知識が強く信頼性が高い
+- 上流通信は **ステートレスな per-call httpx JSON-RPC** (`initialize → notifications/initialized → method`)。FastMCP の StreamableHttp クライアント (ステートフルな SSE GET ストリームで github-mcp が 405 → 無限 reconnect → 長時間稼働で 400) を回避した経緯あり
+- 補足: Claude Code (CLI) は `tools/list_changed` を自動反映するため、CLI 利用に限れば動的 gate 方式も成立する (本構成はコネクタ=モバイル前提なのでディスパッチャを採用)
+
 ### ヘルスチェック (`health.py`)
 
 全サービスのヘルス状態を一括確認。
 
 | ツール | 用途 |
 |--------|------|
-| `service_health` | Cognilens, Prismind, Lexoraの稼働状況を一括チェック |
+| `service_health` | Cognilens / Prismind / Lexora / Conclair / github-mcp の稼働状況を一括チェック |
 
 ```python
 # 使用例
 service_health()
-# -> {"status": "healthy", "services": {"cognilens": {...}, "prismind": {...}, "lexora": {...}}}
+# -> {"status": "healthy", "services": {
+#      "cognilens": {...}, "prismind": {...}, "lexora": {...}, "conclair": {...},
+#      "github_mcp": {"status": "healthy", "operation_count": 35, ...}}}
+# github_mcp は GITHUB_MCP_PAT 未設定時 status="disabled"（表示はするが健全性比率からは除外）
 ```
 
 ### コンテンツ生成 (`generation.py`)
@@ -1307,6 +1341,12 @@ MAGICKIT_PORT=8113            # FastAPI HTTP API
 MAGICKIT_MCP_PORT=8114        # MCP server (Streamable HTTP)
 MAGICKIT_TRANSPORT_MODE=http  # http (default) | sse (legacy)
 MAGICKIT_AUTH_DISABLED=0      # 1 to bypass Google OAuth on the MCP endpoint
+
+# GitHub 連携 (github_dispatch.py)
+GITHUB_MCP_PAT=github_pat_... # fine-grained PAT。未設定なら github ツール無効。
+                              # 秘密のため設定ファイルに置かず /etc/spirrow-magickit/github.env
+                              # に格納し、公開インスタンスのみ systemd EnvironmentFile で注入
+GITHUB_MCP_URL=http://127.0.0.1:8116/mcp  # 既定値（通常変更不要）
 ```
 
 ## 起動方法
@@ -1322,7 +1362,17 @@ sudo systemctl restart spirrow-magickit-mcp.service      # mcp_server.py @ 127.0
 
 # MCP server (tailnet 内の Claude Code CLI 用、auth OFF)
 sudo systemctl restart spirrow-magickit-mcp-local.service # mcp_server.py @ 100.79.84.62:8117
+
+# github-mcp コンテナ (Docker, 127.0.0.1:8116)。公開インスタンスがディスパッチャ経由で中継
+sudo systemctl restart github-mcp.service                 # docker start github-mcp
 ```
+
+github-mcp コンテナの実体:
+```bash
+docker run -d --name github-mcp --restart unless-stopped -p 127.0.0.1:8116:8082 \
+  ghcr.io/github/github-mcp-server:v1.0.3 http --toolsets=repos,issues,pull_requests
+```
+PAT はコンテナに焼かず、Magickit ディスパッチャがリクエストごとに `Authorization: Bearer` で注入する (`/etc/spirrow-magickit/github.env` → 公開 `spirrow-magickit-mcp.service` の drop-in EnvironmentFile)。no-auth の `-local` には注入しない。
 
 開発時にローカル一時起動が必要なら `systemd-run --user --property=MemoryMax=2G python -m magickit.mcp_server` のように transient unit にする(global CLAUDE.md ルール準拠)。
 

@@ -44,12 +44,13 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 
 | ツール | 説明 |
 |--------|------|
-| `service_health` | 全サービスのヘルス状態を一括確認 |
+| `service_health` | 全サービスのヘルス状態を一括確認（github-mcp 含む） |
 | `research_and_summarize` | Prismind検索 + Cognilens圧縮 |
 | `analyze_documents` | ドキュメント検索 + エッセンス抽出 |
 | `generate_with_context` | RAG強化コンテンツ生成 |
 | `intelligent_route` | タスク分析と最適サービス推奨 |
 | `orchestrate_workflow` | 複数サービスの連携ワークフロー |
+| `github` / `github_operations` | github-mcp サーバへのパススルーディスパッチャ（GitHub repos/issues/PR） |
 | `begin_task` / `resume` | セッションコンテキスト復元（任意 `author` でロール別分割） |
 | `checkpoint` | 作業の中間保存（任意 `author`） |
 | `handoff` | セッション終了と引き継ぎ（任意 `author`） |
