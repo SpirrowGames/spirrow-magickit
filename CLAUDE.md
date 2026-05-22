@@ -990,6 +990,13 @@ RAGベースのセマンティック検索（BGE-M3埋め込み）で多言語�
 | ツール | 用途 |
 |--------|------|
 | `smart_create_document` | 未知のdoc_typeをRAGセマンティック検索で自動マッチ・登録してドキュメント作成 |
+| `smart_update_document` | ドキュメント更新（content置換/append、doc_type自動解決）。native Google Docs と text/markdown・text/plain の両方に対応 |
+
+**mimeType 対応（更新時）:**
+- 実体の更新は Prismind 側で対象ファイルの mimeType を見て分岐する。native Google Docs (`application/vnd.google-apps.document`) は Docs API、`text/markdown` / `text/plain` 等は Drive media upload（`files.update`、**doc_id 維持**）で全文置換する。
+- そのため markdown ファイルでも `smart_update_document` で in-place 更新でき、ADR を markdown で Drive に置くワークフローでも doc_id 参照（decide msg / cross-project link）が壊れない。
+- `append=True` の場合、非ネイティブファイルは既存内容をダウンロードして連結してから再アップロードする。
+- Sheets/Slides 等の他の Google ネイティブ型はテキスト更新非対応として partial write せず明示エラーを返す。
 
 ```python
 # 使用例: 未登録のdoc_typeでもRAGセマンティック検索でマッチ→Prismindに登録→作成

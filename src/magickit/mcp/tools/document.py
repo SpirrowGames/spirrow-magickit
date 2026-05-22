@@ -853,6 +853,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         USE THIS WHEN: Updating documents where you may want to change the
         document type to a possibly unregistered type. This tool:
         - Updates content (replace by default, or append=True to append)
+        - Works on both native Google Docs and non-native text files
+          (text/markdown, text/plain): Prismind branches on the file's
+          mimeType, using the Docs API for native Docs and a Drive media
+          upload (doc_id preserved) for markdown/text. No need to know the
+          file type in advance.
         - If doc_type is provided and unregistered, uses RAG semantic search
           (BGE-M3) to find similar types (e.g., "api仕様" matches "api_spec")
         - If match found, uses existing type; otherwise generates new type metadata
