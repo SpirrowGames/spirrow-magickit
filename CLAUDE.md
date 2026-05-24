@@ -1274,7 +1274,9 @@ workflow = spec_executor_run(
 
 ### GitHub 連携 (`github_dispatch.py`)
 
-ローカルの github-mcp コンテナ (`127.0.0.1:8116`, toolsets `repos,issues,pull_requests`) を **2ツールに集約**して中継する。`GITHUB_MCP_PAT` 未設定時は無効 (no-auth tailnet インスタンス・テストは無影響)。
+ローカルの github-mcp コンテナ (`127.0.0.1:8116`, toolsets `repos,issues,pull_requests`) を **2ツールに集約**して中継する。PAT がいずれも未設定のときは無効 (no-auth tailnet インスタンス・テストは無影響)。
+
+**identity ルーティング:** review submit 系操作 (`pull_request_review_write` / `add_comment_to_pending_review`) は reviewer PAT (`GITHUB_MCP_PAT_REVIEWER`, spirrowgames-ops, Contents read-only)、それ以外 (commit / push / PR 作成 / merge / 読み取り) は implementer PAT (`GITHUB_MCP_PAT_IMPLEMENTER`, takahito-spirrowgames, Contents RW) で上流に転送する。role 別 PAT が未設定なら legacy `GITHUB_MCP_PAT` にフォールバックし、単一 PAT 運用は従来どおり動く。これにより PR を立てたアカウントが自分の PR に formal review を送って 422 になる事故 (PR #67) を回避する。なお両 PAT は同一プロセスの environ に載るため **operation 単位の分離**であり、プロセス/ファイル分離ではない (真の隔離はディスパッチャ 2 インスタンス化が必要)。
 
 | ツール | 用途 |
 |--------|------|
@@ -1350,9 +1352,16 @@ MAGICKIT_TRANSPORT_MODE=http  # http (default) | sse (legacy)
 MAGICKIT_AUTH_DISABLED=0      # 1 to bypass Google OAuth on the MCP endpoint
 
 # GitHub 連携 (github_dispatch.py)
-GITHUB_MCP_PAT=github_pat_... # fine-grained PAT。未設定なら github ツール無効。
-                              # 秘密のため設定ファイルに置かず /etc/spirrow-magickit/github.env
-                              # に格納し、公開インスタンスのみ systemd EnvironmentFile で注入
+# implementer/reviewer の identity を operation 種別で切り替える。review submit 系
+# (pull_request_review_write / add_comment_to_pending_review) は reviewer PAT、
+# それ以外 (commit / push / PR 作成 / merge / 読み取り) は implementer PAT を使用。
+# どちらも未設定のときは legacy の GITHUB_MCP_PAT にフォールバック（旧来の単一 PAT 運用を維持）。
+GITHUB_MCP_PAT_IMPLEMENTER=github_pat_... # implementer (takahito-spirrowgames): Contents/PR/Issues RW
+GITHUB_MCP_PAT_REVIEWER=github_pat_...    # reviewer (spirrowgames-ops): PR/Issues RW, Contents read-only
+GITHUB_MCP_PAT=github_pat_... # legacy 単一 PAT。上記 2 つの fallback 兼 github ツールの有効化ゲート。
+                              # いずれも未設定なら github ツール無効。秘密は設定ファイルに置かず
+                              # /etc/spirrow-magickit/github.env に格納し、公開インスタンスのみ
+                              # systemd EnvironmentFile で注入（no-auth の -local には注入しない）
 GITHUB_MCP_URL=http://127.0.0.1:8116/mcp  # 既定値（通常変更不要）
 ```
 

@@ -12,6 +12,12 @@ lookup, instead of being exposed individually.
   on demand (a normal tool result, so it works under the connector's fixed
   tool list, unlike tools/list_changed).
 
+Identity: review-submit operations are forwarded with the *reviewer* PAT
+(``GITHUB_MCP_PAT_REVIEWER``); all other operations use the *implementer* PAT
+(``GITHUB_MCP_PAT_IMPLEMENTER``). Both fall back to the legacy single
+``GITHUB_MCP_PAT`` when a role-specific token is unset, so existing single-PAT
+deployments keep working unchanged.
+
 Upstream transport: a minimal, **stateless per-call** httpx JSON-RPC client.
 We deliberately avoid FastMCP's StreamableHttp client here: its stateful
 session + SSE GET stream (which github-mcp answers with 405, triggering an
@@ -33,6 +39,30 @@ from magickit.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _PROTOCOL_VERSION = "2025-06-18"
+
+# --- Identity routing (implementer vs reviewer) ------------------------------
+# Operations that submit a formal PR review run under the *reviewer* identity
+# (spirrowgames-ops; Pull requests RW, Contents read-only). Everything else —
+# commits, branch/file writes, PR creation, merges — runs under the
+# *implementer* identity (takahito-spirrowgames; Contents RW). Keeping the
+# review event off the account that opened the PR avoids the self-review
+# "422 Unprocessable Entity" seen on PR #67, while the implementer keeps
+# authoring commits and PRs.
+#
+# NOTE: both PATs live in this one process's environment, so this is an
+# *operation-level* split, not process/file isolation — a compromise of this
+# process exposes both tokens. True isolation would need two dispatcher
+# instances (separate units + EnvironmentFiles).
+_REVIEWER_OPS = frozenset(
+    {
+        "pull_request_review_write",
+        "add_comment_to_pending_review",
+    }
+)
+
+_IMPLEMENTER_PAT_ENV = "GITHUB_MCP_PAT_IMPLEMENTER"
+_REVIEWER_PAT_ENV = "GITHUB_MCP_PAT_REVIEWER"
+_LEGACY_PAT_ENV = "GITHUB_MCP_PAT"  # single-PAT fallback and enable gate
 
 # Compact operation catalog. Toolsets are fixed at repos,issues,pull_requests;
 # names are the upstream github-mcp tool names (no prefix). Keep in sync if the
@@ -76,8 +106,45 @@ def _parse_mcp_response(resp: httpx.Response) -> Any:
     return payload.get("result") if isinstance(payload, dict) else payload
 
 
-async def _mcp_call(method: str, params: dict[str, Any]) -> Any:
+def _any_pat_configured() -> bool:
+    """True if any GitHub PAT (role-specific or legacy single) is set."""
+    return any(
+        os.environ.get(name)
+        for name in (_LEGACY_PAT_ENV, _IMPLEMENTER_PAT_ENV, _REVIEWER_PAT_ENV)
+    )
+
+
+def _resolve_pat(role_env: str) -> str:
+    """Return the PAT for a role, falling back to the legacy single PAT.
+
+    Args:
+        role_env: ``GITHUB_MCP_PAT_IMPLEMENTER`` or ``GITHUB_MCP_PAT_REVIEWER``.
+
+    Raises:
+        _UpstreamError: neither the role PAT nor the legacy fallback is set.
+    """
+    pat = os.environ.get(role_env) or os.environ.get(_LEGACY_PAT_ENV)
+    if not pat:
+        raise _UpstreamError(f"{role_env} (and {_LEGACY_PAT_ENV} fallback) unset")
+    return pat
+
+
+def _pat_for_operation(operation: str) -> str:
+    """Pick the reviewer PAT for review-submit ops, else the implementer PAT."""
+    role_env = (
+        _REVIEWER_PAT_ENV if operation in _REVIEWER_OPS else _IMPLEMENTER_PAT_ENV
+    )
+    return _resolve_pat(role_env)
+
+
+async def _mcp_call(method: str, params: dict[str, Any], pat: str) -> Any:
     """One stateless MCP exchange: initialize, then the requested method.
+
+    Args:
+        method: JSON-RPC method (e.g. ``tools/call``, ``tools/list``).
+        params: JSON-RPC params for ``method``.
+        pat: GitHub PAT forwarded as the upstream Bearer credential; choose it
+            with :func:`_pat_for_operation` so the identity matches the op.
 
     Raises:
         _UpstreamError: github-mcp returned an HTTP or JSON-RPC error. The
@@ -85,7 +152,6 @@ async def _mcp_call(method: str, params: dict[str, Any]) -> Any:
             failure is self-diagnosing in logs and tool results.
     """
     url = os.environ.get("GITHUB_MCP_URL", "http://127.0.0.1:8116/mcp")
-    pat = os.environ["GITHUB_MCP_PAT"]
     headers = {
         "Authorization": f"Bearer {pat}",
         "Content-Type": "application/json",
@@ -151,18 +217,24 @@ async def upstream_health() -> dict:
     """Liveness probe for the github-mcp container, for service_health.
 
     Returns a dict in the same shape the health tool uses for other
-    services. Reports ``disabled`` (not an error) when GITHUB_MCP_PAT is
-    unset, so the no-auth tailnet instance does not look unhealthy.
+    services. Reports ``disabled`` (not an error) when no GitHub PAT is
+    configured, so the no-auth tailnet instance does not look unhealthy.
     """
     import time
 
     url = os.environ.get("GITHUB_MCP_URL", "http://127.0.0.1:8116/mcp")
-    if not os.environ.get("GITHUB_MCP_PAT"):
-        return {"status": "disabled", "url": url, "reason": "GITHUB_MCP_PAT unset"}
+    if not _any_pat_configured():
+        return {
+            "status": "disabled",
+            "url": url,
+            "reason": "no GITHUB_MCP_PAT/_IMPLEMENTER/_REVIEWER configured",
+        }
 
     start = time.monotonic()
     try:
-        result = await _mcp_call("tools/list", {})
+        result = await _mcp_call(
+            "tools/list", {}, _resolve_pat(_IMPLEMENTER_PAT_ENV)
+        )
         elapsed = (time.monotonic() - start) * 1000
         return {
             "status": "healthy",
@@ -183,14 +255,14 @@ async def upstream_health() -> dict:
 def install_github_dispatch(mcp) -> None:
     """Register the github dispatcher and schema-lookup tools.
 
-    No-op unless GITHUB_MCP_PAT is set, so the no-auth tailnet instance and
+    No-op unless a GitHub PAT is set, so the no-auth tailnet instance and
     the test suite are unaffected.
 
     Args:
         mcp: The Magickit FastMCP server.
     """
-    if not os.environ.get("GITHUB_MCP_PAT"):
-        logger.info("github dispatcher disabled (GITHUB_MCP_PAT unset)")
+    if not _any_pat_configured():
+        logger.info("github dispatcher disabled (no GITHUB_MCP_PAT* configured)")
         return
 
     @mcp.tool(
@@ -203,9 +275,11 @@ def install_github_dispatch(mcp) -> None:
     )
     async def github(operation: str, arguments: dict | None = None) -> Any:
         try:
+            pat = _pat_for_operation(operation)
             result = await _mcp_call(
                 "tools/call",
                 {"name": operation, "arguments": arguments or {}},
+                pat,
             )
         except Exception as e:  # noqa: BLE001 - surfaced as guidance to caller
             logger.warning("github dispatch failed", op=operation, err=str(e))
@@ -225,7 +299,9 @@ def install_github_dispatch(mcp) -> None:
     )
     async def github_operations(name_filter: str | None = None) -> Any:
         try:
-            result = await _mcp_call("tools/list", {})
+            result = await _mcp_call(
+                "tools/list", {}, _resolve_pat(_IMPLEMENTER_PAT_ENV)
+            )
         except Exception as e:  # noqa: BLE001 - same envelope as github()
             logger.warning("github_operations failed", err=str(e))
             return _err(e)
