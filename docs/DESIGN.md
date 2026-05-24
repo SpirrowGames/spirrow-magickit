@@ -218,6 +218,38 @@ analyze_project_performance(project="my-game")   # 振り返り分析
 - **ロールバック**: チェックポイントへの巻き戻し
 - **フィードバックループ**: 失敗時の自動リトライ/代替案
 
+### 9. GitHub 連携（パススルーディスパッチャ）
+
+github-mcp コンテナ（公式 `github/github-mcp-server`, `127.0.0.1:8116`, toolsets
+`repos,issues,pull_requests`）を `github` / `github_operations` の **2 ツールに集約**
+して中継する（`src/magickit/mcp/github_dispatch.py`）。コネクタが接続時にツール定義を
+固定するため、35 ツールを個別公開せず畳んでコンテキストを節約する設計。上流通信は
+ステートレスな per-call httpx JSON-RPC。
+
+**identity 分離（implementer / reviewer）**
+
+operation 名で転送に使う PAT を選ぶ:
+
+| 操作 | PAT | アカウント |
+|------|-----|-----------|
+| `pull_request_review_write`, `add_comment_to_pending_review` | `GITHUB_MCP_PAT_REVIEWER` | spirrowgames-ops（Contents read-only） |
+| 上記以外（commit / push / PR 作成 / merge / 読み取り） | `GITHUB_MCP_PAT_IMPLEMENTER` | takahito-spirrowgames（Contents RW） |
+
+role 別 PAT が未設定なら legacy `GITHUB_MCP_PAT` にフォールバック（単一 PAT 運用を維持）。
+PR を立てたアカウントが自分の PR に formal review を送って 422 になる事故を回避する狙い。
+両 PAT は同一プロセスの environ に載るため **operation 単位の分離**であり、プロセス/ファイル
+分離ではない（真の隔離はディスパッチャ 2 インスタンス化が必要）。
+
+**merge ガード（merge to main = 人間 GO）**
+
+`merge_pull_request` は引数に base ブランチを持たない（`owner/repo/pullNumber` のみ）ため、
+転送前に `pull_request_read(get)` で PR の `base.ref` を確認し、保護ブランチ（既定 `main`、
+`GITHUB_PROTECTED_BASE_BRANCHES` でカンマ区切り可変）宛なら **上流に転送せず policy block** を
+返す。develop 等への merge は通過。base を判定できない（引数欠落 / lookup 失敗）ときは
+fail-closed で拒否。この GitHub プランは branch protection 不可、かつディスパッチャが 35 ツールを
+1 つに畳むため per-tool 権限では operation 単位で deny できないことへの対策層。merge の identity は
+implementer のままで、これとは独立した policy 層。
+
 ## データモデル
 
 ### TaskMemory

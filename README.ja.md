@@ -50,7 +50,7 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `generate_with_context` | RAG強化コンテンツ生成 |
 | `intelligent_route` | タスク分析と最適サービス推奨 |
 | `orchestrate_workflow` | 複数サービスの連携ワークフロー |
-| `github` / `github_operations` | github-mcp サーバへのパススルーディスパッチャ（GitHub repos/issues/PR） |
+| `github` / `github_operations` | github-mcp へのパススルーディスパッチャ（identity 分離 + main への merge ガード付き、詳細は下記） |
 | `begin_task` / `resume` | セッションコンテキスト復元（任意 `author` でロール別分割） |
 | `checkpoint` | 作業の中間保存（任意 `author`） |
 | `handoff` | セッション終了と引き継ぎ（任意 `author`） |
@@ -71,6 +71,14 @@ Magickitは複数サービスを組み合わせた高レベルなMCPツールを
 | `get_burndown` / `estimate_completion` | 進捗追跡・完了予測 |
 | `define_quality_gate` / `check_quality_gate` | 品質ゲート |
 | `generate_status_report` / `generate_release_notes` | レポート生成 |
+
+### GitHub 連携（identity 分離 + merge ガード）
+
+`github` / `github_operations` は github-mcp コンテナ（`127.0.0.1:8116`, toolsets `repos,issues,pull_requests`）を **2 ツールに集約**して中継するパススルーディスパッチャ。コネクタが接続時にツール定義を固定するため、35 ツールを個別公開せず 2 つに畳んでコンテキストを節約する。
+
+- **identity ルーティング**: review submit 系（`pull_request_review_write` / `add_comment_to_pending_review`）は reviewer PAT（`GITHUB_MCP_PAT_REVIEWER`、spirrowgames-ops、Contents read-only）、それ以外（commit / push / PR 作成 / merge / 読み取り）は implementer PAT（`GITHUB_MCP_PAT_IMPLEMENTER`、takahito-spirrowgames、Contents RW）で上流に転送する。role 別 PAT が未設定なら legacy `GITHUB_MCP_PAT` にフォールバックし、単一 PAT 運用は従来どおり動く。これにより PR を立てたアカウントが自分の PR に formal review を送って 422 になる事故を回避する。両 PAT は同一プロセスの environ に載るため operation 単位の分離（プロセス/ファイル分離ではない）。
+- **merge ガード（merge to main = 人間 GO）**: `merge_pull_request` は引数に base を持たないため、転送前に `pull_request_read(get)` で PR の base ブランチを確認し、保護ブランチ（既定 `main`、`GITHUB_PROTECTED_BASE_BRANCHES` でカンマ区切り可変）宛なら **上流に転送せず拒否**する。develop 等への merge は通る。base を判定できない（引数欠落 / lookup 失敗）ときは fail-closed。この GitHub プランは branch protection 不可、かつディスパッチャが 35 ツールを 1 つに畳むため per-tool 権限では operation 単位で deny できないことへの対策。
+- 設定・秘密（`/etc/spirrow-magickit/github.env`）の配置は CLAUDE.md「設定」「GitHub 連携 (`github_dispatch.py`)」節を参照。
 
 ### スマートドキュメント作成
 

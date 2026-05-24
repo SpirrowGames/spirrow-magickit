@@ -97,7 +97,29 @@ Magickit exposes high-level MCP tools that combine multiple services:
 | `generate_with_context` | RAG-enhanced content generation |
 | `intelligent_route` | Task analysis and service recommendation |
 | `orchestrate_workflow` | Multi-service workflow execution |
-| `github` / `github_operations` | Passthrough dispatcher for the github-mcp server (GitHub repos/issues/PRs) |
+| `github` / `github_operations` | Passthrough dispatcher for github-mcp (identity split + merge-to-main guard; see below) |
+
+### GitHub Integration (identity split + merge guard)
+
+`github` / `github_operations` proxy the github-mcp container (`127.0.0.1:8116`,
+toolsets `repos,issues,pull_requests`), collapsing its 35 tools into **two** so the
+context cost stays low under connectors that freeze the tool list at connect time.
+
+- **Identity routing**: review-submit operations (`pull_request_review_write`,
+  `add_comment_to_pending_review`) are forwarded with the *reviewer* PAT
+  (`GITHUB_MCP_PAT_REVIEWER`, Contents read-only); everything else (commit, push,
+  PR creation, merge, reads) uses the *implementer* PAT (`GITHUB_MCP_PAT_IMPLEMENTER`).
+  Both fall back to the legacy single `GITHUB_MCP_PAT`, so single-PAT setups are
+  unchanged. This keeps a review event off the account that opened the PR (avoiding
+  the self-review 422). Both PATs share one process env — an operation-level split,
+  not process/file isolation.
+- **Merge guard (merge to main = human GO)**: `merge_pull_request` carries only the
+  PR number, so before forwarding, the dispatcher looks up the PR's base branch via
+  `pull_request_read(get)` and refuses if it targets a protected branch (default
+  `main`; `GITHUB_PROTECTED_BASE_BRANCHES`, comma-separated). Merges into other
+  branches (e.g. develop) pass; an undeterminable base fails closed. Needed because
+  this plan has no branch protection and per-tool permissions can't gate by operation.
+- Secret placement (`/etc/spirrow-magickit/github.env`) is covered in CLAUDE.md.
 
 ### Session Management
 
