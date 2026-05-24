@@ -18,6 +18,11 @@ Identity: review-submit operations are forwarded with the *reviewer* PAT
 ``GITHUB_MCP_PAT`` when a role-specific token is unset, so existing single-PAT
 deployments keep working unchanged.
 
+Merge policy: ``merge_pull_request`` into a protected base branch (default
+``main``, see ``GITHUB_PROTECTED_BASE_BRANCHES``) is refused here before it
+reaches GitHub, since this plan has no branch protection and per-tool perms
+cannot gate by operation. Merges into other branches pass.
+
 Upstream transport: a minimal, **stateless per-call** httpx JSON-RPC client.
 We deliberately avoid FastMCP's StreamableHttp client here: its stateful
 session + SSE GET stream (which github-mcp answers with 405, triggering an
@@ -64,6 +69,16 @@ _IMPLEMENTER_PAT_ENV = "GITHUB_MCP_PAT_IMPLEMENTER"
 _REVIEWER_PAT_ENV = "GITHUB_MCP_PAT_REVIEWER"
 _LEGACY_PAT_ENV = "GITHUB_MCP_PAT"  # single-PAT fallback and enable gate
 
+# --- Merge policy ("merge to main = human GO") -------------------------------
+# This repo's GitHub plan has no branch protection, and Claude-Code per-tool
+# permissions cannot gate by `operation` (the 35 tools are one `github` tool).
+# So the dispatcher itself refuses merges into protected branches: it looks up
+# the PR's base via pull_request_read before forwarding merge_pull_request, and
+# blocks if the base is protected. Merges into other branches (e.g. develop)
+# pass. Comma-separated, overridable via GITHUB_PROTECTED_BASE_BRANCHES.
+_PROTECTED_BASE_ENV = "GITHUB_PROTECTED_BASE_BRANCHES"
+_DEFAULT_PROTECTED_BASE = "main"
+
 # Compact operation catalog. Toolsets are fixed at repos,issues,pull_requests;
 # names are the upstream github-mcp tool names (no prefix). Keep in sync if the
 # container's --toolsets change.
@@ -82,7 +97,11 @@ pull_requests: pull_request_read, create_pull_request, update_pull_request,
   pull_request_review_write, add_comment_to_pending_review,
   add_reply_to_pull_request_comment, search_pull_requests
 releases/tags: get_latest_release, get_release_by_tag, list_releases,
-  get_tag, list_tags, get_label"""
+  get_tag, list_tags, get_label
+
+NOTE: merge_pull_request into a protected branch (default: main) is refused by
+local policy — a human merges those. Merges into other branches (e.g. develop)
+are allowed."""
 
 
 class _UpstreamError(RuntimeError):
@@ -213,6 +232,103 @@ def _err(e: Exception) -> dict:
     }
 
 
+def _protected_base_branches() -> frozenset[str]:
+    """Branches a merge may not target via this dispatcher (human-GO only).
+
+    Read from ``GITHUB_PROTECTED_BASE_BRANCHES`` (comma-separated) each call so
+    it tracks env changes and stays testable; defaults to ``main``.
+    """
+    raw = os.environ.get(_PROTECTED_BASE_ENV, _DEFAULT_PROTECTED_BASE)
+    return frozenset(b.strip() for b in raw.split(",") if b.strip())
+
+
+def _policy_block(reason: str, base_ref: str | None) -> dict:
+    """Envelope for an op refused by local policy (distinct from an upstream error)."""
+    return {"error": reason, "blocked_by": "policy", "base_ref": base_ref}
+
+
+async def _pr_base_ref(arguments: dict[str, Any], pat: str) -> str | None:
+    """Return a PR's base branch via upstream ``pull_request_read(get)``.
+
+    ``merge_pull_request`` only carries ``owner/repo/pullNumber``; the base
+    branch lives on the PR, so it must be looked up. Returns None when it
+    cannot be determined (missing args, upstream or parse failure) so the
+    caller can fail closed.
+    """
+    owner = arguments.get("owner")
+    repo = arguments.get("repo")
+    number = arguments.get("pullNumber")
+    if not (owner and repo and number is not None):
+        return None
+    try:
+        result = await _mcp_call(
+            "tools/call",
+            {
+                "name": "pull_request_read",
+                "arguments": {
+                    "method": "get",
+                    "owner": owner,
+                    "repo": repo,
+                    "pullNumber": number,
+                },
+            },
+            pat,
+        )
+    except Exception as e:  # noqa: BLE001 - unknown base => fail closed in caller
+        logger.warning("pr base lookup failed", repo=repo, num=number, err=str(e))
+        return None
+    content = result.get("content") if isinstance(result, dict) else None
+    if not content:
+        return None
+    try:
+        pr = json.loads(content[0].get("text", ""))
+        ref = (pr.get("base") or {}).get("ref")
+        return ref if isinstance(ref, str) else None
+    except (ValueError, TypeError, AttributeError, IndexError, KeyError):
+        return None
+
+
+def _merge_block_reason(base_ref: str | None) -> str | None:
+    """Reason to refuse a merge into ``base_ref``, or None to allow it."""
+    protected = sorted(_protected_base_branches())
+    if base_ref is None:
+        return (
+            "merge_pull_request blocked: could not determine the PR's base "
+            f"branch, and merges into protected branches {protected} require a "
+            "human (fail-closed). Verify the PR or merge manually after approval."
+        )
+    if base_ref in _protected_base_branches():
+        return (
+            f"merge_pull_request into '{base_ref}' is blocked by policy "
+            f"(protected: {protected}). A human must merge to '{base_ref}'; "
+            "merges into other branches (e.g. develop) are allowed."
+        )
+    return None
+
+
+async def _execute_operation(operation: str, arguments: dict[str, Any]) -> Any:
+    """Pick the identity, enforce merge policy, then forward to github-mcp.
+
+    Returns the upstream result, or a :func:`_policy_block` envelope when a
+    merge into a protected branch is refused (the merge is not forwarded).
+    """
+    pat = _pat_for_operation(operation)
+    if operation == "merge_pull_request":
+        base_ref = await _pr_base_ref(arguments, pat)
+        reason = _merge_block_reason(base_ref)
+        if reason is not None:
+            logger.warning(
+                "merge blocked by policy",
+                repo=arguments.get("repo"),
+                num=arguments.get("pullNumber"),
+                base=base_ref,
+            )
+            return _policy_block(reason, base_ref)
+    return await _mcp_call(
+        "tools/call", {"name": operation, "arguments": arguments}, pat
+    )
+
+
 async def upstream_health() -> dict:
     """Liveness probe for the github-mcp container, for service_health.
 
@@ -275,15 +391,12 @@ def install_github_dispatch(mcp) -> None:
     )
     async def github(operation: str, arguments: dict | None = None) -> Any:
         try:
-            pat = _pat_for_operation(operation)
-            result = await _mcp_call(
-                "tools/call",
-                {"name": operation, "arguments": arguments or {}},
-                pat,
-            )
+            result = await _execute_operation(operation, arguments or {})
         except Exception as e:  # noqa: BLE001 - surfaced as guidance to caller
             logger.warning("github dispatch failed", op=operation, err=str(e))
             return _err(e)
+        if isinstance(result, dict) and result.get("blocked_by") == "policy":
+            return result  # local policy refusal (e.g. merge into main)
         content = result.get("content") if isinstance(result, dict) else None
         if content:
             return [c.get("text", c) for c in content]
