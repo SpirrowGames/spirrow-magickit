@@ -749,12 +749,118 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             }
 
         authors = result.get("authors", []) if isinstance(result, dict) else []
+        # Pass authors through verbatim so the upstream-attached 'identity' field
+        # (allowed_roles / default_role / display_name from the cross-project
+        # identity record) reaches the caller without re-encoding.
         return {
             "success": result.get("success", True) if isinstance(result, dict) else True,
             "project": project,
             "authors": authors,
             "total_count": result.get("total_count", len(authors)) if isinstance(result, dict) else len(authors),
             "message": result.get("message", "") if isinstance(result, dict) else "",
+        }
+
+    @mcp.tool()
+    async def upsert_identity(
+        identity_name: str,
+        allowed_roles: list[str] | None = None,
+        default_role: str = "",
+        display_name: str = "",
+        notes: str = "",
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Create or update a cross-project identity record (actor declaration).
+
+        USE THIS WHEN: declaring or updating an AI role's stable identity (the
+        same name used as the `author` argument on checkpoint / handoff /
+        resume), so allowed_roles / default_role / display_name persist across
+        projects without being redeclared on every save.
+
+        Identity records live in a separate key space from session state
+        (`prismind:identity:{user}:{identity_name}`), so:
+        - role policy travels with the actor, not per-context
+        - `list_context_authors` joins the identity record onto each author
+          entry so callers see allowed_roles in one round-trip
+
+        Field semantics (preserve-on-omit):
+        - `allowed_roles=None` (omitted): keep the existing list. Pass `[]`
+          to explicitly clear it.
+        - Empty strings for `default_role` / `display_name` / `notes` are
+          forwarded as-is (Prismind treats `None` as "preserve"; the MCP
+          surface uses empty-string defaults for ergonomics — pass a
+          non-empty value to change them, pass `""` to keep the existing).
+
+        Args:
+            identity_name: Stable identity slug (e.g. "claude.ai-heisenberg").
+                Same value used as `author` on checkpoint/handoff/resume.
+            allowed_roles: Roles this identity is allowed to assume (e.g.
+                ["proposer", "reviewer"]). Magickit is the enforcement point;
+                Prismind only persists.
+            default_role: Role assumed when a chatroom message omits one.
+            display_name: Human-readable label.
+            notes: Free-form description.
+            user: Owning user (empty defers to upstream's configured user).
+
+        Returns:
+            Dict containing:
+            - success: Whether the upsert succeeded
+            - identity: The persisted identity record (or null on failure)
+            - created: True if a new record was written, False on update
+            - message: Status message
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        if not identity_name:
+            return {
+                "success": False,
+                "identity": None,
+                "created": False,
+                "message": "identity_name is required",
+            }
+
+        prismind = PrismindAdapter(
+            sse_url=_settings.prismind_url,
+            timeout=_settings.prismind_timeout,
+        )
+
+        logger.info(
+            "Upserting identity",
+            identity_name=identity_name,
+            allowed_roles=allowed_roles,
+        )
+
+        try:
+            result = await prismind.upsert_identity(
+                identity_name=identity_name,
+                allowed_roles=allowed_roles,
+                default_role=default_role if default_role else None,
+                display_name=display_name if display_name else None,
+                notes=notes if notes else None,
+                user=user,
+            )
+        except Exception as e:
+            logger.error("Failed to upsert identity", error=str(e))
+            return {
+                "success": False,
+                "identity": None,
+                "created": False,
+                "message": f"Failed to upsert identity: {e}",
+            }
+
+        if not isinstance(result, dict):
+            return {
+                "success": False,
+                "identity": None,
+                "created": False,
+                "message": "Unexpected response from Prismind",
+            }
+
+        return {
+            "success": result.get("success", False),
+            "identity": result.get("identity"),
+            "created": result.get("created", False),
+            "message": result.get("message", ""),
         }
 
 

@@ -311,3 +311,82 @@ class TestPrismindAdapter:
         result = await adapter.call("list_projects")
 
         adapter.call_tool.assert_called_once_with("list_projects", {})
+
+    @pytest.mark.asyncio
+    async def test_upsert_identity_forwards_fields(self):
+        """upsert_identity passes through every supplied field to the tool call."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock(
+            return_value=(
+                True,
+                {
+                    "success": True,
+                    "identity": {
+                        "identity_name": "ident-1",
+                        "user": "u",
+                        "allowed_roles": ["proposer"],
+                    },
+                    "created": True,
+                    "message": "ok",
+                },
+            )
+        )
+
+        result = await adapter.upsert_identity(
+            identity_name="ident-1",
+            allowed_roles=["proposer", "reviewer"],
+            default_role="proposer",
+            display_name="Disp",
+            notes="hi",
+            user="u",
+        )
+
+        adapter._call_tool_safe.assert_called_once()
+        tool_name, args = adapter._call_tool_safe.call_args[0]
+        assert tool_name == "upsert_identity"
+        assert args["identity_name"] == "ident-1"
+        assert args["allowed_roles"] == ["proposer", "reviewer"]
+        assert args["default_role"] == "proposer"
+        assert args["display_name"] == "Disp"
+        assert args["notes"] == "hi"
+        assert args["user"] == "u"
+        assert result["success"] is True
+        assert result["created"] is True
+
+    @pytest.mark.asyncio
+    async def test_upsert_identity_omits_none_fields(self):
+        """upsert_identity does NOT forward None fields so upstream preserves them."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock(
+            return_value=(True, {"success": True, "created": False})
+        )
+
+        await adapter.upsert_identity(identity_name="ident-1")
+
+        _, args = adapter._call_tool_safe.call_args[0]
+        # Only identity_name is required; others must not appear when omitted
+        assert args == {"identity_name": "ident-1"}
+
+    @pytest.mark.asyncio
+    async def test_upsert_identity_empty_list_clears(self):
+        """allowed_roles=[] is forwarded as an empty list (explicit clear)."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock(
+            return_value=(True, {"success": True})
+        )
+
+        await adapter.upsert_identity(identity_name="ident-1", allowed_roles=[])
+
+        _, args = adapter._call_tool_safe.call_args[0]
+        assert args["allowed_roles"] == []
+
+    @pytest.mark.asyncio
+    async def test_upsert_identity_requires_name(self):
+        """Empty identity_name raises ValueError before any tool call."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock()
+
+        with pytest.raises(ValueError):
+            await adapter.upsert_identity(identity_name="")
+
+        adapter._call_tool_safe.assert_not_called()

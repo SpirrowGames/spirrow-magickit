@@ -869,6 +869,10 @@ class PrismindAdapter(MCPBaseAdapter):
     ) -> dict[str, Any]:
         """List the distinct context authors saved for a project.
 
+        Each entry carries an ``identity`` object (or null) joined from the
+        cross-project identity record (see ``upsert_identity``), so callers
+        see ``allowed_roles`` without a second lookup.
+
         Args:
             project: Project ID to inspect
             user: Optional user filter (empty for all users)
@@ -885,6 +889,66 @@ class PrismindAdapter(MCPBaseAdapter):
         success, result = await self._call_tool_safe("list_context_authors", arguments)
         if not success:
             raise RuntimeError(f"list_context_authors failed: {result}")
+
+        return self._parse_json_result(result)
+
+    async def upsert_identity(
+        self,
+        identity_name: str,
+        allowed_roles: list[str] | None = None,
+        default_role: str | None = None,
+        display_name: str | None = None,
+        notes: str | None = None,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Create or update an identity record on Prismind.
+
+        Identity records live in a cross-project key space
+        (``prismind:identity:{user}:{identity_name}``) and carry
+        ``allowed_roles`` / ``default_role`` / ``display_name`` so the
+        declaration survives across projects and contexts. ``identity_name``
+        is the same value ``SessionState.author`` uses; the record is joined
+        onto each entry returned by ``list_context_authors``.
+
+        Fields passed as ``None`` are preserved by Prismind. Pass
+        ``allowed_roles=[]`` to explicitly clear the list.
+
+        Args:
+            identity_name: Stable identity slug (e.g. "claude.ai-heisenberg").
+            allowed_roles: Roles this identity is allowed to assume.
+            default_role: Default role for chatroom messages.
+            display_name: Human-readable label.
+            notes: Free-form description.
+            user: Owning user (empty defers to the upstream's configured user).
+
+        Returns:
+            Dict with success status, the persisted identity, a ``created``
+            flag, and a status message.
+        """
+        if not identity_name:
+            raise ValueError("identity_name is required")
+
+        arguments: dict[str, Any] = {"identity_name": identity_name}
+        if allowed_roles is not None:
+            arguments["allowed_roles"] = list(allowed_roles)
+        if default_role is not None:
+            arguments["default_role"] = default_role
+        if display_name is not None:
+            arguments["display_name"] = display_name
+        if notes is not None:
+            arguments["notes"] = notes
+        if user:
+            arguments["user"] = user
+
+        logger.info(
+            "Upserting identity via MCP",
+            identity_name=identity_name,
+            allowed_roles=allowed_roles,
+        )
+
+        success, result = await self._call_tool_safe("upsert_identity", arguments)
+        if not success:
+            raise RuntimeError(f"upsert_identity failed: {result}")
 
         return self._parse_json_result(result)
 
