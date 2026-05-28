@@ -175,7 +175,14 @@ def main() -> None:
     )
 
     if transport_mode == "http":
-        mcp.run(transport="http", host=host, port=port)
+        # stateless_http=True: each POST /mcp is an independent transport,
+        # so clients (claude.ai connector, Claude Code) don't need to
+        # re-initialize after a service restart -- restart used to leave
+        # stale session-ids client-side, producing 400 "Missing session ID"
+        # on every subsequent POST until the user reconnected the connector.
+        # Magickit has no per-session state to lose (each tool call builds
+        # its own adapters), so statelessness is free.
+        mcp.run(transport="http", host=host, port=port, stateless_http=True)
     elif transport_mode == "sse":
         mcp.run(transport="sse", host=host, port=port)
     else:
