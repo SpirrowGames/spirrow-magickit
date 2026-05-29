@@ -291,17 +291,23 @@ resume(project="trapxtrap", author="claude.ai")
 - `user`: user フィルタ（空＝プロジェクトの全 user）
 - 返り値: `authors`（`author`/`user`/`current_phase`/`current_task`/`updated_at` を含み、更新が新しい順）, `total_count`
 
-**identity 第一級化と role 検証の所在 (ADR-2026-05-27-09 / T-magickit-identity-extension):**
+**identity 第一級化と role / embodiment 検証の所在 (ADR-2026-05-27-09 + ADR-2026-05-29-12 / T-magickit-identity-extension):**
 
-identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロスプロジェクトに永続化される。schema は `allowed_roles` / `embodiment` / `independence_class` / `persona_description` の 4 軸で、`embodiment` と `independence_class` は upsert 毎に必須・enum 検証 (msg-001 §C-4 「書き忘れ不能」)。
+identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロスプロジェクトに永続化される。schema は `allowed_roles` / `independence_class` / `persona_description` の 3 軸で、`independence_class` は upsert 毎に必須・enum 検証 (msg-001 §C-4 「書き忘れ不能」)。
 
-**Magickit は role × allowed_roles 検証の唯一の発火点。Prismind は identity レコードを永続化するのみで role 検証ロジックを持たない。** これは T-magickit-identity-extension msg-002 §2.2 / msg-003 D-2 で確定した設計判断で、サービス境界 (Prismind = persistence、Magickit = orchestration / enforcement) を尊重するための整理。代償として「Magickit を経由しない直接呼び出し (例: 別 client から Prismind を直叩き) では role × allowed_roles チェックが効かない」ことを許容する。AI session は必ず Magickit MCP 経由という前提下で「AI 間のドリフト防止」を実現する形 (UI 直叩きへの効力は現時点要件外、msg-003 D-2)。
+**`embodiment` は ADR-2026-05-29-12 で identity レコードから外れ、5 API (`checkpoint` / `resume` / `chatroom_post_message` / `chatroom_open_thread` / `chatroom_close_thread`) の optional 実行時パラメータとして自己申告する形に変わった。** 状態遷移を起こす msg type ({handoff, ack, decide} + close_thread が emit する decide) では非 human 著者は申告必須 (Magickit 側で `EmbodimentRequiredError` envelope で reject、F-04 enforcement の延長)。enum 初期値は `web_ai_chat` / `terminal_coding_agent` / `unknown` の 3 値、`browser_ui_automation_gui` は T15 採用時に拡張 ADR で追加。`upsert_identity` の `embodiment` フィールドは deprecated として残置 (段階移行 step (i) / nullable + 後続版で列削除)。
 
-将来 Spirrow Platform が Prismind を別 client (例: Thirdy 経由) から呼ぶケースが生じた場合、role 検証の責務配置を再評価する必要がある。アーキテクチャ上の明示的な単独 enforcement point として、本ドキュメントに記録しておく (Einstein F-04 反映)。
+**Magickit は role × allowed_roles および embodiment mandatory-on-state-transition 検証の唯一の発火点。Prismind は identity レコードを永続化するのみで role 検証ロジックを持たず、Conclair は msg/embodiment を保存するだけで検証しない。** これは T-magickit-identity-extension msg-002 §2.2 / msg-003 D-2 + ADR-2026-05-29-12 §4 で確定した設計判断で、サービス境界 (Prismind = persistence、Conclair = append-only event log、Magickit = orchestration / enforcement) を尊重するための整理。代償として「Magickit を経由しない直接呼び出し (例: 別 client から Prismind / Conclair を直叩き) では role × allowed_roles + embodiment チェックが効かない」ことを許容する。AI session は必ず Magickit MCP 経由という前提下で「AI 間のドリフト防止」を実現する形 (UI 直叩きへの効力は現時点要件外、msg-003 D-2)。
+
+将来 Spirrow Platform が Prismind / Conclair を別 client (例: Thirdy 経由) から呼ぶケースが生じた場合、role/embodiment 検証の責務配置を再評価する必要がある。アーキテクチャ上の明示的な単独 enforcement point として、本ドキュメントに記録しておく (Einstein F-04 反映)。
 
 実装位置:
+- `chatroom_post_message` の embodiment mandatory 検証 → `src/magickit/mcp/tools/chatroom.py` (ADR-12 P1 で実装済)
+- `chatroom_close_thread` の embodiment mandatory 検証 → 同上 (ADR-12 P1 で実装済)
 - `chatroom_post_message` の `role × allowed_roles` チェック → `src/magickit/mcp/tools/chatroom.py` (P2 実装予定)
 - `chatroom_close_thread` の owner/role 段 2 チェック → 同上 (P3 実装予定)
+
+`MANDATORY_EMBODIMENT_MSG_TYPES = {handoff, ack, decide}` / `HUMAN_IDENTITY_NAMES = {human}` の集合定数は `src/magickit/mcp/tools/chatroom.py` に集約。
 
 `closeable_roles = {implementer, integrator, proposer}` は msg-003 D-3 / msg-005 で確定 (reviewer / dogfooder は除外、Einstein は `allowed_roles=[naysayer]` で構造的除外)。
 

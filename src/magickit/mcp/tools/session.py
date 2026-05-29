@@ -35,6 +35,7 @@ async def _begin_task_impl(
     max_tokens: int = 2000,
     user: str = "",
     author: str = "",
+    embodiment: str = "",
 ) -> dict[str, Any]:
     """Internal implementation for begin_task logic.
 
@@ -69,7 +70,8 @@ async def _begin_task_impl(
     # Step 1: Start session in Prismind
     try:
         session_result = await prismind.start_session(
-            project=project, user=effective_user, author=author
+            project=project, user=effective_user, author=author,
+            embodiment=embodiment if embodiment else None,
         )
         session_data = _parse_result(session_result)
     except Exception as e:
@@ -195,6 +197,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         max_tokens: int = 2000,
         user: str = "",
         author: str = "",
+        embodiment: str = "",
     ) -> dict[str, Any]:
         """Start a task session and restore relevant context from previous sessions.
 
@@ -236,7 +239,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             - notes: Session notes from prior work
             - user: User identifier
         """
-        return await _begin_task_impl(project, task_description, max_tokens, user, author)
+        return await _begin_task_impl(
+            project, task_description, max_tokens, user, author, embodiment,
+        )
 
     @mcp.tool()
     async def checkpoint(
@@ -250,6 +255,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         auto_extract: bool = True,
         user: str = "",
         author: str = "",
+        embodiment: str = "",
     ) -> dict[str, Any]:
         """Save intermediate progress during a session.
 
@@ -277,6 +283,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 author you intend to resume() with. Empty saves to the default
                 context. Call list_context_authors to reuse an existing author
                 name instead of introducing a naming-variation duplicate.
+            embodiment: ADR-2026-05-29-12 self-declared runtime form
+                (web_ai_chat / terminal_coding_agent / unknown). Forwarded to
+                Prismind SessionState as meta. Empty skips the declaration.
 
         Returns:
             Dict containing:
@@ -305,6 +314,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             summary_length=len(summary),
             decisions_count=len(decisions) if decisions else 0,
             user=effective_user,
+            embodiment=embodiment or None,
         )
 
         # Step 1: Extract essence if summary is long
@@ -346,6 +356,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             save_args["user"] = effective_user
             if author:
                 save_args["author"] = author
+            if embodiment:
+                save_args["embodiment"] = embodiment
 
             await prismind.save_session(**save_args)
             saved_to.append("session")
@@ -573,6 +585,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         task_description: str = "",
         user: str = "",
         author: str = "",
+        embodiment: str = "",
     ) -> dict[str, Any]:
         """Resume work on a project with preset detail levels.
 
@@ -592,6 +605,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 the context was checkpoint()/handoff()'d under. Empty resumes
                 the default context. Call list_context_authors to see which
                 authors have saved context for this project.
+            embodiment: ADR-2026-05-29-12 self-declared runtime form
+                (web_ai_chat / terminal_coding_agent / unknown). Forwarded to
+                Prismind SessionState. Empty skips the declaration.
 
         Returns:
             Same structure as begin_task.
@@ -605,6 +621,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             max_tokens=max_tokens,
             user=user or "default",
             author=author or "default",
+            embodiment=embodiment or None,
         )
 
         # Delegate to internal implementation
@@ -614,6 +631,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             max_tokens=max_tokens,
             user=user,
             author=author,
+            embodiment=embodiment,
         )
 
     @mcp.tool()
@@ -763,38 +781,39 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def upsert_identity(
         identity_name: str,
-        embodiment: str,
         independence_class: str,
         allowed_roles: list[str] | None = None,
         keep_allowed_roles: bool = False,
         persona_description: str = "",
+        embodiment: str = "",
         user: str = "",
     ) -> dict[str, Any]:
         """Create or update a cross-project identity record (actor declaration).
 
         USE THIS WHEN: declaring or updating an AI role's stable identity
         (the same name used as the `author` argument on checkpoint / handoff /
-        resume), so allowed_roles / embodiment / independence_class /
-        persona_description persist across projects without being redeclared
-        on every save.
+        resume), so allowed_roles / independence_class / persona_description
+        persist across projects without being redeclared on every save.
 
         Identity records live in a separate key space from session state
         (`prismind:identity:{user}:{identity_name}`), and the schema realizes
         ADR-2026-05-27-09 D-3's persona-continuity gate at the API level:
 
-        - `embodiment` is "web_ai_chat" or "terminal_coding_agent" -- the
-          two-way enum is intentional. Model identity is NOT surfaced; only
-          the operational mode visible to other actors.
         - `independence_class` is "main-chain" / "independent" / "human" --
           required on every upsert ("書き忘れ不能" guarantee, msg-001 §C-4).
         - `allowed_roles` is the role enforcement list -- required unless
           `keep_allowed_roles=True`.
         - `persona_description` is optional human-readable note --
           preserve-on-empty.
+        - `embodiment` is **DEPRECATED** by ADR-2026-05-29-12. Runtime form
+          is now self-declared on the five APIs (checkpoint / resume /
+          chatroom_*) rather than fixed on the identity record. Pass omit
+          or empty; the field is preserved in the schema only for the
+          staged migration window.
 
         Field semantics:
-        - `embodiment` / `independence_class`: required on every call.
-          Invalid enum values are rejected upstream (no record written).
+        - `independence_class`: required on every call. Invalid enum
+          values are rejected upstream.
         - `allowed_roles=None` (omitted): you must also set
           `keep_allowed_roles=True`, or the call fails. Pass `[]` to
           explicitly declare "no allowed roles" -- this is a legal but
@@ -805,11 +824,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
           Conflicts with passing `allowed_roles`.
         - `persona_description=""` (empty): preserve existing value. Pass a
           non-empty string to update.
+        - `embodiment=""` (empty): DEPRECATED; treated as absent.
 
         Args:
             identity_name: Stable identity slug (e.g. "Heisenberg"). Same
                 value used as `author` on checkpoint/handoff/resume.
-            embodiment: "web_ai_chat" or "terminal_coding_agent". Required.
             independence_class: "main-chain" / "independent" / "human".
                 Required.
             allowed_roles: Roles this identity is allowed to assume (e.g.
@@ -820,6 +839,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 valid on update.
             persona_description: Optional human-readable persona note.
                 Empty preserves existing.
+            embodiment: DEPRECATED. Pass empty.
             user: Owning user (empty defers to upstream's configured user).
 
         Returns:
@@ -848,7 +868,6 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         logger.info(
             "Upserting identity",
             identity_name=identity_name,
-            embodiment=embodiment,
             independence_class=independence_class,
             allowed_roles=allowed_roles,
             keep_allowed_roles=keep_allowed_roles,
@@ -857,11 +876,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         try:
             result = await prismind.upsert_identity(
                 identity_name=identity_name,
-                embodiment=embodiment,
                 independence_class=independence_class,
                 allowed_roles=allowed_roles,
                 keep_allowed_roles=keep_allowed_roles,
                 persona_description=persona_description if persona_description else None,
+                embodiment=embodiment if embodiment else None,
                 user=user,
             )
         except Exception as e:

@@ -678,6 +678,7 @@ class PrismindAdapter(MCPBaseAdapter):
         project: str = "",
         user: str = "",
         author: str = "",
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         """Start a session and load saved state.
 
@@ -685,6 +686,8 @@ class PrismindAdapter(MCPBaseAdapter):
             project: Project ID (empty for current)
             user: User identifier for multi-user support
             author: Context author/role partition (empty for default context)
+            embodiment: ADR-2026-05-29-12 self-declared runtime form,
+                forwarded to SessionState. ``None`` skips the declaration.
 
         Returns:
             Dict with session context (project, current_phase, current_task, etc.)
@@ -696,6 +699,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["user"] = user
         if author:
             arguments["author"] = author
+        if embodiment is not None:
+            arguments["embodiment"] = embodiment
 
         logger.info("Starting session via MCP", project=project, user=user)
 
@@ -714,6 +719,7 @@ class PrismindAdapter(MCPBaseAdapter):
         project: str = "",
         user: str = "",
         author: str = "",
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         """End the session and save state.
 
@@ -725,6 +731,7 @@ class PrismindAdapter(MCPBaseAdapter):
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
             author: Context author/role partition (empty for default context)
+            embodiment: ADR-2026-05-29-12 self-declared runtime form.
 
         Returns:
             Dict with success status and session duration
@@ -744,6 +751,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["user"] = user
         if author:
             arguments["author"] = author
+        if embodiment is not None:
+            arguments["embodiment"] = embodiment
 
         logger.info("Ending session via MCP", project=project, user=user)
 
@@ -764,6 +773,7 @@ class PrismindAdapter(MCPBaseAdapter):
         project: str = "",
         user: str = "",
         author: str = "",
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         """Save session state without ending.
 
@@ -777,6 +787,7 @@ class PrismindAdapter(MCPBaseAdapter):
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
             author: Context author/role partition (empty for default context)
+            embodiment: ADR-2026-05-29-12 self-declared runtime form.
 
         Returns:
             Dict with success status
@@ -800,6 +811,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["user"] = user
         if author:
             arguments["author"] = author
+        if embodiment is not None:
+            arguments["embodiment"] = embodiment
 
         logger.info("Saving session via MCP", project=project, user=user)
 
@@ -818,6 +831,7 @@ class PrismindAdapter(MCPBaseAdapter):
         project: str = "",
         user: str = "",
         author: str = "",
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         """Update progress in the session.
 
@@ -829,6 +843,7 @@ class PrismindAdapter(MCPBaseAdapter):
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
             author: Context author/role partition (empty for default context)
+            embodiment: ADR-2026-05-29-12 self-declared runtime form.
 
         Returns:
             Dict with success status
@@ -848,6 +863,8 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["user"] = user
         if author:
             arguments["author"] = author
+        if embodiment is not None:
+            arguments["embodiment"] = embodiment
 
         logger.info(
             "Updating progress via MCP",
@@ -895,56 +912,56 @@ class PrismindAdapter(MCPBaseAdapter):
     async def upsert_identity(
         self,
         identity_name: str,
-        embodiment: str,
         independence_class: str,
         allowed_roles: list[str] | None = None,
         keep_allowed_roles: bool = False,
         persona_description: str | None = None,
+        embodiment: str | None = None,
         user: str = "",
     ) -> dict[str, Any]:
         """Create or update an identity record on Prismind.
 
         Identity records live in a cross-project key space
         (``prismind:identity:{user}:{identity_name}``) and carry
-        ``allowed_roles`` / ``embodiment`` / ``independence_class`` /
-        ``persona_description`` so the actor declaration survives across
-        projects and contexts. ``identity_name`` is the same value
-        ``SessionState.author`` uses; the record is joined onto each entry
-        returned by ``list_context_authors``.
+        ``allowed_roles`` / ``independence_class`` / ``persona_description``
+        so the actor declaration survives across projects and contexts.
+        ``identity_name`` is the same value ``SessionState.author`` uses;
+        the record is joined onto each entry returned by
+        ``list_context_authors``.
 
         Required-field semantics (see Prismind ``upsert_identity`` for the
-        full contract): ``embodiment`` and ``independence_class`` are
-        required on every upsert (re-declared, not preserved).
-        ``allowed_roles`` is required unless ``keep_allowed_roles=True``
-        (mutually exclusive with passing a list). ``persona_description``
-        preserves existing on ``None``.
+        full contract): ``independence_class`` is required on every upsert
+        (re-declared, not preserved). ``allowed_roles`` is required unless
+        ``keep_allowed_roles=True`` (mutually exclusive with passing a list).
+        ``persona_description`` preserves existing on ``None``.
+
+        ``embodiment`` is **DEPRECATED** by ADR-2026-05-29-12 and is now
+        optional (default ``None``); runtime self-declaration on the five
+        APIs (checkpoint / resume / chatroom_*) is the new source. The
+        early raise on empty embodiment from Einstein F-03 is removed --
+        embodiment is no longer a required field, so the symmetric raise
+        no longer applies.
 
         Args:
             identity_name: Stable identity slug (e.g. "Heisenberg").
-            embodiment: Required. "web_ai_chat" | "terminal_coding_agent".
             independence_class: Required. "main-chain" | "independent" | "human".
             allowed_roles: Required unless ``keep_allowed_roles=True``.
             keep_allowed_roles: Preserve existing list (mutually exclusive
                 with ``allowed_roles``; only valid on update).
             persona_description: Optional human-readable note. ``None``
                 preserves existing value.
+            embodiment: DEPRECATED. Pass omit or null.
             user: Owning user (empty defers to the upstream's configured user).
 
         Returns:
             Dict with success status, the persisted identity, a ``created``
             flag, and a status message.
         """
-        # Early raises are symmetric across the required fields (Einstein
-        # F-03): the adapter contract is that all three required values are
-        # non-empty before the wire call, so a caller bug (e.g. forgetting
-        # to forward a tool argument) surfaces here as a ValueError instead
-        # of leaking an empty-string round-trip to the upstream enum check.
+        # Early raises kept for identity_name and independence_class (the
+        # remaining required fields). embodiment is no longer required
+        # (ADR-12 partial-rollback of F-03 adapter symmetry).
         if not identity_name:
             raise ValueError("identity_name is required")
-        if not embodiment:
-            raise ValueError(
-                "embodiment is required (one of EMBODIMENT_VALUES)"
-            )
         if not independence_class:
             raise ValueError(
                 "independence_class is required (one of INDEPENDENCE_CLASS_VALUES)"
@@ -952,7 +969,6 @@ class PrismindAdapter(MCPBaseAdapter):
 
         arguments: dict[str, Any] = {
             "identity_name": identity_name,
-            "embodiment": embodiment,
             "independence_class": independence_class,
         }
         if allowed_roles is not None:
@@ -961,13 +977,14 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["keep_allowed_roles"] = True
         if persona_description is not None:
             arguments["persona_description"] = persona_description
+        if embodiment is not None:
+            arguments["embodiment"] = embodiment
         if user:
             arguments["user"] = user
 
         logger.info(
             "Upserting identity via MCP",
             identity_name=identity_name,
-            embodiment=embodiment,
             independence_class=independence_class,
             allowed_roles=allowed_roles,
             keep_allowed_roles=keep_allowed_roles,

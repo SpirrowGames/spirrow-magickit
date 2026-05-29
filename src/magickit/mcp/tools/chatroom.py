@@ -22,6 +22,20 @@ logger = get_logger(__name__)
 
 _settings: Settings | None = None
 
+# ADR-2026-05-29-12 §3: identity_names that are exempt from the
+# mandatory embodiment declaration on state-transitioning msgs
+# ({handoff, ack, decide} per §4). The "human" identity does not
+# operate Magickit as a calling agent (ADR-10 §2.7 "human is the
+# above-loop approval layer"); they normally act via Bohr / Heisenberg /
+# Einstein. The set is intentionally tiny -- if other actor classes
+# need the exemption later, treat that as a separate ADR.
+HUMAN_IDENTITY_NAMES = ("human",)
+
+# msg types whose post requires an embodiment declaration (state-
+# transitioning per msg-325 §4 N-2 取り込み). close_thread emits a
+# decide internally so it's enforced separately by the close wrapper.
+MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
+
 
 def _adapter() -> ChatroomAdapter:
     if _settings is None:
@@ -30,6 +44,28 @@ def _adapter() -> ChatroomAdapter:
         base_url=_settings.conclair_url,
         timeout=_settings.conclair_timeout,
     )
+
+
+def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
+    """Magickit-side embodiment-required rejection envelope.
+
+    Shape matches the project ``error_type`` convention (msg-002 §1.4 /
+    msg-010 D-9) so callers can branch on the error class without
+    parsing the human-readable message.
+    """
+    return {
+        "error_type": "EmbodimentRequiredError",
+        "error": (
+            f"embodiment is required for {msg_kind} "
+            "(ADR-2026-05-29-12 mandatory-on-state-transition; "
+            "humans are exempt)"
+        ),
+        "details": {
+            "msg_kind": msg_kind,
+            "mandatory_msg_types": list(MANDATORY_EMBODIMENT_MSG_TYPES),
+            "exempt_identity_names": list(HUMAN_IDENTITY_NAMES),
+        },
+    }
 
 
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
@@ -46,6 +82,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         propose_content: str,
         tags: list[str] | None = None,
         commit_ref: str = "",
+        embodiment: str = "",
     ) -> dict[str, Any]:
         """Open a new chatroom thread (creates the thread + propose msg).
 
@@ -63,6 +100,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             propose_content: markdown body of the propose message.
             tags: optional thread-level tags.
             commit_ref: optional git hash to record on the propose msg.
+            embodiment: ADR-2026-05-29-12 self-declared runtime form
+                (web_ai_chat / terminal_coding_agent / unknown). Optional
+                for ``propose`` (Einstein N-3 / msg-325 §4: propose is
+                covered by the receiver here but not in the mandatory
+                set). Recorded on the propose msg if supplied.
 
         Returns:
             On success: {"thread": {...}, "msg": {...}}.
@@ -80,6 +122,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 propose_content=propose_content,
                 tags=tags,
                 commit_ref=commit_ref or None,
+                embodiment=embodiment or None,
             )
         finally:
             await adapter.close()
@@ -99,6 +142,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         closes_thread: str = "",
         tags: list[str] | None = None,
         commit_ref: str = "",
+        embodiment: str = "",
     ) -> dict[str, Any]:
         """Post a message to an existing thread.
 
@@ -117,6 +161,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         - decide: declarative decision; with closes_thread set, must be
           authored by the owner and resolves the thread
 
+        embodiment (ADR-2026-05-29-12 self-declared runtime form):
+        - mandatory for msg_type in {handoff, ack, decide} (state-
+          transitioning posts per msg-325 §4 N-2)
+        - exempt when ``author`` is the human identity (msg-325 §3:
+          humans don't operate Magickit as a calling agent)
+        - optional for question / answer / report (recorded if supplied)
+
         NOTE: this parameter is named `msg_type` (not `type`) because
         some MCP clients reject schemas that use `type` as a property
         name — they collide with JSON Schema's own `type` keyword.
@@ -124,8 +175,18 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
-            On failure: conclair error envelope.
+            On failure (embodiment missing, conclair error, ...):
+            error_type envelope.
         """
+        # Magickit-side enforcement (F-04: Magickit is the sole role/
+        # embodiment validation point; Conclair only persists).
+        if (
+            msg_type in MANDATORY_EMBODIMENT_MSG_TYPES
+            and author not in HUMAN_IDENTITY_NAMES
+            and not embodiment
+        ):
+            return _embodiment_required_error(msg_kind=f"msg_type={msg_type}")
+
         adapter = _adapter()
         try:
             return await adapter.post_message(
@@ -140,6 +201,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 closes_thread=closes_thread or None,
                 tags=tags,
                 commit_ref=commit_ref or None,
+                embodiment=embodiment or None,
             )
         finally:
             await adapter.close()
@@ -154,6 +216,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         related_tasks: list[str] | None = None,
         tags: list[str] | None = None,
         commit_ref: str = "",
+        embodiment: str = "",
     ) -> dict[str, Any]:
         """Close an active thread by posting a decide msg (owner-only).
 
@@ -161,19 +224,31 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         wants to record a summary post. Only the original owner may
         call this; non-owner attempts return ChatroomPermissionError.
 
+        embodiment (ADR-2026-05-29-12 self-declared runtime form):
+        - mandatory because close emits a ``decide`` msg internally
+          (msg-325 §4 mandatory set)
+        - exempt when ``author`` is the human identity
+
         Args:
             summary_content: markdown body of the decide msg. Should
                 contain a clear conclusion + decision points so the
                 summary stands on its own.
             affects_threads: optional list of thread_ids this decision
                 impacts; recorded on the thread row.
+            embodiment: see above. Mandatory for non-human authors.
 
         Returns:
             On success: {"thread": {... status=resolved ...},
                          "decide_msg": {...}}.
-            On failure (non-owner -> 403, already resolved -> 409, etc.):
-            conclair error envelope.
+            On failure (embodiment missing -> EmbodimentRequiredError,
+            non-owner -> 403, already resolved -> 409, etc.):
+            error_type envelope.
         """
+        # close_thread emits a decide msg internally; same mandatory
+        # rule as msg_type="decide" on post_message.
+        if author not in HUMAN_IDENTITY_NAMES and not embodiment:
+            return _embodiment_required_error(msg_kind="close_thread (emits decide)")
+
         adapter = _adapter()
         try:
             return await adapter.close_thread(
@@ -185,6 +260,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 related_tasks=related_tasks,
                 tags=tags,
                 commit_ref=commit_ref or None,
+                embodiment=embodiment or None,
             )
         finally:
             await adapter.close()
