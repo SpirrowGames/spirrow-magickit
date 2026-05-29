@@ -797,7 +797,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
           Invalid enum values are rejected upstream (no record written).
         - `allowed_roles=None` (omitted): you must also set
           `keep_allowed_roles=True`, or the call fails. Pass `[]` to
-          explicitly declare "no allowed roles" (legal but unusual).
+          explicitly declare "no allowed roles" -- this is a legal but
+          unusual state, distinct from "preserve existing". Once role
+          checks are live (P2), every role-bearing post from such an
+          actor will be rejected.
         - `keep_allowed_roles=True`: only valid on update (existing record).
           Conflicts with passing `allowed_roles`.
         - `persona_description=""` (empty): preserve existing value. Pass a
@@ -876,6 +879,22 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "identity": None,
                 "created": False,
                 "message": "Unexpected response from Prismind",
+            }
+
+        # Upstream MCP-level rejection (e.g. FastMCP schema enum violation):
+        # `mcp_base.call_tool` now returns the structured envelope
+        # `{"error_type": "...", "error": <text>, "details": {...}}`. Surface
+        # both the human-readable text (as `message`) and the structured
+        # `error_type` / `details` so callers can branch on the error class
+        # without parsing the text. Envelope shape from msg-010 D-9.
+        if "error_type" in result:
+            return {
+                "success": False,
+                "identity": None,
+                "created": False,
+                "message": result.get("error", "Upstream MCP error"),
+                "error_type": result["error_type"],
+                "details": result.get("details", {}),
             }
 
         return {

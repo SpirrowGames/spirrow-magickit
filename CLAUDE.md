@@ -206,6 +206,7 @@ Claudeセッション間でコンテキストを維持するためのツール�
 | `resume` | `begin_task`のエイリアス（detail_levelプリセット付き） |
 | `update_progress` | 進捗更新（phase/task/blockers）軽量版 |
 | `list_context_authors` | プロジェクトにコンテキストを保存済みの author 一覧 |
+| `upsert_identity` | クロスプロジェクト identity レコード (actor 宣言) の作成/更新 |
 
 **セッション引き継ぎの仕組み:**
 - `handoff`で`summary`と`next_action`を保存
@@ -289,6 +290,20 @@ resume(project="trapxtrap", author="claude.ai")
 - `project`: 対象プロジェクトID（必須）
 - `user`: user フィルタ（空＝プロジェクトの全 user）
 - 返り値: `authors`（`author`/`user`/`current_phase`/`current_task`/`updated_at` を含み、更新が新しい順）, `total_count`
+
+**identity 第一級化と role 検証の所在 (ADR-2026-05-27-09 / T-magickit-identity-extension):**
+
+identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロスプロジェクトに永続化される。schema は `allowed_roles` / `embodiment` / `independence_class` / `persona_description` の 4 軸で、`embodiment` と `independence_class` は upsert 毎に必須・enum 検証 (msg-001 §C-4 「書き忘れ不能」)。
+
+**Magickit は role × allowed_roles 検証の唯一の発火点。Prismind は identity レコードを永続化するのみで role 検証ロジックを持たない。** これは T-magickit-identity-extension msg-002 §2.2 / msg-003 D-2 で確定した設計判断で、サービス境界 (Prismind = persistence、Magickit = orchestration / enforcement) を尊重するための整理。代償として「Magickit を経由しない直接呼び出し (例: 別 client から Prismind を直叩き) では role × allowed_roles チェックが効かない」ことを許容する。AI session は必ず Magickit MCP 経由という前提下で「AI 間のドリフト防止」を実現する形 (UI 直叩きへの効力は現時点要件外、msg-003 D-2)。
+
+将来 Spirrow Platform が Prismind を別 client (例: Thirdy 経由) から呼ぶケースが生じた場合、role 検証の責務配置を再評価する必要がある。アーキテクチャ上の明示的な単独 enforcement point として、本ドキュメントに記録しておく (Einstein F-04 反映)。
+
+実装位置:
+- `chatroom_post_message` の `role × allowed_roles` チェック → `src/magickit/mcp/tools/chatroom.py` (P2 実装予定)
+- `chatroom_close_thread` の owner/role 段 2 チェック → 同上 (P3 実装予定)
+
+`closeable_roles = {implementer, integrator, proposer}` は msg-003 D-3 / msg-005 で確定 (reviewer / dogfooder は除外、Einstein は `allowed_roles=[naysayer]` で構造的除外)。
 
 ### リサーチ (`research.py`)
 

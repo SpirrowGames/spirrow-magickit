@@ -184,6 +184,38 @@ class TestUpsertIdentityTool:
             assert result["created"] is False
             assert "boom" in result["message"]
 
+    @pytest.mark.asyncio
+    async def test_upstream_envelope_surfaced_to_caller(self, tools):
+        """When the adapter returns the upstream error_type envelope (D-7 i),
+        the wrapper surfaces both the human-readable message and the
+        structured error_type / details so callers can branch on the
+        error class without parsing the text. Pinned by Einstein F-01 +
+        msg-010 D-9."""
+        envelope = {
+            "error_type": "UpstreamValidationError",
+            "error": "Input validation error: 'cli_robot' is not one of ['web_ai_chat', 'terminal_coding_agent']",
+            "details": {"field": "embodiment", "value": "cli_robot"},
+        }
+
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.upsert_identity = AsyncMock(return_value=envelope)
+
+            result = await tools["upsert_identity"](
+                identity_name="Heisenberg",
+                embodiment="cli_robot",
+                independence_class="main-chain",
+                allowed_roles=["proposer"],
+            )
+
+        assert result["success"] is False
+        assert result["identity"] is None
+        assert result["created"] is False
+        assert "cli_robot" in result["message"]
+        # Structured fields propagated so callers can branch on error class
+        assert result["error_type"] == "UpstreamValidationError"
+        assert result["details"] == {"field": "embodiment", "value": "cli_robot"}
+
 
 class TestListContextAuthorsTool:
     """list_context_authors must pass the joined 'identity' field through."""

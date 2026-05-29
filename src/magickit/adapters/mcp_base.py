@@ -68,14 +68,47 @@ class MCPBaseAdapter(ABC):
             arguments: Tool arguments.
 
         Returns:
-            Tool result content.
+            Tool result content. On normal success, the text content from
+            the upstream response. On upstream MCP-level rejection
+            (``CallToolResult.isError == True``), a structured envelope
+            dict ``{"error_type": "UpstreamValidationError", "error":
+            <text>, "details": {}}`` instead -- this keeps the rejection
+            reason reachable by callers, matching the Spirrow Platform
+            ``error_type`` envelope convention from
+            T-magickit-identity-extension msg-002 §1.4 / msg-010 D-9.
+
+            Before this fix, ``isError`` was ignored entirely: the
+            upstream rejection text was returned as if it were a normal
+            text response, which silently became an empty ``message``
+            once wrappers reached for keys that the rejection text did
+            not have (Einstein F-01).
 
         Raises:
-            Exception: If tool call fails.
+            Exception: If the transport itself fails (connection,
+            timeout, etc). Upstream application-level rejection does
+            NOT raise; it returns the envelope above.
         """
         async with self._get_session() as session:
             logger.debug("Calling MCP tool", tool=name, arguments=arguments)
             result = await session.call_tool(name, arguments)
+
+            if getattr(result, "isError", False):
+                error_text = ""
+                if result.content:
+                    for content in result.content:
+                        if hasattr(content, "text"):
+                            error_text = content.text
+                            break
+                logger.info(
+                    "Upstream MCP rejected tool call",
+                    tool=name,
+                    error_text=error_text[:200],
+                )
+                return {
+                    "error_type": "UpstreamValidationError",
+                    "error": error_text,
+                    "details": {},
+                }
 
             # Extract text content from result
             if result.content:
