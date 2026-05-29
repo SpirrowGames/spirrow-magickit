@@ -934,8 +934,21 @@ class PrismindAdapter(MCPBaseAdapter):
             Dict with success status, the persisted identity, a ``created``
             flag, and a status message.
         """
+        # Early raises are symmetric across the required fields (Einstein
+        # F-03): the adapter contract is that all three required values are
+        # non-empty before the wire call, so a caller bug (e.g. forgetting
+        # to forward a tool argument) surfaces here as a ValueError instead
+        # of leaking an empty-string round-trip to the upstream enum check.
         if not identity_name:
             raise ValueError("identity_name is required")
+        if not embodiment:
+            raise ValueError(
+                "embodiment is required (one of EMBODIMENT_VALUES)"
+            )
+        if not independence_class:
+            raise ValueError(
+                "independence_class is required (one of INDEPENDENCE_CLASS_VALUES)"
+            )
 
         arguments: dict[str, Any] = {
             "identity_name": identity_name,

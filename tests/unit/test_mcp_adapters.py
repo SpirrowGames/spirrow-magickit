@@ -59,6 +59,89 @@ class TestMCPBaseAdapter:
         assert result == {"projects": []}
 
     @pytest.mark.asyncio
+    async def test_call_tool_returns_envelope_on_upstream_iserror(self):
+        """Upstream isError=True surfaces as an error_type envelope.
+
+        Pinned by T-magickit-identity-extension D-7 (i) / D-9: the upstream
+        rejection text was previously dropped on the floor (returned as if
+        it were a normal text result), which became an empty `message` in
+        downstream wrappers (Einstein F-01).
+        """
+        adapter = ConcreteMCPAdapter(sse_url="http://localhost:8112")
+
+        text_content = MagicMock()
+        text_content.text = "Input validation error: 'cli_robot' is not one of [...]"
+        mock_result = MagicMock()
+        mock_result.isError = True
+        mock_result.content = [text_content]
+
+        mock_session = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+        mock_session.initialize = AsyncMock()
+
+        with patch.object(adapter, "_get_session") as mock_get_session:
+            mock_context = AsyncMock()
+            mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_context.__aexit__ = AsyncMock()
+            mock_get_session.return_value = mock_context
+
+            result = await adapter.call_tool("upsert_identity", {})
+
+        assert isinstance(result, dict)
+        assert result["error_type"] == "UpstreamValidationError"
+        assert "cli_robot" in result["error"]
+        assert result["details"] == {}
+
+    @pytest.mark.asyncio
+    async def test_call_tool_returns_envelope_with_empty_text_on_iserror(self):
+        """isError with no text content still yields the envelope."""
+        adapter = ConcreteMCPAdapter(sse_url="http://localhost:8112")
+
+        mock_result = MagicMock()
+        mock_result.isError = True
+        mock_result.content = []
+
+        mock_session = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+        mock_session.initialize = AsyncMock()
+
+        with patch.object(adapter, "_get_session") as mock_get_session:
+            mock_context = AsyncMock()
+            mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_context.__aexit__ = AsyncMock()
+            mock_get_session.return_value = mock_context
+
+            result = await adapter.call_tool("upsert_identity", {})
+
+        assert result["error_type"] == "UpstreamValidationError"
+        assert result["error"] == ""
+
+    @pytest.mark.asyncio
+    async def test_call_tool_normal_text_unchanged_on_success(self):
+        """isError=False returns text content as-is (no envelope)."""
+        adapter = ConcreteMCPAdapter(sse_url="http://localhost:8112")
+
+        text_content = MagicMock()
+        text_content.text = '{"success": true, "value": 42}'
+        mock_result = MagicMock()
+        mock_result.isError = False
+        mock_result.content = [text_content]
+
+        mock_session = AsyncMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+        mock_session.initialize = AsyncMock()
+
+        with patch.object(adapter, "_get_session") as mock_get_session:
+            mock_context = AsyncMock()
+            mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_context.__aexit__ = AsyncMock()
+            mock_get_session.return_value = mock_context
+
+            result = await adapter.call_tool("some_tool", {})
+
+        assert result == '{"success": true, "value": 42}'
+
+    @pytest.mark.asyncio
     async def test_get_tool_schemas(self):
         """Test get_tool_schemas() returns proper schema format."""
         adapter = ConcreteMCPAdapter(sse_url="http://localhost:8112")
@@ -411,6 +494,38 @@ class TestPrismindAdapter:
                 identity_name="",
                 embodiment="web_ai_chat",
                 independence_class="main-chain",
+                allowed_roles=["proposer"],
+            )
+
+        adapter._call_tool_safe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upsert_identity_requires_embodiment(self):
+        """Empty embodiment raises ValueError before any tool call (F-03)."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock()
+
+        with pytest.raises(ValueError, match="embodiment"):
+            await adapter.upsert_identity(
+                identity_name="Heisenberg",
+                embodiment="",
+                independence_class="main-chain",
+                allowed_roles=["proposer"],
+            )
+
+        adapter._call_tool_safe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upsert_identity_requires_independence_class(self):
+        """Empty independence_class raises ValueError before any tool call (F-03)."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock()
+
+        with pytest.raises(ValueError, match="independence_class"):
+            await adapter.upsert_identity(
+                identity_name="Heisenberg",
+                embodiment="web_ai_chat",
+                independence_class="",
                 allowed_roles=["proposer"],
             )
 
