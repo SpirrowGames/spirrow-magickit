@@ -78,6 +78,7 @@ class ChatroomAdapter(BaseAdapter):
         tags: list[str] | None = None,
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "thread_id": thread_id,
@@ -91,6 +92,8 @@ class ChatroomAdapter(BaseAdapter):
             body["commit_ref"] = commit_ref
         if timestamp is not None:
             body["timestamp"] = self._isoformat(timestamp)
+        if embodiment is not None:
+            body["embodiment"] = embodiment
         return await self._request_json(
             "POST", f"/v1/projects/{project}/threads", json=body
         )
@@ -110,6 +113,7 @@ class ChatroomAdapter(BaseAdapter):
         tags: list[str] | None = None,
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "type": type,
@@ -130,6 +134,8 @@ class ChatroomAdapter(BaseAdapter):
             body["commit_ref"] = commit_ref
         if timestamp is not None:
             body["timestamp"] = self._isoformat(timestamp)
+        if embodiment is not None:
+            body["embodiment"] = embodiment
         return await self._request_json(
             "POST",
             f"/v1/projects/{project}/threads/{thread_id}/messages",
@@ -148,6 +154,7 @@ class ChatroomAdapter(BaseAdapter):
         tags: list[str] | None = None,
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
+        embodiment: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "summary_content": summary_content,
@@ -163,6 +170,8 @@ class ChatroomAdapter(BaseAdapter):
             body["commit_ref"] = commit_ref
         if timestamp is not None:
             body["timestamp"] = self._isoformat(timestamp)
+        if embodiment is not None:
+            body["embodiment"] = embodiment
         return await self._request_json(
             "POST",
             f"/v1/projects/{project}/threads/{thread_id}/close",

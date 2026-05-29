@@ -500,20 +500,26 @@ class TestPrismindAdapter:
         adapter._call_tool_safe.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_upsert_identity_requires_embodiment(self):
-        """Empty embodiment raises ValueError before any tool call (F-03)."""
+    async def test_upsert_identity_no_embodiment_raise(self):
+        """ADR-12 partial-rollback of F-03: omitting embodiment is now OK
+        (the field is deprecated and optional). identity_name and
+        independence_class still raise symmetrically."""
         adapter = PrismindAdapter(sse_url="http://localhost:8112")
-        adapter._call_tool_safe = AsyncMock()
+        adapter._call_tool_safe = AsyncMock(
+            return_value=(True, {"success": True, "identity": {}, "created": True})
+        )
 
-        with pytest.raises(ValueError, match="embodiment"):
-            await adapter.upsert_identity(
-                identity_name="Heisenberg",
-                embodiment="",
-                independence_class="main-chain",
-                allowed_roles=["proposer"],
-            )
+        # No raise -- the call proceeds through to the wire with embodiment
+        # absent from the arguments (the adapter forwards None as omit).
+        await adapter.upsert_identity(
+            identity_name="Heisenberg",
+            independence_class="main-chain",
+            allowed_roles=["proposer"],
+        )
 
-        adapter._call_tool_safe.assert_not_called()
+        adapter._call_tool_safe.assert_called_once()
+        _, args = adapter._call_tool_safe.call_args[0]
+        assert "embodiment" not in args
 
     @pytest.mark.asyncio
     async def test_upsert_identity_requires_independence_class(self):
