@@ -926,6 +926,8 @@ AI 間 chatroom (議論 / handoff / decision) の永続化を spirrow-conclair (
 | `chatroom_get_thread` | thread + msgs (mode=full|summary、resolved & summary なら decide msg のみ) |
 | `chatroom_list_events` | audit log (action / thread_id / since/until filter) |
 | `chatroom_check_integrity` | invariant audit report (常に 200) |
+| `chatroom_mark_read` | 自分の read cursor を進める (cursor の唯一更新手段、単調増加のみ) |
+| `chatroom_my_unread` | 自分の identity に未読のある thread 一覧 (inbox) |
 
 ```python
 # 使用例: thread を立てて議論を開始
@@ -1002,6 +1004,29 @@ chatroom_get_thread(
 | `decide` | 結論 (closes_thread と組で thread close) | (closed thread に投げると `ChatroomStateError`) |
 
 詳細は spirrow-conclair の `docs/api-design.md` および `docs/usage-cheatsheet.md`、設計判断は magickit project の `chatroom-archive-tool: System Design v2`。
+
+**Read cursor (per-identity)** — `chatroom_mark_read` + `chatroom_my_unread` で実現する「対応漏れ」対策:
+
+- `(project, identity_name, thread_id)` 単位で `last_read_msg_id` を Conclair に永続化 (`actor_read_cursors` テーブル + alembic 0003)
+- **`chatroom_mark_read` は cursor を進める唯一の手段**。`chatroom_get_thread` / `chatroom_list_threads` は read-only で cursor を変えない (誤った auto-mark で「見たことにされる」事故を防ぐ意図的な分離)
+- `up_to_msg_id=""` で thread の最新 msg まで一括 catch up、specific msg_id で「ここまで読んだ」を bookmark
+- 単調増加のみ: 古い msg_id への mark_read は silent no-op (`advanced=false`)、cursor は変わらない
+- cursor row が無い (= 初めて触れる thread) は **全 msg 未読扱い** — handoff 見落とし防止の安全側 default。catch up は `mark_read(up_to_msg_id="")` 1 回で済む
+- 各 advance は `ChatroomEvent action="mark_read" details={from, to}` として audit log に残る (`chatroom_list_events(action="mark_read")` で参照可能)
+- `chatroom_my_unread` のソート順は「未読数の多い順 → thread 作成新しい順」で、最初のページが actionable surface
+- resolved thread は default で除外 (`include_resolved=True` で含められる)
+- **session 開始ルーチンに `chatroom_my_unread(project, identity_name=自分)` を組み込む** ことで対応漏れを構造的に減らせる
+
+```python
+# 使用例: session 開始時の inbox 確認
+chatroom_my_unread(project="spirrow-magickit", identity_name="Heisenberg")
+# → {"items": [{thread_id, title, unread_count, latest_msg_id, last_read_msg_id, ...}], "total": N}
+
+# 確認後、特定 thread を読んで cursor を進める
+chatroom_get_thread(project="spirrow-magickit", thread_id="T-X", mode="full")  # 内容を読む
+chatroom_mark_read(project="spirrow-magickit", thread_id="T-X",
+                   identity_name="Heisenberg", up_to_msg_id="")  # 一括 catch up
+```
 
 ### ドキュメント管理 (`document.py`)
 

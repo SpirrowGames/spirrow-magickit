@@ -337,7 +337,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     async def chatroom_list_events(
         project: str,
         thread_id: str = "",
-        action: Literal["", "open_thread", "post_message", "status_transition"] = "",
+        action: Literal[
+            "", "open_thread", "post_message", "status_transition", "mark_read",
+        ] = "",
         since: str = "",
         until: str = "",
         limit: int = 100,
@@ -351,7 +353,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             thread_id: optional filter to a single thread.
             action: optional filter — "open_thread" / "post_message" /
-                "status_transition". Empty = all actions.
+                "status_transition" / "mark_read". Empty = all actions.
             since: ISO 8601 inclusive lower bound (e.g.
                 "2026-05-01T00:00:00Z"). Empty = no lower bound.
             until: ISO 8601 exclusive upper bound. Empty = no upper bound.
@@ -390,5 +392,111 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         adapter = _adapter()
         try:
             return await adapter.check_integrity(project=project)
+        finally:
+            await adapter.close()
+
+    @mcp.tool()
+    async def chatroom_mark_read(
+        project: str,
+        thread_id: str,
+        identity_name: str,
+        up_to_msg_id: str = "",
+    ) -> dict[str, Any]:
+        """Advance my read cursor on a thread (the only way to advance it).
+
+        USE THIS WHEN: I've finished reading a thread (or up to a point in
+        it) and want to record that, so a later `chatroom_my_unread` call
+        doesn't surface it again.
+
+        Cursor model (see CLAUDE.md "Read cursor" section):
+        - per (project, identity_name, thread_id), records
+          `last_read_msg_id`.
+        - **`chatroom_get_thread` and `chatroom_list_threads` do NOT advance
+          the cursor** -- only this tool does, to prevent "I just opened
+          the thread to peek" from silently being recorded as "I've read
+          everything in it".
+        - monotonic forward only: a request older than the current cursor
+          is a silent no-op (`advanced=false`); the response always
+          reflects the *current* cursor state.
+
+        Args:
+            project: chatroom project (e.g. "spirrow-magickit").
+            thread_id: target thread.
+            identity_name: whose cursor (e.g. "Heisenberg"). The cursor
+                is per-identity; another identity's cursor is unaffected.
+            up_to_msg_id: optional. Empty (default) = catch up to the
+                thread's current latest msg. Pass a specific msg_id to
+                bookmark "I've read up to here".
+
+        Returns:
+            {"project", "identity_name", "thread_id", "last_read_msg_id",
+             "updated_at", "advanced"}. `advanced=true` means the cursor
+            moved and a `mark_read` audit event was emitted; `false` is
+            the same-position-or-rewind no-op.
+            On failure (thread not found / msg_id not in thread):
+            conclair error envelope.
+        """
+        adapter = _adapter()
+        try:
+            return await adapter.mark_read(
+                project=project,
+                thread_id=thread_id,
+                identity_name=identity_name,
+                # Empty string at the MCP surface -> None on the wire so
+                # the server interprets "catch up to latest". Matches the
+                # pattern already used in this file for `commit_ref` etc.
+                up_to_msg_id=up_to_msg_id or None,
+            )
+        finally:
+            await adapter.close()
+
+    @mcp.tool()
+    async def chatroom_my_unread(
+        project: str,
+        identity_name: str,
+        include_resolved: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Inbox: threads with at least one msg I have not read.
+
+        USE THIS WHEN: starting a session, to triage what needs
+        attention before doing anything else. Pair with
+        `chatroom_get_thread` to read the new msgs, then
+        `chatroom_mark_read` to advance the cursor once handled.
+
+        Inbox semantics:
+        - a thread the identity has never `mark_read`'d shows up with
+          `last_read_msg_id=null` and `unread_count` = the whole thread
+          size (handoff-safety default). Catch up with
+          `chatroom_mark_read(thread_id=..., up_to_msg_id="")`.
+        - results are sorted "most unread first, then by thread recency"
+          so the first page is the actionable surface.
+        - resolved threads are excluded by default. Pass
+          `include_resolved=True` to see them (e.g. for archive review).
+
+        Args:
+            project: chatroom project to triage.
+            identity_name: whose inbox (e.g. "Heisenberg"). Required --
+                there is no implicit "current actor" at the MCP layer.
+            include_resolved: include `status="resolved"` threads.
+                Default False.
+            limit: 1..1000, default 100.
+            offset: pagination, default 0.
+
+        Returns:
+            {"items": [{thread_id, title, status, owner, latest_msg_id,
+             last_read_msg_id, unread_count}, ...], "total", "limit",
+             "offset"}.
+        """
+        adapter = _adapter()
+        try:
+            return await adapter.list_unread(
+                project=project,
+                identity_name=identity_name,
+                include_resolved=include_resolved,
+                limit=limit,
+                offset=offset,
+            )
         finally:
             await adapter.close()
