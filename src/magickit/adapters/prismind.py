@@ -895,30 +895,39 @@ class PrismindAdapter(MCPBaseAdapter):
     async def upsert_identity(
         self,
         identity_name: str,
+        embodiment: str,
+        independence_class: str,
         allowed_roles: list[str] | None = None,
-        default_role: str | None = None,
-        display_name: str | None = None,
-        notes: str | None = None,
+        keep_allowed_roles: bool = False,
+        persona_description: str | None = None,
         user: str = "",
     ) -> dict[str, Any]:
         """Create or update an identity record on Prismind.
 
         Identity records live in a cross-project key space
         (``prismind:identity:{user}:{identity_name}``) and carry
-        ``allowed_roles`` / ``default_role`` / ``display_name`` so the
-        declaration survives across projects and contexts. ``identity_name``
-        is the same value ``SessionState.author`` uses; the record is joined
-        onto each entry returned by ``list_context_authors``.
+        ``allowed_roles`` / ``embodiment`` / ``independence_class`` /
+        ``persona_description`` so the actor declaration survives across
+        projects and contexts. ``identity_name`` is the same value
+        ``SessionState.author`` uses; the record is joined onto each entry
+        returned by ``list_context_authors``.
 
-        Fields passed as ``None`` are preserved by Prismind. Pass
-        ``allowed_roles=[]`` to explicitly clear the list.
+        Required-field semantics (see Prismind ``upsert_identity`` for the
+        full contract): ``embodiment`` and ``independence_class`` are
+        required on every upsert (re-declared, not preserved).
+        ``allowed_roles`` is required unless ``keep_allowed_roles=True``
+        (mutually exclusive with passing a list). ``persona_description``
+        preserves existing on ``None``.
 
         Args:
-            identity_name: Stable identity slug (e.g. "claude.ai-heisenberg").
-            allowed_roles: Roles this identity is allowed to assume.
-            default_role: Default role for chatroom messages.
-            display_name: Human-readable label.
-            notes: Free-form description.
+            identity_name: Stable identity slug (e.g. "Heisenberg").
+            embodiment: Required. "web_ai_chat" | "terminal_coding_agent".
+            independence_class: Required. "main-chain" | "independent" | "human".
+            allowed_roles: Required unless ``keep_allowed_roles=True``.
+            keep_allowed_roles: Preserve existing list (mutually exclusive
+                with ``allowed_roles``; only valid on update).
+            persona_description: Optional human-readable note. ``None``
+                preserves existing value.
             user: Owning user (empty defers to the upstream's configured user).
 
         Returns:
@@ -928,22 +937,27 @@ class PrismindAdapter(MCPBaseAdapter):
         if not identity_name:
             raise ValueError("identity_name is required")
 
-        arguments: dict[str, Any] = {"identity_name": identity_name}
+        arguments: dict[str, Any] = {
+            "identity_name": identity_name,
+            "embodiment": embodiment,
+            "independence_class": independence_class,
+        }
         if allowed_roles is not None:
             arguments["allowed_roles"] = list(allowed_roles)
-        if default_role is not None:
-            arguments["default_role"] = default_role
-        if display_name is not None:
-            arguments["display_name"] = display_name
-        if notes is not None:
-            arguments["notes"] = notes
+        if keep_allowed_roles:
+            arguments["keep_allowed_roles"] = True
+        if persona_description is not None:
+            arguments["persona_description"] = persona_description
         if user:
             arguments["user"] = user
 
         logger.info(
             "Upserting identity via MCP",
             identity_name=identity_name,
+            embodiment=embodiment,
+            independence_class=independence_class,
             allowed_roles=allowed_roles,
+            keep_allowed_roles=keep_allowed_roles,
         )
 
         success, result = await self._call_tool_safe("upsert_identity", arguments)

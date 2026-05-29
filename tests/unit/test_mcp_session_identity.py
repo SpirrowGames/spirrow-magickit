@@ -51,18 +51,24 @@ def tools(settings: Settings) -> dict[str, Any]:
 
 
 class TestUpsertIdentityTool:
-    """upsert_identity MCP wrapper forwards through to PrismindAdapter."""
+    """upsert_identity MCP wrapper forwards through to PrismindAdapter.
+
+    Shape locked by msg-002 §1.1 / msg-005 D-5 (α): embodiment and
+    independence_class are required, allowed_roles is required unless
+    keep_allowed_roles=True.
+    """
 
     @pytest.mark.asyncio
     async def test_forwards_fields_and_returns_payload(self, tools):
         upstream = {
             "success": True,
             "identity": {
-                "identity_name": "ident-1",
+                "identity_name": "Heisenberg",
                 "user": "u",
                 "allowed_roles": ["proposer", "reviewer"],
-                "default_role": "proposer",
-                "display_name": "Disp",
+                "embodiment": "terminal_coding_agent",
+                "independence_class": "main-chain",
+                "persona_description": "Heisenberg",
             },
             "created": True,
             "message": "ok",
@@ -73,34 +79,35 @@ class TestUpsertIdentityTool:
             inst.upsert_identity = AsyncMock(return_value=upstream)
 
             result = await tools["upsert_identity"](
-                identity_name="ident-1",
+                identity_name="Heisenberg",
+                embodiment="terminal_coding_agent",
+                independence_class="main-chain",
                 allowed_roles=["proposer", "reviewer"],
-                default_role="proposer",
-                display_name="Disp",
-                notes="hi",
+                persona_description="Heisenberg",
                 user="u",
             )
 
             inst.upsert_identity.assert_awaited_once()
             kwargs = inst.upsert_identity.call_args.kwargs
-            assert kwargs["identity_name"] == "ident-1"
+            assert kwargs["identity_name"] == "Heisenberg"
+            assert kwargs["embodiment"] == "terminal_coding_agent"
+            assert kwargs["independence_class"] == "main-chain"
             assert kwargs["allowed_roles"] == ["proposer", "reviewer"]
-            # default_role/display_name/notes are non-empty strings in this
-            # case, so the wrapper forwards them as-is. Empty defaults are
-            # mapped to None to let upstream preserve existing values.
-            assert kwargs["default_role"] == "proposer"
-            assert kwargs["display_name"] == "Disp"
-            assert kwargs["notes"] == "hi"
+            # Non-empty persona_description forwarded as-is
+            assert kwargs["persona_description"] == "Heisenberg"
             assert kwargs["user"] == "u"
+            # keep_allowed_roles default False is forwarded explicitly
+            assert kwargs["keep_allowed_roles"] is False
 
         assert result["success"] is True
         assert result["created"] is True
         assert result["identity"]["allowed_roles"] == ["proposer", "reviewer"]
+        assert result["identity"]["embodiment"] == "terminal_coding_agent"
         assert result["message"] == "ok"
 
     @pytest.mark.asyncio
-    async def test_empty_string_defaults_become_none(self, tools):
-        """Empty string defaults are forwarded as None so upstream preserves them."""
+    async def test_empty_persona_description_becomes_none(self, tools):
+        """Empty persona_description default is forwarded as None so upstream preserves."""
         with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
             inst = MockAdapter.return_value
             inst.upsert_identity = AsyncMock(
@@ -108,15 +115,37 @@ class TestUpsertIdentityTool:
             )
 
             await tools["upsert_identity"](
-                identity_name="ident-1",
+                identity_name="Heisenberg",
+                embodiment="terminal_coding_agent",
+                independence_class="main-chain",
                 allowed_roles=["proposer"],
             )
 
             kwargs = inst.upsert_identity.call_args.kwargs
-            # None lets Prismind preserve existing values; "" would overwrite.
-            assert kwargs["default_role"] is None
-            assert kwargs["display_name"] is None
-            assert kwargs["notes"] is None
+            # None lets Prismind preserve existing persona_description; ""
+            # would overwrite it.
+            assert kwargs["persona_description"] is None
+
+    @pytest.mark.asyncio
+    async def test_keep_allowed_roles_forwarded(self, tools):
+        """keep_allowed_roles=True is forwarded to the adapter."""
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.upsert_identity = AsyncMock(
+                return_value={"success": True, "created": False, "identity": {}}
+            )
+
+            await tools["upsert_identity"](
+                identity_name="Heisenberg",
+                embodiment="terminal_coding_agent",
+                independence_class="main-chain",
+                keep_allowed_roles=True,
+            )
+
+            kwargs = inst.upsert_identity.call_args.kwargs
+            assert kwargs["keep_allowed_roles"] is True
+            # allowed_roles omitted (None) -- upstream uses keep flag
+            assert kwargs["allowed_roles"] is None
 
     @pytest.mark.asyncio
     async def test_empty_identity_name_fails_fast(self, tools):
@@ -125,7 +154,12 @@ class TestUpsertIdentityTool:
             inst = MockAdapter.return_value
             inst.upsert_identity = AsyncMock()
 
-            result = await tools["upsert_identity"](identity_name="")
+            result = await tools["upsert_identity"](
+                identity_name="",
+                embodiment="terminal_coding_agent",
+                independence_class="main-chain",
+                allowed_roles=["proposer"],
+            )
 
             inst.upsert_identity.assert_not_called()
             assert result["success"] is False
@@ -139,7 +173,12 @@ class TestUpsertIdentityTool:
             inst = MockAdapter.return_value
             inst.upsert_identity = AsyncMock(side_effect=RuntimeError("boom"))
 
-            result = await tools["upsert_identity"](identity_name="ident-1")
+            result = await tools["upsert_identity"](
+                identity_name="Heisenberg",
+                embodiment="terminal_coding_agent",
+                independence_class="main-chain",
+                allowed_roles=["proposer"],
+            )
 
             assert result["success"] is False
             assert result["created"] is False
@@ -161,7 +200,8 @@ class TestListContextAuthorsTool:
                 "identity": {
                     "identity_name": "ident-1",
                     "allowed_roles": ["proposer", "reviewer"],
-                    "default_role": "proposer",
+                    "embodiment": "web_ai_chat",
+                    "independence_class": "main-chain",
                 },
             },
             {

@@ -313,8 +313,9 @@ class TestPrismindAdapter:
         adapter.call_tool.assert_called_once_with("list_projects", {})
 
     @pytest.mark.asyncio
-    async def test_upsert_identity_forwards_fields(self):
-        """upsert_identity passes through every supplied field to the tool call."""
+    async def test_upsert_identity_forwards_required_and_optional_fields(self):
+        """upsert_identity passes embodiment / independence_class / allowed_roles
+        through, plus optional persona_description / user when provided."""
         adapter = PrismindAdapter(sse_url="http://localhost:8112")
         adapter._call_tool_safe = AsyncMock(
             return_value=(
@@ -322,9 +323,11 @@ class TestPrismindAdapter:
                 {
                     "success": True,
                     "identity": {
-                        "identity_name": "ident-1",
+                        "identity_name": "Heisenberg",
                         "user": "u",
-                        "allowed_roles": ["proposer"],
+                        "allowed_roles": ["proposer", "reviewer"],
+                        "embodiment": "terminal_coding_agent",
+                        "independence_class": "main-chain",
                     },
                     "created": True,
                     "message": "ok",
@@ -333,39 +336,51 @@ class TestPrismindAdapter:
         )
 
         result = await adapter.upsert_identity(
-            identity_name="ident-1",
+            identity_name="Heisenberg",
+            embodiment="terminal_coding_agent",
+            independence_class="main-chain",
             allowed_roles=["proposer", "reviewer"],
-            default_role="proposer",
-            display_name="Disp",
-            notes="hi",
+            persona_description="Heisenberg",
             user="u",
         )
 
         adapter._call_tool_safe.assert_called_once()
         tool_name, args = adapter._call_tool_safe.call_args[0]
         assert tool_name == "upsert_identity"
-        assert args["identity_name"] == "ident-1"
+        assert args["identity_name"] == "Heisenberg"
+        assert args["embodiment"] == "terminal_coding_agent"
+        assert args["independence_class"] == "main-chain"
         assert args["allowed_roles"] == ["proposer", "reviewer"]
-        assert args["default_role"] == "proposer"
-        assert args["display_name"] == "Disp"
-        assert args["notes"] == "hi"
+        assert args["persona_description"] == "Heisenberg"
         assert args["user"] == "u"
+        # keep_allowed_roles=False default is omitted from the wire
+        assert "keep_allowed_roles" not in args
         assert result["success"] is True
         assert result["created"] is True
 
     @pytest.mark.asyncio
-    async def test_upsert_identity_omits_none_fields(self):
-        """upsert_identity does NOT forward None fields so upstream preserves them."""
+    async def test_upsert_identity_omits_optional_when_none(self):
+        """None for allowed_roles and persona_description is omitted (preserve)."""
         adapter = PrismindAdapter(sse_url="http://localhost:8112")
         adapter._call_tool_safe = AsyncMock(
             return_value=(True, {"success": True, "created": False})
         )
 
-        await adapter.upsert_identity(identity_name="ident-1")
+        await adapter.upsert_identity(
+            identity_name="Heisenberg",
+            embodiment="terminal_coding_agent",
+            independence_class="main-chain",
+            keep_allowed_roles=True,
+        )
 
         _, args = adapter._call_tool_safe.call_args[0]
-        # Only identity_name is required; others must not appear when omitted
-        assert args == {"identity_name": "ident-1"}
+        # Required fields present, optional fields absent
+        assert args == {
+            "identity_name": "Heisenberg",
+            "embodiment": "terminal_coding_agent",
+            "independence_class": "main-chain",
+            "keep_allowed_roles": True,
+        }
 
     @pytest.mark.asyncio
     async def test_upsert_identity_empty_list_clears(self):
@@ -375,7 +390,12 @@ class TestPrismindAdapter:
             return_value=(True, {"success": True})
         )
 
-        await adapter.upsert_identity(identity_name="ident-1", allowed_roles=[])
+        await adapter.upsert_identity(
+            identity_name="silent-actor",
+            embodiment="web_ai_chat",
+            independence_class="independent",
+            allowed_roles=[],
+        )
 
         _, args = adapter._call_tool_safe.call_args[0]
         assert args["allowed_roles"] == []
@@ -387,6 +407,11 @@ class TestPrismindAdapter:
         adapter._call_tool_safe = AsyncMock()
 
         with pytest.raises(ValueError):
-            await adapter.upsert_identity(identity_name="")
+            await adapter.upsert_identity(
+                identity_name="",
+                embodiment="web_ai_chat",
+                independence_class="main-chain",
+                allowed_roles=["proposer"],
+            )
 
         adapter._call_tool_safe.assert_not_called()

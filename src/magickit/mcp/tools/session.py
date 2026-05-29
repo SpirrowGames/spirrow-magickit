@@ -763,42 +763,60 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def upsert_identity(
         identity_name: str,
+        embodiment: str,
+        independence_class: str,
         allowed_roles: list[str] | None = None,
-        default_role: str = "",
-        display_name: str = "",
-        notes: str = "",
+        keep_allowed_roles: bool = False,
+        persona_description: str = "",
         user: str = "",
     ) -> dict[str, Any]:
         """Create or update a cross-project identity record (actor declaration).
 
-        USE THIS WHEN: declaring or updating an AI role's stable identity (the
-        same name used as the `author` argument on checkpoint / handoff /
-        resume), so allowed_roles / default_role / display_name persist across
-        projects without being redeclared on every save.
+        USE THIS WHEN: declaring or updating an AI role's stable identity
+        (the same name used as the `author` argument on checkpoint / handoff /
+        resume), so allowed_roles / embodiment / independence_class /
+        persona_description persist across projects without being redeclared
+        on every save.
 
         Identity records live in a separate key space from session state
-        (`prismind:identity:{user}:{identity_name}`), so:
-        - role policy travels with the actor, not per-context
-        - `list_context_authors` joins the identity record onto each author
-          entry so callers see allowed_roles in one round-trip
+        (`prismind:identity:{user}:{identity_name}`), and the schema realizes
+        ADR-2026-05-27-09 D-3's persona-continuity gate at the API level:
 
-        Field semantics (preserve-on-omit):
-        - `allowed_roles=None` (omitted): keep the existing list. Pass `[]`
-          to explicitly clear it.
-        - Empty strings for `default_role` / `display_name` / `notes` are
-          forwarded as-is (Prismind treats `None` as "preserve"; the MCP
-          surface uses empty-string defaults for ergonomics — pass a
-          non-empty value to change them, pass `""` to keep the existing).
+        - `embodiment` is "web_ai_chat" or "terminal_coding_agent" -- the
+          two-way enum is intentional. Model identity is NOT surfaced; only
+          the operational mode visible to other actors.
+        - `independence_class` is "main-chain" / "independent" / "human" --
+          required on every upsert ("書き忘れ不能" guarantee, msg-001 §C-4).
+        - `allowed_roles` is the role enforcement list -- required unless
+          `keep_allowed_roles=True`.
+        - `persona_description` is optional human-readable note --
+          preserve-on-empty.
+
+        Field semantics:
+        - `embodiment` / `independence_class`: required on every call.
+          Invalid enum values are rejected upstream (no record written).
+        - `allowed_roles=None` (omitted): you must also set
+          `keep_allowed_roles=True`, or the call fails. Pass `[]` to
+          explicitly declare "no allowed roles" (legal but unusual).
+        - `keep_allowed_roles=True`: only valid on update (existing record).
+          Conflicts with passing `allowed_roles`.
+        - `persona_description=""` (empty): preserve existing value. Pass a
+          non-empty string to update.
 
         Args:
-            identity_name: Stable identity slug (e.g. "claude.ai-heisenberg").
-                Same value used as `author` on checkpoint/handoff/resume.
+            identity_name: Stable identity slug (e.g. "Heisenberg"). Same
+                value used as `author` on checkpoint/handoff/resume.
+            embodiment: "web_ai_chat" or "terminal_coding_agent". Required.
+            independence_class: "main-chain" / "independent" / "human".
+                Required.
             allowed_roles: Roles this identity is allowed to assume (e.g.
-                ["proposer", "reviewer"]). Magickit is the enforcement point;
+                ["proposer", "reviewer"]). Required unless
+                keep_allowed_roles=True. Magickit is the enforcement point;
                 Prismind only persists.
-            default_role: Role assumed when a chatroom message omits one.
-            display_name: Human-readable label.
-            notes: Free-form description.
+            keep_allowed_roles: Preserve existing allowed_roles list. Only
+                valid on update.
+            persona_description: Optional human-readable persona note.
+                Empty preserves existing.
             user: Owning user (empty defers to upstream's configured user).
 
         Returns:
@@ -827,16 +845,20 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         logger.info(
             "Upserting identity",
             identity_name=identity_name,
+            embodiment=embodiment,
+            independence_class=independence_class,
             allowed_roles=allowed_roles,
+            keep_allowed_roles=keep_allowed_roles,
         )
 
         try:
             result = await prismind.upsert_identity(
                 identity_name=identity_name,
+                embodiment=embodiment,
+                independence_class=independence_class,
                 allowed_roles=allowed_roles,
-                default_role=default_role if default_role else None,
-                display_name=display_name if display_name else None,
-                notes=notes if notes else None,
+                keep_allowed_roles=keep_allowed_roles,
+                persona_description=persona_description if persona_description else None,
                 user=user,
             )
         except Exception as e:
