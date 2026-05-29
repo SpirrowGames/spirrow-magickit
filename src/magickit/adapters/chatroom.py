@@ -244,3 +244,58 @@ class ChatroomAdapter(BaseAdapter):
         return await self._request_json(
             "GET", f"/v1/projects/{project}/integrity"
         )
+
+    # --- read cursor (per-identity inbox / mark_read) -------------------
+
+    async def mark_read(
+        self,
+        *,
+        project: str,
+        thread_id: str,
+        identity_name: str,
+        up_to_msg_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance ``identity_name``'s read cursor on ``thread_id``.
+
+        ``up_to_msg_id=None`` advances to the thread's current latest msg
+        (catch-up shortcut). The endpoint is monotonic-forward only: a
+        request pointing at the current cursor or earlier returns
+        ``advanced=False`` without writing.
+        """
+        body: dict[str, Any] = {"identity_name": identity_name}
+        # Forward the field only when supplied so the catch-up case
+        # serializes as a JSON object without a stray ``"up_to_msg_id":
+        # null`` -- the server's Pydantic schema treats absent and null
+        # the same way (both advance to latest), but the cleaner payload
+        # matches the existing thin-wrapper pattern in this adapter.
+        if up_to_msg_id is not None:
+            body["up_to_msg_id"] = up_to_msg_id
+        return await self._request_json(
+            "POST",
+            f"/v1/projects/{project}/threads/{thread_id}/read",
+            json=body,
+        )
+
+    async def list_unread(
+        self,
+        *,
+        project: str,
+        identity_name: str,
+        include_resolved: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Inbox: threads with at least one msg this identity has not read.
+
+        Sort order on the server is "most unread first", so the first
+        page is already actionable.
+        """
+        params: list[tuple[str, str | int]] = [
+            ("identity_name", identity_name),
+            ("include_resolved", "true" if include_resolved else "false"),
+            ("limit", limit),
+            ("offset", offset),
+        ]
+        return await self._request_json(
+            "GET", f"/v1/projects/{project}/unread", params=params,
+        )

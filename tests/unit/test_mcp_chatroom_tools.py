@@ -66,6 +66,16 @@ def fake_adapter() -> MagicMock:
     adapter.check_integrity = AsyncMock(
         return_value={"issues": [], "issue_count": 0, "checked_at": "x"}
     )
+    adapter.mark_read = AsyncMock(
+        return_value={
+            "project": "p", "identity_name": "Bohr", "thread_id": "T-1",
+            "last_read_msg_id": "msg-001", "updated_at": "2026-05-01T00:00:00Z",
+            "advanced": True,
+        }
+    )
+    adapter.list_unread = AsyncMock(
+        return_value={"items": [], "total": 0, "limit": 100, "offset": 0}
+    )
     adapter.close = AsyncMock()
     return adapter
 
@@ -82,7 +92,7 @@ def registered(settings: Settings, fake_adapter: MagicMock):
 # ---- registration -----------------------------------------------------
 
 
-def test_register_tools_attaches_seven_tools(
+def test_register_tools_attaches_nine_tools(
     settings: Settings,
 ) -> None:
     tools = _capture_tools(settings)
@@ -94,6 +104,8 @@ def test_register_tools_attaches_seven_tools(
         "chatroom_get_thread",
         "chatroom_list_events",
         "chatroom_check_integrity",
+        "chatroom_mark_read",
+        "chatroom_my_unread",
     ]
     assert all(name in tools for name in expected), (sorted(tools), expected)
 
@@ -352,3 +364,80 @@ async def test_adapter_close_called_when_adapter_raises(registered) -> None:
             owner="alice", propose_content="hi",
         )
     adapter.close.assert_awaited_once()
+
+
+# ---- mark_read --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_read_forwards_explicit_msg_id(registered) -> None:
+    tools, adapter = registered
+    fn = tools["chatroom_mark_read"]
+    await fn(
+        project="p", thread_id="T-1",
+        identity_name="Bohr", up_to_msg_id="msg-005",
+    )
+    adapter.mark_read.assert_awaited_once_with(
+        project="p", thread_id="T-1",
+        identity_name="Bohr", up_to_msg_id="msg-005",
+    )
+    adapter.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mark_read_empty_msg_id_normalized_to_none(registered) -> None:
+    """Empty string at the MCP surface (default) is the ergonomic
+    "catch up to latest" signal. The wrapper converts it to None before
+    calling the adapter so the JSON body stays minimal."""
+    tools, adapter = registered
+    fn = tools["chatroom_mark_read"]
+    await fn(
+        project="p", thread_id="T-1", identity_name="Bohr",
+    )
+    kwargs = adapter.mark_read.call_args.kwargs
+    assert kwargs["up_to_msg_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_mark_read_propagates_error_envelope(registered) -> None:
+    tools, adapter = registered
+    err = {
+        "error_type": "ChatroomNotFoundError",
+        "error": "Thread 'T-x' not found in project 'p'",
+        "details": {"project": "p", "thread_id": "T-x"},
+    }
+    adapter.mark_read = AsyncMock(return_value=err)
+    fn = tools["chatroom_mark_read"]
+    out = await fn(project="p", thread_id="T-x", identity_name="Bohr")
+    assert out == err
+
+
+# ---- my_unread --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_my_unread_forwards_filters(registered) -> None:
+    tools, adapter = registered
+    fn = tools["chatroom_my_unread"]
+    await fn(
+        project="p", identity_name="Heisenberg",
+        include_resolved=True, limit=50, offset=10,
+    )
+    adapter.list_unread.assert_awaited_once_with(
+        project="p", identity_name="Heisenberg",
+        include_resolved=True, limit=50, offset=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_my_unread_defaults(registered) -> None:
+    """The MVP defaults must match the docstring: exclude resolved by
+    default, limit 100, offset 0. Pin them so a future docstring drift
+    surfaces in CI."""
+    tools, adapter = registered
+    fn = tools["chatroom_my_unread"]
+    await fn(project="p", identity_name="Heisenberg")
+    kwargs = adapter.list_unread.call_args.kwargs
+    assert kwargs["include_resolved"] is False
+    assert kwargs["limit"] == 100
+    assert kwargs["offset"] == 0
