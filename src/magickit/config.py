@@ -102,6 +102,19 @@ class Settings(BaseSettings):
     # Project archive settings
     archive_path: str = Field(default="data/archives")
 
+    # Chatroom "design-decide naysayer gate" (binding design threads tagged
+    # with `naysayer_gate_tag` may only be closed when a fresh independent
+    # naysayer review approves, or a human override is supplied). See
+    # src/magickit/mcp/tools/chatroom.py for the enforcement.
+    naysayer_gate_enabled: bool = Field(default=True)
+    naysayer_gate_tag: str = Field(default="gate:naysayer")
+    # v1 identification of the independent naysayer is a configurable
+    # allowlist (no Prismind independence_class read path exists yet; migrate
+    # to `independence_class == "independent"` when one lands). Authors in
+    # this list are treated as the independent naysayer whose review the gate
+    # requires.
+    naysayer_identities: list[str] = Field(default_factory=lambda: ["Einstein"])
+
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Settings":
         """Load settings from a YAML config file.
@@ -178,6 +191,13 @@ class Settings(BaseSettings):
         # Archive settings
         if archive := yaml_config.get("archive"):
             flat_config["archive_path"] = archive.get("path")
+
+        # Chatroom naysayer-gate settings
+        if naysayer_gate := yaml_config.get("naysayer_gate"):
+            if "enabled" in naysayer_gate:
+                flat_config["naysayer_gate_enabled"] = naysayer_gate.get("enabled")
+            flat_config["naysayer_gate_tag"] = naysayer_gate.get("tag")
+            flat_config["naysayer_identities"] = naysayer_gate.get("identities")
 
         # Remove None values
         flat_config = {k: v for k, v in flat_config.items() if v is not None}
