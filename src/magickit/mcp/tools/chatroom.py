@@ -250,37 +250,107 @@ def _assess_naysayer_gate(
     }
 
 
-async def _enforce_naysayer_gate(
+def _format_owner_override_note(author: str, thread_owner: str | None, reason: str) -> str:
+    """Machine-readable line recording a human force-close of a non-owned thread.
+
+    Mirrors the naysayer-override note (ADR-2026-06-04-19 D-5 audit
+    requirement): the decide body carries "who force-closed whose thread, and
+    why" in addition to the structured Conclair audit event.
+    """
+    return (
+        f"\n\n---\n[owner-override-by-human] author={author} "
+        f"owner={thread_owner} reason={reason.strip()}"
+    )
+
+
+async def _enforce_close_policies(
     adapter: ChatroomAdapter,
     *,
     project: str,
     thread_id: str,
     author: str,
-    override_reason: str,
+    body_content: str,
+    naysayer_override_reason: str,
+    owner_override_reason: str,
 ) -> dict[str, Any]:
-    """Fetch the thread and run the naysayer-gate assessment.
+    """Apply the naysayer gate AND the human owner-override for a close/decide.
 
-    Returns the same shape as ``_assess_naysayer_gate``. When the gate is
-    globally disabled this is a no-op allow (zero added round-trips). A
-    failure to read the thread is surfaced as a block carrying the upstream
-    error envelope (fail-closed: a gated close must prove its review).
+    Two independent policies on the same close path:
+    - naysayer gate (#9): a gated thread needs a fresh approving review or a
+      human gate-override. Unchanged semantics.
+    - owner-override (ADR-2026-06-04-19 D-5): a human may force-close a
+      non-owned thread. Magickit is the decision point — it sets the Conclair
+      ``owner_override`` flag only for human identities. Ownership bypass is
+      independent of the gate (the gate still runs first).
+
+    Returns ``{"action": "block", "envelope": {...}}`` or
+    ``{"action": "proceed", "content": str, "owner_override": bool,
+    "owner_override_reason": str | None}``.
     """
-    if _settings is None or not _settings.naysayer_gate_enabled:
-        return {"action": "allow", "gated": False}
+    is_human = author in HUMAN_IDENTITY_NAMES
+    gate_enabled = _settings is not None and _settings.naysayer_gate_enabled
+    content = body_content
+    # Humans may force-close; the flag is harmless when the human is the owner
+    # (Conclair only records a bypass when author != owner).
+    owner_override = is_human
+
+    # The thread is needed to run the gate and/or resolve a human force-close.
+    if _settings is None or not (gate_enabled or is_human):
+        return {
+            "action": "proceed", "content": content,
+            "owner_override": owner_override, "owner_override_reason": None,
+        }
 
     view = await adapter.get_thread(project=project, thread_id=thread_id, mode="full")
     if "error_type" in view:
+        # fail-closed: a gated/forced close must prove its preconditions.
         return {"action": "block", "envelope": view}
+    thread = view.get("thread") or {}
+    messages = view.get("messages") or []
+    gate_tag = _settings.naysayer_gate_tag
+    gated = gate_tag in (thread.get("tags") or [])
 
-    return _assess_naysayer_gate(
-        thread=view.get("thread") or {},
-        messages=view.get("messages") or [],
-        naysayer_identities=tuple(_settings.naysayer_identities),
-        gate_tag=_settings.naysayer_gate_tag,
-        human_identities=HUMAN_IDENTITY_NAMES,
-        author=author,
-        override_reason=override_reason,
-    )
+    # 1) naysayer gate (ownership-independent; runs first so owner bypass
+    #    never doubles as a gate bypass).
+    if gate_enabled:
+        gate = _assess_naysayer_gate(
+            thread=thread, messages=messages,
+            naysayer_identities=tuple(_settings.naysayer_identities),
+            gate_tag=gate_tag, human_identities=HUMAN_IDENTITY_NAMES,
+            author=author, override_reason=naysayer_override_reason,
+        )
+        if gate["action"] == "block":
+            return {"action": "block", "envelope": gate["envelope"]}
+        if gate["action"] == "override":
+            content = content + gate["note"]
+
+    # 2) human owner-override (force-close of a non-owned thread).
+    forwarded_reason: str | None = None
+    if is_human:
+        thread_owner = thread.get("owner")
+        # Only a *confirmed* force-close (owner known and not the author)
+        # requires a reason / audit note. An absent owner is not assertable.
+        if thread_owner is not None and author != thread_owner:
+            # gated force-close reuses the naysayer override reason (D-5);
+            # a non-gated force-close requires its own reason.
+            reason = (naysayer_override_reason if gated else owner_override_reason) or ""
+            if not gated and not reason.strip():
+                return {
+                    "action": "block",
+                    "envelope": _gate_error(
+                        "OwnerOverrideReasonRequiredError",
+                        "force-closing a non-owned thread as a human requires "
+                        "owner_override_reason for the audit trail. Provide a reason.",
+                        thread_owner=thread_owner, author=author,
+                    ),
+                }
+            forwarded_reason = reason or None
+            content = content + _format_owner_override_note(author, thread_owner, reason)
+
+    return {
+        "action": "proceed", "content": content,
+        "owner_override": owner_override, "owner_override_reason": forwarded_reason,
+    }
 
 
 def _adapter() -> ChatroomAdapter:
@@ -390,6 +460,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         commit_ref: str = "",
         embodiment: str = "",
         naysayer_override_reason: str = "",
+        owner_override_reason: str = "",
     ) -> dict[str, Any]:
         """Post a message to an existing thread.
 
@@ -419,10 +490,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         some MCP clients reject schemas that use `type` as a property
         name — they collide with JSON Schema's own `type` keyword.
 
-        Naysayer gate: a ``decide`` with ``closes_thread`` set resolves the
-        thread, so it is gated identically to ``chatroom_close_thread`` —
-        a gated thread requires a fresh approving naysayer review unless
-        ``naysayer_override_reason`` (human only) is supplied.
+        Naysayer gate + owner-override: a ``decide`` with ``closes_thread``
+        set resolves the thread, so it carries the same policies as
+        ``chatroom_close_thread`` — a gated thread requires a fresh approving
+        naysayer review unless ``naysayer_override_reason`` (human only) is
+        supplied, and a human may force-close a non-owned thread (set
+        ``owner_override_reason``; required when non-gated, see
+        chatroom_close_thread).
 
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
@@ -441,20 +515,26 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         adapter = _adapter()
         try:
-            # A decide that closes the thread is a close path; gate it the
-            # same way as chatroom_close_thread so it can't be a bypass.
+            # A decide that closes the thread is a close path; apply the same
+            # naysayer gate + owner-override policies as chatroom_close_thread
+            # so it can't be a bypass.
+            owner_override = False
+            owner_override_reason_out: str | None = None
             if msg_type == "decide" and closes_thread:
-                gate = await _enforce_naysayer_gate(
+                policy = await _enforce_close_policies(
                     adapter,
                     project=project,
                     thread_id=thread_id,
                     author=author,
-                    override_reason=naysayer_override_reason,
+                    body_content=content,
+                    naysayer_override_reason=naysayer_override_reason,
+                    owner_override_reason=owner_override_reason,
                 )
-                if gate["action"] == "block":
-                    return gate["envelope"]
-                if gate["action"] == "override":
-                    content = content + gate["note"]
+                if policy["action"] == "block":
+                    return policy["envelope"]
+                content = policy["content"]
+                owner_override = policy["owner_override"]
+                owner_override_reason_out = policy["owner_override_reason"]
 
             return await adapter.post_message(
                 project=project,
@@ -469,6 +549,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
+                owner_override=owner_override,
+                owner_override_reason=owner_override_reason_out,
             )
         finally:
             await adapter.close()
@@ -485,6 +567,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         commit_ref: str = "",
         embodiment: str = "",
         naysayer_override_reason: str = "",
+        owner_override_reason: str = "",
     ) -> dict[str, Any]:
         """Close an active thread by posting a decide msg (owner-only).
 
@@ -515,6 +598,12 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 gate. Non-empty engages the override (reason mandatory);
                 ignored on non-gated threads. A non-human author supplying
                 it is rejected with NaysayerOverrideForbiddenError.
+            owner_override_reason: reason for a human Tier-C force-close of a
+                NON-owned thread (ADR-2026-06-04-19 D-5). Required when a
+                human closes a thread they do not own and it is NOT gated
+                (gated force-close reuses naysayer_override_reason). Recorded
+                in the decide msg + Conclair audit event. Has no effect for
+                non-human authors (they remain owner-only).
 
         Returns:
             On success: {"thread": {... status=resolved ...},
@@ -522,8 +611,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             On failure (embodiment missing -> EmbodimentRequiredError,
             naysayer gate -> NaysayerReviewRequiredError /
             NaysayerReviewStaleError / NaysayerChangesRequestedError /
-            NaysayerOverrideForbiddenError, non-owner -> 403, already
-            resolved -> 409, etc.): error_type envelope.
+            NaysayerOverrideForbiddenError, owner-override reason missing ->
+            OwnerOverrideReasonRequiredError, non-owner (non-human) -> 403,
+            already resolved -> 409, etc.): error_type envelope.
         """
         # close_thread emits a decide msg internally; same mandatory
         # rule as msg_type="decide" on post_message.
@@ -532,28 +622,30 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         adapter = _adapter()
         try:
-            gate = await _enforce_naysayer_gate(
+            policy = await _enforce_close_policies(
                 adapter,
                 project=project,
                 thread_id=thread_id,
                 author=author,
-                override_reason=naysayer_override_reason,
+                body_content=summary_content,
+                naysayer_override_reason=naysayer_override_reason,
+                owner_override_reason=owner_override_reason,
             )
-            if gate["action"] == "block":
-                return gate["envelope"]
-            if gate["action"] == "override":
-                summary_content = summary_content + gate["note"]
+            if policy["action"] == "block":
+                return policy["envelope"]
 
             return await adapter.close_thread(
                 project=project,
                 thread_id=thread_id,
-                summary_content=summary_content,
+                summary_content=policy["content"],
                 author=author,
                 affects_threads=affects_threads,
                 related_tasks=related_tasks,
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
+                owner_override=policy["owner_override"],
+                owner_override_reason=policy["owner_override_reason"],
             )
         finally:
             await adapter.close()

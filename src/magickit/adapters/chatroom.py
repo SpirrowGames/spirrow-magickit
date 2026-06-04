@@ -114,12 +114,18 @@ class ChatroomAdapter(BaseAdapter):
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
         embodiment: str | None = None,
+        owner_override: bool = False,
+        owner_override_reason: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "type": type,
             "author": author,
             "content": content,
         }
+        if owner_override:
+            body["owner_override"] = True
+        if owner_override_reason is not None:
+            body["owner_override_reason"] = owner_override_reason
         if reply_to is not None:
             body["reply_to"] = reply_to
         if references_threads is not None:
@@ -155,11 +161,17 @@ class ChatroomAdapter(BaseAdapter):
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
         embodiment: str | None = None,
+        owner_override: bool = False,
+        owner_override_reason: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "summary_content": summary_content,
             "author": author,
         }
+        if owner_override:
+            body["owner_override"] = True
+        if owner_override_reason is not None:
+            body["owner_override_reason"] = owner_override_reason
         if affects_threads is not None:
             body["affects_threads"] = affects_threads
         if related_tasks is not None:
