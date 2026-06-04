@@ -36,6 +36,252 @@ HUMAN_IDENTITY_NAMES = ("human",)
 # decide internally so it's enforced separately by the close wrapper.
 MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
 
+# --- design-decide naysayer gate ---------------------------------------
+#
+# Binding design threads (those carrying the configured gate tag) may only
+# be closed (decide) when a *fresh* independent-naysayer review approves, or
+# a human supplies an explicit override. This enforces "proposer cannot
+# silently overrule the advisory naysayer to land a binding design
+# decision" structurally, at Magickit's single role/enforcement point.
+#
+# A "substantive" message — one whose appearance *after* a review makes that
+# review stale — is any proposer/implementer-origin message except a bare
+# `ack` / read-cursor bookkeeping. We approximate "proposer/implementer
+# origin" as "not the naysayer and not the human": the naysayer's own
+# follow-ups and human override notes must not invalidate their own review.
+SUBSTANTIVE_MSG_TYPES = (
+    "propose", "question", "answer", "decide", "report", "handoff",
+)
+
+# Reserved per-message tag carrying the naysayer's verdict (messages have a
+# `tags` list but no free-form metadata dict in the Conclair schema, so the
+# verdict rides on a reserved tag; a `VERDICT:` body line is the fallback).
+VERDICT_TAG_PREFIX = "verdict:"
+
+_VERDICT_APPROVE = "approve"
+_VERDICT_REQUEST_CHANGES = "request_changes"
+_VERDICT_SYNONYMS = {
+    "approve": _VERDICT_APPROVE,
+    "approved": _VERDICT_APPROVE,
+    "endorse": _VERDICT_APPROVE,
+    "endorsed": _VERDICT_APPROVE,
+    "request_changes": _VERDICT_REQUEST_CHANGES,
+    "request-changes": _VERDICT_REQUEST_CHANGES,
+    "changes": _VERDICT_REQUEST_CHANGES,
+    "reject": _VERDICT_REQUEST_CHANGES,
+    "rejected": _VERDICT_REQUEST_CHANGES,
+}
+
+
+def _normalize_verdict(raw: str) -> str | None:
+    """Map a raw verdict token to ``approve`` / ``request_changes`` / None."""
+    return _VERDICT_SYNONYMS.get(raw.strip().lower())
+
+
+def _parse_msg_verdict(msg: dict[str, Any]) -> str | None:
+    """Extract a naysayer verdict from a message, or None if absent.
+
+    Primary form: a reserved tag ``verdict:<value>`` on the message.
+    Fallback: the last ``VERDICT: <value>`` line in the body (case-
+    insensitive). Returns the normalized verdict or None when neither a
+    tag nor a body line yields a recognized verdict.
+    """
+    for tag in msg.get("tags") or []:
+        if isinstance(tag, str) and tag.strip().lower().startswith(VERDICT_TAG_PREFIX):
+            verdict = _normalize_verdict(tag.split(":", 1)[1])
+            if verdict is not None:
+                return verdict
+    # Body fallback: scan lines bottom-up for a `VERDICT: x` marker.
+    content = msg.get("content") or ""
+    for line in reversed(content.splitlines()):
+        stripped = line.strip()
+        if stripped.lower().startswith("verdict:"):
+            verdict = _normalize_verdict(stripped.split(":", 1)[1])
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _latest_naysayer_review(
+    messages: list[dict[str, Any]], naysayer_identities: tuple[str, ...]
+) -> tuple[int, dict[str, Any], str] | None:
+    """Return (index, msg, verdict) of the latest reviewable naysayer msg.
+
+    A reviewable message is authored by an identity in ``naysayer_identities``
+    *and* carries a parseable verdict. None when no such message exists.
+    Messages are assumed to be in chronological (msg_id) order.
+    """
+    found: tuple[int, dict[str, Any], str] | None = None
+    for idx, msg in enumerate(messages):
+        if msg.get("author") in naysayer_identities:
+            verdict = _parse_msg_verdict(msg)
+            if verdict is not None:
+                found = (idx, msg, verdict)
+    return found
+
+
+def _first_substantive_after(
+    messages: list[dict[str, Any]],
+    after_index: int,
+    naysayer_identities: tuple[str, ...],
+    human_identities: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """First proposer/implementer substantive msg after ``after_index``.
+
+    Used for freshness: such a message means the review predates new
+    substantive discussion and must be re-issued. Naysayer and human
+    messages are ignored (they don't invalidate the naysayer's own review).
+    """
+    for msg in messages[after_index + 1:]:
+        if msg.get("type") not in SUBSTANTIVE_MSG_TYPES:
+            continue
+        author = msg.get("author")
+        if author in naysayer_identities or author in human_identities:
+            continue
+        return msg
+    return None
+
+
+def _gate_error(error_type: str, message: str, **details: Any) -> dict[str, Any]:
+    """Build a naysayer-gate rejection envelope (project error_type convention)."""
+    return {"error_type": error_type, "error": message, "details": details}
+
+
+def _format_override_note(author: str, reason: str) -> str:
+    """Machine-readable override line appended to the decide msg body.
+
+    Recorded in the persisted decide message (and thus the audit trail) so a
+    human override of the gate is never silent (req: override は理由付きで
+    decide msg / 監査イベントに記録).
+    """
+    return (
+        f"\n\n---\n[naysayer-gate-override] author={author} "
+        f"reason={reason.strip()}"
+    )
+
+
+def _assess_naysayer_gate(
+    *,
+    thread: dict[str, Any],
+    messages: list[dict[str, Any]],
+    naysayer_identities: tuple[str, ...],
+    gate_tag: str,
+    human_identities: tuple[str, ...],
+    author: str,
+    override_reason: str,
+) -> dict[str, Any]:
+    """Pure decision for the naysayer gate on a close/decide.
+
+    Returns one of:
+    - ``{"action": "allow", "gated": bool, ...}`` — proceed unchanged.
+    - ``{"action": "override", "note": str}`` — human override engaged;
+      caller appends ``note`` to the decide body, then proceeds.
+    - ``{"action": "block", "envelope": {...}}`` — return the error envelope.
+    """
+    if gate_tag not in (thread.get("tags") or []):
+        return {"action": "allow", "gated": False}
+
+    # Gated thread. A human override short-circuits the review requirement
+    # but must come from a human identity and carry a reason.
+    if override_reason and override_reason.strip():
+        if author not in human_identities:
+            return {
+                "action": "block",
+                "envelope": _gate_error(
+                    "NaysayerOverrideForbiddenError",
+                    "naysayer-gate override is restricted to human identities "
+                    f"(author={author!r} is not in {list(human_identities)}); "
+                    "a proposer/implementer agent cannot self-override",
+                    author=author,
+                    human_identities=list(human_identities),
+                ),
+            }
+        return {"action": "override", "note": _format_override_note(author, override_reason)}
+
+    review = _latest_naysayer_review(messages, naysayer_identities)
+    if review is None:
+        return {
+            "action": "block",
+            "envelope": _gate_error(
+                "NaysayerReviewRequiredError",
+                "this binding-design thread requires a fresh independent "
+                "naysayer review before it can be closed; none was found. "
+                "Summon a naysayer to review, or pass naysayer_override_reason "
+                "as a human identity.",
+                gate_tag=gate_tag,
+                naysayer_identities=list(naysayer_identities),
+            ),
+        }
+
+    review_index, review_msg, verdict = review
+    stale_by = _first_substantive_after(
+        messages, review_index, naysayer_identities, human_identities
+    )
+    if stale_by is not None:
+        return {
+            "action": "block",
+            "envelope": _gate_error(
+                "NaysayerReviewStaleError",
+                f"the naysayer review ({review_msg.get('msg_id')}) is stale: "
+                f"substantive message {stale_by.get('msg_id')} "
+                f"(type={stale_by.get('type')}, author={stale_by.get('author')}) "
+                "was posted after it. Re-request a naysayer review of the "
+                "current state, or pass a human override.",
+                review_msg_id=review_msg.get("msg_id"),
+                stale_by_msg_id=stale_by.get("msg_id"),
+            ),
+        }
+
+    if verdict == _VERDICT_APPROVE:
+        return {"action": "allow", "gated": True, "review_msg_id": review_msg.get("msg_id")}
+
+    # Fresh review exists but requested changes.
+    return {
+        "action": "block",
+        "envelope": _gate_error(
+            "NaysayerChangesRequestedError",
+            f"the naysayer review ({review_msg.get('msg_id')}) requested changes "
+            "and they are not yet approved. Address them and obtain a fresh "
+            "approving review, or pass naysayer_override_reason as a human "
+            "identity.",
+            review_msg_id=review_msg.get("msg_id"),
+            verdict=verdict,
+        ),
+    }
+
+
+async def _enforce_naysayer_gate(
+    adapter: ChatroomAdapter,
+    *,
+    project: str,
+    thread_id: str,
+    author: str,
+    override_reason: str,
+) -> dict[str, Any]:
+    """Fetch the thread and run the naysayer-gate assessment.
+
+    Returns the same shape as ``_assess_naysayer_gate``. When the gate is
+    globally disabled this is a no-op allow (zero added round-trips). A
+    failure to read the thread is surfaced as a block carrying the upstream
+    error envelope (fail-closed: a gated close must prove its review).
+    """
+    if _settings is None or not _settings.naysayer_gate_enabled:
+        return {"action": "allow", "gated": False}
+
+    view = await adapter.get_thread(project=project, thread_id=thread_id, mode="full")
+    if "error_type" in view:
+        return {"action": "block", "envelope": view}
+
+    return _assess_naysayer_gate(
+        thread=view.get("thread") or {},
+        messages=view.get("messages") or [],
+        naysayer_identities=tuple(_settings.naysayer_identities),
+        gate_tag=_settings.naysayer_gate_tag,
+        human_identities=HUMAN_IDENTITY_NAMES,
+        author=author,
+        override_reason=override_reason,
+    )
+
 
 def _adapter() -> ChatroomAdapter:
     if _settings is None:
@@ -143,6 +389,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         tags: list[str] | None = None,
         commit_ref: str = "",
         embodiment: str = "",
+        naysayer_override_reason: str = "",
     ) -> dict[str, Any]:
         """Post a message to an existing thread.
 
@@ -172,11 +419,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         some MCP clients reject schemas that use `type` as a property
         name — they collide with JSON Schema's own `type` keyword.
 
+        Naysayer gate: a ``decide`` with ``closes_thread`` set resolves the
+        thread, so it is gated identically to ``chatroom_close_thread`` —
+        a gated thread requires a fresh approving naysayer review unless
+        ``naysayer_override_reason`` (human only) is supplied.
+
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
-            On failure (embodiment missing, conclair error, ...):
-            error_type envelope.
+            On failure (embodiment missing, naysayer gate, conclair
+            error, ...): error_type envelope.
         """
         # Magickit-side enforcement (F-04: Magickit is the sole role/
         # embodiment validation point; Conclair only persists).
@@ -189,6 +441,21 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         adapter = _adapter()
         try:
+            # A decide that closes the thread is a close path; gate it the
+            # same way as chatroom_close_thread so it can't be a bypass.
+            if msg_type == "decide" and closes_thread:
+                gate = await _enforce_naysayer_gate(
+                    adapter,
+                    project=project,
+                    thread_id=thread_id,
+                    author=author,
+                    override_reason=naysayer_override_reason,
+                )
+                if gate["action"] == "block":
+                    return gate["envelope"]
+                if gate["action"] == "override":
+                    content = content + gate["note"]
+
             return await adapter.post_message(
                 project=project,
                 thread_id=thread_id,
@@ -217,6 +484,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         tags: list[str] | None = None,
         commit_ref: str = "",
         embodiment: str = "",
+        naysayer_override_reason: str = "",
     ) -> dict[str, Any]:
         """Close an active thread by posting a decide msg (owner-only).
 
@@ -229,6 +497,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
           (msg-325 §4 mandatory set)
         - exempt when ``author`` is the human identity
 
+        Naysayer gate: if the thread carries the configured gate tag
+        (default ``gate:naysayer``), the close is blocked unless a fresh
+        independent-naysayer review approves it. Pass
+        ``naysayer_override_reason`` (human identity only) to override a
+        missing / changes-requested review; the reason is recorded in the
+        decide msg. Non-gated threads are unaffected.
+
         Args:
             summary_content: markdown body of the decide msg. Should
                 contain a clear conclusion + decision points so the
@@ -236,13 +511,19 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             affects_threads: optional list of thread_ids this decision
                 impacts; recorded on the thread row.
             embodiment: see above. Mandatory for non-human authors.
+            naysayer_override_reason: human-only override of the naysayer
+                gate. Non-empty engages the override (reason mandatory);
+                ignored on non-gated threads. A non-human author supplying
+                it is rejected with NaysayerOverrideForbiddenError.
 
         Returns:
             On success: {"thread": {... status=resolved ...},
                          "decide_msg": {...}}.
             On failure (embodiment missing -> EmbodimentRequiredError,
-            non-owner -> 403, already resolved -> 409, etc.):
-            error_type envelope.
+            naysayer gate -> NaysayerReviewRequiredError /
+            NaysayerReviewStaleError / NaysayerChangesRequestedError /
+            NaysayerOverrideForbiddenError, non-owner -> 403, already
+            resolved -> 409, etc.): error_type envelope.
         """
         # close_thread emits a decide msg internally; same mandatory
         # rule as msg_type="decide" on post_message.
@@ -251,6 +532,18 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         adapter = _adapter()
         try:
+            gate = await _enforce_naysayer_gate(
+                adapter,
+                project=project,
+                thread_id=thread_id,
+                author=author,
+                override_reason=naysayer_override_reason,
+            )
+            if gate["action"] == "block":
+                return gate["envelope"]
+            if gate["action"] == "override":
+                summary_content = summary_content + gate["note"]
+
             return await adapter.close_thread(
                 project=project,
                 thread_id=thread_id,
