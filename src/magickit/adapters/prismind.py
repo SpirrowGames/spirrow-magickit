@@ -947,6 +947,15 @@ class PrismindAdapter(MCPBaseAdapter):
             not as "not registered" -- so a Prismind that stops emitting the
             field fails closed instead of silently disarming the gate.
 
+            The nested record is part of that shape: ``identity`` carries
+            ``allowed_roles`` as ``list[str]`` (``IdentityInfo.to_dict``
+            emits it unconditionally), and the gate compares against it
+            directly. A non-list value is an unusable lookup rather than
+            something to coerce -- a bare ``"naysayer"`` iterates to its
+            characters, which would grant the role ``"n"``. An explicit
+            ``[]`` is a legal record value ("no allowed roles"), not a
+            violation.
+
         Raises:
             RuntimeError: transport-level failure (connection / timeout).
         """

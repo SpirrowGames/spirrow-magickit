@@ -592,11 +592,15 @@ def _close_validation_unavailable_error(*, author: str, reason: str) -> dict[str
 
 
 _IDENTITY_LOOKUP_CONTRACT = (
-    '{"success": bool, "found": bool, "identity": dict|None, "message": str}'
+    '{"success": bool, "found": bool, "identity": '
+    '{"allowed_roles": list[str], ...}|None, "message": str}'
 )
 
+_REGISTRATION_UNDETERMINED = "whether the identity is registered"
+_ROLES_UNDETERMINED = "which roles the identity may claim"
 
-def _malformed_lookup_reason(*, field: str) -> str:
+
+def _malformed_lookup_reason(*, field: str, undetermined: str) -> str:
     """Reason text for a ``200 OK`` that does not satisfy the documented shape.
 
     A noun phrase, because both unavailable envelopes interpolate it into
@@ -607,12 +611,18 @@ def _malformed_lookup_reason(*, field: str) -> str:
     same refusal either way -- but the remedies differ (wait for the service
     vs. reconcile a Prismind that no longer speaks the contract), and nothing
     else in the response tells the operator which one they are looking at.
+
+    ``undetermined`` is required rather than fixed because the fields are not
+    interchangeable: a broken ``found`` leaves registration unknown, while a
+    broken ``allowed_roles`` arrives on a record that *did* confirm
+    registration and leaves only the claimable roles unknown. Stating the
+    wrong one would send the operator looking at the wrong half of the
+    record.
     """
     return (
         "the identity service returned a success response that does not satisfy "
         f"the documented contract {_IDENTITY_LOOKUP_CONTRACT}: {field!r} is "
-        "missing or of the wrong type, so whether the identity is registered "
-        "could not be determined"
+        f"missing or of the wrong type, so {undetermined} could not be determined"
     )
 
 
@@ -705,6 +715,25 @@ async def _lookup_identity(author: str) -> _IdentityLookup:
     negative must not skip the check, and a malformed positive must not
     manufacture ``allowed_roles=[]`` and reject in the name of a record that
     was never received.
+
+    ``allowed_roles`` is one of those fields, and it is the one the rule is
+    load-bearing on, because it is the value both gates actually compare
+    against (msg-048, first-hand reproduced msg-052). The producer emits it
+    as ``list[str]`` unconditionally (``IdentityInfo.to_dict``), so anything
+    else is a contract violation, and coercing it had three distinct
+    outcomes, none of them a verdict: ``tuple(True)`` raised an uncaught
+    ``TypeError`` past the ``except`` above; ``tuple("naysayer")`` became
+    ``('n', 'a', ...)`` and let an actor claim and *record* the role ``"n"``
+    while denying it the role the record actually granted; and a missing key
+    became ``()``, the manufactured rejection the paragraph above forbids.
+    Element types are checked too -- an element that is not a string can
+    never equal a role, so it can only misreport ``allowed_roles`` in the
+    error the caller reads.
+
+    An explicitly empty ``[]`` is *not* a violation: Prismind documents it as
+    a legal declaration of "no allowed roles", so it stays a verdict and
+    still yields ``RoleNotAllowed`` -- which is the discrimination the rule
+    is for. ``()`` is now reachable only from a record that said ``[]``.
     """
     prismind = _prismind_adapter()
     try:
@@ -729,14 +758,35 @@ async def _lookup_identity(author: str) -> _IdentityLookup:
     # confirmed "not registered".
     found = result.get("found")
     if not isinstance(found, bool):
-        return _lookup_unusable(_malformed_lookup_reason(field="found"))
+        return _lookup_unusable(
+            _malformed_lookup_reason(
+                field="found", undetermined=_REGISTRATION_UNDETERMINED
+            )
+        )
     if not found:
         return _LOOKUP_UNREGISTERED
 
     identity = result.get("identity")
     if not isinstance(identity, dict):
-        return _lookup_unusable(_malformed_lookup_reason(field="identity"))
-    return _IdentityLookup(None, True, tuple(identity.get("allowed_roles") or ()))
+        return _lookup_unusable(
+            _malformed_lookup_reason(
+                field="identity", undetermined=_REGISTRATION_UNDETERMINED
+            )
+        )
+
+    # The value both gates compare against. ``isinstance(..., list)`` and not
+    # "is iterable": a bare string is iterable and coerces to its characters,
+    # which is the bypass -- not a type error that would announce itself.
+    allowed_roles = identity.get("allowed_roles")
+    if not isinstance(allowed_roles, list) or not all(
+        isinstance(candidate, str) for candidate in allowed_roles
+    ):
+        return _lookup_unusable(
+            _malformed_lookup_reason(
+                field="allowed_roles", undetermined=_ROLES_UNDETERMINED
+            )
+        )
+    return _IdentityLookup(None, True, tuple(allowed_roles))
 
 
 async def _check_role_allowed(

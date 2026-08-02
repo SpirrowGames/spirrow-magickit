@@ -1249,3 +1249,191 @@ async def test_role_gate_does_not_close_the_prismind_adapter(wired) -> None:
     assert "close" not in {name for name, _, _ in prismind.mock_calls}
     # The Conclair adapter, by contrast, IS closed on every write path.
     chat.close.assert_awaited_once()
+
+
+# ---- the same rule, on the field the gate compares against ------------
+#
+# msg-048 (independent PR review) / msg-051 §4 (scope: widen the code rather
+# than narrow the claim). The contract check above stopped one field short of
+# its own docstring: ``allowed_roles`` was still read as
+# ``tuple(identity.get("allowed_roles") or ())``, which is coercion of exactly
+# the kind the rule forbids -- on the value both stages actually compare
+# against. Every shape below was reproduced first-hand on the pre-fix head
+# (msg-052); none of them is hypothetical.
+
+_MISSING = object()
+
+
+def _record_with_roles(allowed_roles: Any, *, name: str = "Einstein") -> dict:
+    """A well-formed positive whose record carries ``allowed_roles`` verbatim.
+
+    ``success`` / ``found`` / ``identity`` all satisfy the contract, so these
+    fixtures isolate the one remaining field: a failure here cannot be
+    credited to the checks that already existed.
+    """
+    identity: dict[str, Any] = {"identity_name": name, "user": "sgadmin"}
+    if allowed_roles is not _MISSING:
+        identity["allowed_roles"] = allowed_roles
+    return {"success": True, "found": True, "identity": identity, "message": "ok"}
+
+
+# Ids name what the un-widened rule did with each shape, so a failure report
+# says which coercion came back.
+_MALFORMED_ROLES = [
+    pytest.param(True, id="bool-uncaught-TypeError"),
+    pytest.param(7, id="int-uncaught-TypeError"),
+    pytest.param("naysayer", id="bare-str-coerced-to-characters"),
+    pytest.param(_MISSING, id="key-absent-manufactured-empty"),
+    pytest.param(None, id="null-manufactured-empty"),
+    pytest.param([1, "naysayer"], id="non-str-element"),
+    pytest.param({"naysayer": True}, id="dict-iterates-to-keys"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed_roles", _MALFORMED_ROLES)
+async def test_a_malformed_allowed_roles_is_not_a_verdict(
+    wired, allowed_roles: Any
+) -> None:
+    """No verdict may come out of a record the service did not deliver.
+
+    Falsified by: a recorded role, an awaited write, a ``RoleNotAllowed``
+    (that would be a statement about a record never received), or an
+    exception escaping instead of an envelope -- the last is how ``True``
+    and ``7`` failed, past the ``except`` that exists to normalise this.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _record_with_roles(allowed_roles)
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+
+    assert result["error_type"] == "RoleValidationUnavailableError"
+    assert "allowed_roles" in result["details"]["reason"]
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed_roles", _MALFORMED_ROLES)
+async def test_a_malformed_allowed_roles_does_not_open_the_close_gate(
+    wired, allowed_roles: Any
+) -> None:
+    """Stage 2 owes the same refusal, and owes it fail-closed rather than raising.
+
+    ``_check_can_close`` intersects ``allowed_roles`` with ``CLOSEABLE_ROLES``,
+    so on the coerced shapes it was deciding closes from a set the record
+    never contained.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _record_with_roles(allowed_roles)
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat", role="naysayer",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_string_allowed_roles_does_not_grant_its_characters(wired) -> None:
+    """★ The bypass, stated as the thing that must not happen.
+
+    ``tuple("naysayer")`` is ``('n', 'a', 'y', ...)``, so ``"n" in
+    allowed_roles`` was true: an actor could claim -- and have Conclair
+    *record* -- the role ``'n'``, a value the record never granted. That
+    breaks I-1 (a non-null ``messages.role`` is a validated one) from the
+    permissive side. Measured on the pre-fix head, which in the same breath
+    denied ``naysayer``, the one role the record did grant.
+
+    Falsified by: any write reaching Conclair, or ``role='n'`` recorded.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _record_with_roles("naysayer")
+
+    single_char = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="n",
+    )
+
+    assert single_char["error_type"] == "RoleValidationUnavailableError"
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_absent_allowed_roles_does_not_reject_in_its_name(wired) -> None:
+    """The manufactured-rejection direction, on the last field to get the rule.
+
+    A missing key became ``()`` and produced ``RoleNotAllowed
+    (allowed_roles=[])`` -- the identical defect the ``identity`` branch
+    closed, one level deeper. It refuses either way, so the harm is not a
+    hole: the caller is told the record denies it when no record arrived.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _record_with_roles(_MISSING)
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+
+    assert result["error_type"] != "RoleNotAllowed"
+    assert result["details"].get("allowed_roles") is None
+
+
+@pytest.mark.asyncio
+async def test_an_explicitly_empty_allowed_roles_is_still_a_verdict(wired) -> None:
+    """The discrimination, without which the fix is merely a wider refusal.
+
+    Prismind documents ``[]`` as a legal explicit declaration of "no allowed
+    roles" (distinct from preserve-on-omit), so it is a record value and must
+    keep producing the verdict envelopes. Pinned beside the malformed cases
+    because the failure mode of this fix is to swallow this one with them --
+    after which ``RoleNotAllowed`` is unreachable and the outage envelope
+    means two different things again, which is where this thread started.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _record_with_roles([])
+
+    refused_post = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+    refused_close = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat",
+    )
+
+    assert refused_post["error_type"] == "RoleNotAllowed"
+    assert refused_post["details"]["allowed_roles"] == []
+    assert refused_close["error_type"] == "RoleNotAllowedToClose"
+    chat.post_message.assert_not_awaited()
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_well_formed_allowed_roles_still_validates_and_records(wired) -> None:
+    """I-1 / I-2 non-regression for the widened check.
+
+    The list-of-strings the real producer emits (``IdentityInfo.to_dict``)
+    must pass untouched, in both directions: the granted role is recorded, a
+    role the record does not carry is still ``RoleNotAllowed``.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _record_with_roles(["naysayer"])
+
+    await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+    assert chat.post_message.call_args.kwargs["role"] == "naysayer"
+
+    denied = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="proposer",
+    )
+    assert denied["error_type"] == "RoleNotAllowed"
+    assert denied["details"]["allowed_roles"] == ["naysayer"]
