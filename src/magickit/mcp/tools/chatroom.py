@@ -63,9 +63,17 @@ MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
 # `human` is NOT in this set and must never be added to it. The human record is
 # `allowed_roles=["human"]` (verified live 2026-08-02), which intersects
 # nothing here -- so the human is exempted from this stage explicitly (I-8,
-# see `_check_can_close`) rather than by widening the set. Widening it would
-# put "human" into every identity's closeable vocabulary; the exemption keeps
-# the effect on the one identity it is meant for.
+# see `_check_close_permitted`) rather than by widening the set. Widening it
+# would put "human" into every identity's closeable vocabulary; the exemption
+# keeps the effect on the one identity it is meant for.
+#
+# What this stage is, precisely (msg-041 Q5): a misconfiguration guard, not an
+# authorization boundary. `author` is an unauthenticated string at the MCP
+# layer, so anyone determined to bypass this can pass a name that is exempt.
+# It stops a correctly-behaving actor from closing what its role does not
+# cover; it does not stop a dishonest one, and no wording here should suggest
+# otherwise. Authenticating `author` is a separate, pre-existing concern and
+# is deliberately not in this change's scope.
 CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 
 # --- design-decide naysayer gate ---------------------------------------
@@ -507,6 +515,13 @@ def _role_validation_unavailable_error(*, author: str, role: str, reason: str) -
     about the author, it is the absence of one. Retrying without ``role``
     succeeds and records ``role=null`` -- an honest "unverified" marker --
     which is the intended fallback when the identity service is down.
+
+    That remedy is only true where this envelope is produced, so the close
+    path must not produce it: there the second stage refuses the retry it
+    invites (msg-041 Q3). ``_check_close_permitted`` answers an unusable
+    lookup with ``_close_validation_unavailable_error`` for exactly that
+    reason -- if a future change routes a close back through here, this
+    docstring becomes false again.
     """
     return {
         "error_type": "RoleValidationUnavailableError",
@@ -720,26 +735,30 @@ def _check_can_close(*, author: str, lookup: _IdentityLookup) -> dict[str, Any] 
     - unusable lookup -> refuse (fail-closed, see
       ``_close_validation_unavailable_error``).
     - unregistered    -> skip (I-9). msg-002 §3.2: legacy actors keep working.
-      This is load-bearing, not theoretical: ``orchestrator`` owns
-      ``T-pr-review-7`` / ``T-pr-review-11`` and has no identity record
-      (verified live 2026-08-02), so a stage that bound unregistered authors
-      would break the naysayer driver's close on day one.
+      Load-bearing, but not for the reason first written here: unregistered
+      identities do close threads (``claude-code`` has no identity record --
+      verified live 2026-08-02 -- and closed ``T-T183-plan-scope`` / msg-037 in
+      spirrow-voxelworld), so binding them changes traffic that exists. The
+      earlier justification named the naysayer driver instead, and that was
+      false (msg-041 Q4): spirrow-mindwire@4ed9eb4 has no call site for
+      ``chatroom_close_thread`` / ``closes_thread`` at all, and the
+      ``orchestrator``-owned PR-review threads it opens are closed by ``human``
+      under the Tier-C owner-override (e.g. T-pr-review-24 / msg-202).
     - allowed_roles ∩ CLOSEABLE_ROLES = ∅ -> ``RoleNotAllowedToClose``.
+
+    The human never reaches here: ``_check_close_permitted`` exempts it (I-8)
+    before the lookup, so the exemption is written once, at the layer that can
+    also keep the close off the identity service's critical path.
 
     Note what this deliberately does not read: the ``role`` the caller claimed
     on *this* call. The decided form (msg-002 §3.1) binds the identity's
     standing capability, so a naysayer-only identity cannot close by simply
-    omitting ``role``. Re-basing it on the claimed role is D-14, which msg-037
-    §4 leaves open for Einstein / Tier-C -- not decided here.
+    omitting ``role``. D-14 asked whether to re-base it on the claimed role;
+    the independent review (msg-041 Q1) endorsed keeping the standing form --
+    stage 1 already proves claimed ⊆ standing, which makes a claim-based
+    capability check equivalent but bypassable by omitting ``role``. The
+    recorded decide is Tier-C's (msg-032 §2); this is the baseline it acts on.
     """
-    if author in HUMAN_IDENTITY_NAMES:
-        # I-8. See the note on CLOSEABLE_ROLES: the human record is
-        # allowed_roles=["human"], which intersects the closing roles nowhere,
-        # so without this the decided form would lock the human out of closing
-        # anything -- including the Tier-C force-close of a non-owned thread
-        # that ADR-2026-06-04-19 D-5 shipped. The human is the above-loop
-        # approval layer; this stage is about roles inside the loop.
-        return None
     if lookup.unavailable_reason is not None:
         return _close_validation_unavailable_error(
             author=author, reason=lookup.unavailable_reason
@@ -764,19 +783,58 @@ async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
     distinguishable from the *owner* check -- that one lives in Conclair
     (``assert_owner_can_close``) and is only reachable after these pass.
 
-    The human path never performs a lookup when ``role`` is omitted: I-8 exempts
-    it from stage 2, and stage 1 already skips the lookup without a role. A
-    human force-close therefore does not depend on Prismind being up.
+    Two things are decided here rather than inside either stage, because both
+    are properties of *closing* and neither stage can see the other:
+
+    - An unusable lookup is terminal. Stage 1 would answer it with "retry, or
+      post without ``role``", which stage 2 then refuses -- a remedy the code
+      knows in advance will fail (msg-041 Q3). The close answers with the
+      stage-2 envelope whether or not ``role`` was supplied.
+    - The human is exempt (I-8) and its close never depends on Prismind. Not
+      only when ``role`` is omitted: a claim that cannot be validated during an
+      outage degrades to the value the system already means by "unverified"
+      (null), so the above-loop Tier-C force-close of ADR-2026-06-04-19 D-5
+      cannot be blocked by a downstream service over an optional argument
+      (msg-041 Q6). A claim the record *denies* is still a verdict, not an
+      outage, so it stays rejected.
     """
     if author in HUMAN_IDENTITY_NAMES:
-        return await _check_role_allowed(author=author, role=role)
+        # I-8. See the note on CLOSEABLE_ROLES: the human record is
+        # allowed_roles=["human"], which intersects the closing roles nowhere,
+        # so without the exemption the decided form would lock the human out of
+        # closing anything. The human is the above-loop approval layer; this
+        # gate is about roles inside the loop.
+        if not role:
+            return _ALLOW_WITHOUT_ROLE  # nothing to validate, nothing to ask
+        human_lookup = await _lookup_identity(author)
+        if human_lookup.unavailable_reason is not None:
+            logger.warning(
+                "Role not recorded: identity lookup unavailable on a human close",
+                author=author,
+                requested_role=role,
+                recorded_role=None,
+                reason=human_lookup.unavailable_reason,
+            )
+            return _ALLOW_WITHOUT_ROLE
+        return await _check_role_allowed(
+            author=author, role=role, lookup=human_lookup
+        )
 
     lookup = await _lookup_identity(author)
+
+    # Stage 2 is computed up front for the one outcome stage 1 must not answer.
+    # It is pure given the record, so this costs nothing and keeps the
+    # fail-closed posture in one place rather than duplicating the condition.
+    close_error = _check_can_close(author=author, lookup=lookup)
+    if lookup.unavailable_reason is not None:
+        return _RoleDecision(close_error, None)
+
+    # Verdict ordering is unchanged: claim-then-capability, so a role the
+    # identity may not assume is reported as such even when it also could not
+    # have closed.
     decision = await _check_role_allowed(author=author, role=role, lookup=lookup)
     if decision.error is not None:
         return decision
-
-    close_error = _check_can_close(author=author, lookup=lookup)
     if close_error is not None:
         return _RoleDecision(close_error, None)
     return decision
@@ -944,7 +1002,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         only) is supplied, a human may force-close a non-owned thread (set
         ``owner_override_reason``; required when non-gated, see
         chatroom_close_thread), and the author's identity must be able to act
-        as a closing role (``RoleNotAllowedToClose`` otherwise).
+        as a closing role (``RoleNotAllowedToClose`` otherwise). One caller-
+        visible difference from an ordinary post: while the identity service is
+        unreachable a closing ``decide`` is refused with
+        ``CloseRoleValidationUnavailableError`` whether or not ``role`` was
+        supplied -- dropping ``role`` is a remedy on a post, not on a close.
 
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
@@ -1050,6 +1112,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
            ``allowed_roles``, not the ``role`` claimed on this call, so it
            cannot be sidestepped by omitting ``role``. Unregistered authors
            are exempt (legacy compatibility) and so is the human identity.
+           It is a misconfiguration guard rather than an authorization
+           boundary: ``author`` is not authenticated here (see the note on
+           ``CLOSEABLE_ROLES``).
+        When the identity service cannot be reached, a close is refused with
+        ``CloseRoleValidationUnavailableError`` regardless of ``role`` -- stage
+        2 does not read ``role``, so there is no "retry without it" remedy on
+        this path. The human is unaffected: its close does not consult the
+        identity service, and a role it cannot validate is recorded as null.
 
         embodiment (ADR-2026-05-29-12 self-declared runtime form):
         - mandatory because close emits a ``decide`` msg internally
@@ -1092,10 +1162,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             On success: {"thread": {... status=resolved ...},
                          "decide_msg": {...}}.
             On failure (embodiment missing -> EmbodimentRequiredError,
-            role gate -> RoleNotAllowed /
-            RoleValidationUnavailableError,
+            role gate -> RoleNotAllowed,
             closeable_roles gate -> RoleNotAllowedToClose /
-            CloseRoleValidationUnavailableError,
+            CloseRoleValidationUnavailableError (this path never returns
+            RoleValidationUnavailableError -- an unusable lookup is answered
+            by the close-specific envelope),
             naysayer gate -> NaysayerReviewRequiredError /
             NaysayerReviewStaleError / NaysayerChangesRequestedError /
             NaysayerOverrideForbiddenError, owner-override reason missing ->

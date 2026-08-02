@@ -317,6 +317,8 @@ identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロ�
 | `role` 指定 ∧ `allowed_roles` 外 | `RoleNotAllowed` envelope で reject、msg は書かない |
 | `role` 指定 ∧ identity lookup 失敗 | `RoleValidationUnavailableError` で reject。**未検証の role を記録しない** |
 
+この表は post / open 経路の話。**close (`chatroom_close_thread` と `closes_thread` 付き `decide`) は最終行だけ挙動が違う** — 段 2 が続くので lookup 失敗は `CloseRoleValidationUnavailableError` になり、`role` を落とす救済策は使えない (下の段 2 表を見ること)。
+
 ∴ 不変条件は「`messages.role` が非 null ⇔ その値は allowed_roles 検証を通っている」。gate は供給側 opt-in なので、**caller が `role` を渡さない限り発火しない** (msg-017 §4 I-6 = 実 caller の role 供給は本 PR のスコープ外・別途)。
 
 未登録 author の行を「素通り (role をそのまま記録)」にすると、この不変条件は**未登録の author 名を選ぶだけで破れる** = gate は協力的な登録済 identity だけを縛る (T-pr-review-11 msg-026)。∴ 通すのは msg であって role ではない。legacy 互換は損なわれない — `role` パラメータ自体が本変更で新設されるので、**legacy caller は構造的に `role` を渡せない**。副次的に、Prismind が別 `user_name` で再起動されて partition がずれた場合、全 lookup が「未登録」に落ちるので main-chain の `role` が**記録されなくなる** (= 欠落として可視。I-6 の反証条件がそのまま検出器になる) — 未検証 role が検証済と区別不能な形で溜まるのではなく。
@@ -331,13 +333,15 @@ identity の解決は Prismind の `get_identity` (単一レコード・project 
 
 | close の呼び出し | 挙動 |
 |---|---|
-| author が `human` | **段 2 免除** (I-8)。human の実レコードは `allowed_roles=["human"]` ∴ 確定形をそのまま適用すると交わりが空になり、ADR-2026-06-04-19 D-5 の human Tier-C force-close ごと死ぬ。`human` を `closeable_roles` に足すのではなく免除で解く (足すと全 identity の語彙に "human" が入る) |
-| identity 未登録 | 段 2 skip (I-9 / msg-002 §3.2 legacy 互換)。`orchestrator` が `T-pr-review-7` / `T-pr-review-11` の owner かつ未登録 (2026-08-02 実測) ∴ 拘束すると naysayer driver の close が即日壊れる |
+| author が `human` | **段 2 免除** (I-8)。human の実レコードは `allowed_roles=["human"]` ∴ 確定形をそのまま適用すると交わりが空になり、ADR-2026-06-04-19 D-5 の human Tier-C force-close ごと死ぬ。`human` を `closeable_roles` に足すのではなく免除で解く (足すと全 identity の語彙に "human" が入る)。**human の close は `role` を供給しても identity service に依存しない** — lookup 不能なら名乗りは検証不能ゆえ `role=null` に落として close 自体は通す (msg-041 Q6)。ただし記録が「不可」と答えた名乗りは outage でなく verdict ∴ `RoleNotAllowed` のまま |
+| identity 未登録 | 段 2 skip (I-9 / msg-002 §3.2 legacy 互換)。実害の根拠は**未登録 identity 自身が close している**こと — `claude-code` は未登録 (2026-08-02 実測) で spirrow-voxelworld の `T-T183-plan-scope` を close 済。**「naysayer driver の close が壊れる」は誤り** (msg-041 Q4): spirrow-mindwire@`4ed9eb4` に close の呼び出しは 1 件も無く、`orchestrator` 所有の PR-review スレッドは `human` が Tier-C owner-override で閉じている |
 | `allowed_roles ∩ closeable_roles ≠ ∅` | 通す |
 | `allowed_roles ∩ closeable_roles = ∅` | `RoleNotAllowedToClose` envelope で reject。decide は書かない |
-| identity lookup 失敗 | `CloseRoleValidationUnavailableError` で reject (**fail-closed**)。段 1 と違い「`role` を落とす」escape hatch は無い — 段 2 は `role` を読まないので落としても変わらないし、identity service を落とせば通る gate は落とせない caller だけを縛る |
+| identity lookup 失敗 | `CloseRoleValidationUnavailableError` で reject (**fail-closed**)。`role` の有無に関わらずこの envelope を返す — **close 経路は段 1 の `RoleValidationUnavailableError` を返さない**。あちらの救済策「`role` を落として再送」は段 2 が確実に拒む ∴ close で返せば「必ず失敗する再試行」を勧める罠になる (msg-041 Q3)。escape hatch が無いのは設計で、identity service を落とせば通る gate は落とせない caller だけを縛るから |
 
-段 2 は **`role` の名乗りでなく identity の常設 `allowed_roles`** を見る ∴ `role` 省略で回避できない。名乗りベースへの変更は D-14 (msg-037 §4) として**未決**。
+段 2 は **`role` の名乗りでなく identity の常設 `allowed_roles`** を見る ∴ `role` 省略で回避できない。名乗りベースへの変更 (D-14 / msg-037 §4) は独立検証 (msg-041 Q1) が**確定形の維持を endorse** — 段 1 が既に「名乗り ⊆ 常設」を保証しているので名乗りベースは数学的に等価かつ `role` 省略で素通りする ∴ 実装変更なし。記録上の decide は Tier-C に残る。
+
+**この段 2 の性質**: `author` は MCP 層で認証されていない ∴ これは **misconfiguration guard であって authorization boundary ではない** (msg-041 Q5)。正しく振る舞う actor が役割外の close をするのを止めるが、詐称する actor は止められない。`author` の認証は本 PR のスコープ外の pre-existing 事項。
 
 段 2 は Conclair 接触前 (Magickit 内) に完結する ∴ **段 1 = owner チェック (Conclair の `assert_owner_can_close` → 403) とは error_type でも到達順でも区別できる**。
 

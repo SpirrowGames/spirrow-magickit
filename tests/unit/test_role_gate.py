@@ -702,14 +702,82 @@ async def test_human_close_does_not_depend_on_prismind(wired) -> None:
     chat.close_thread.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_human_close_does_not_depend_on_prismind_even_with_a_role(wired) -> None:
+    """The exemption has to hold for the close, not for one spelling of it.
+
+    msg-041 Q6: if the human supplies ``role`` the first stage fetches the
+    record, so an outage would block the above-loop Tier-C force-close over an
+    optional string argument. The claim is unrecordable while the identity
+    service is down, so it degrades to the value the system already means by
+    "unverified" (null) instead of refusing the close.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("down"))
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+        role="human",
+    )
+
+    assert "error_type" not in result
+    chat.close_thread.assert_awaited_once()
+    assert chat.close_thread.call_args.kwargs["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_human_close_still_records_a_role_the_lookup_confirms(wired) -> None:
+    """The degradation above is scoped to the outage, not to being human.
+
+    Falsifies "the human exemption was widened into never validating the
+    human's claim": with a reachable identity service the claim is checked and
+    recorded like anyone else's.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["human"], name="human")
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+        role="human",
+    )
+
+    assert "error_type" not in result
+    assert chat.close_thread.call_args.kwargs["role"] == "human"
+
+
+@pytest.mark.asyncio
+async def test_a_human_role_the_record_denies_is_still_rejected_on_a_close(
+    wired,
+) -> None:
+    """The exemption is from the *capability* stage, not from the claim gate.
+
+    An unassumable role is a verdict, not an outage: it stays a rejection, so
+    the exemption cannot be read as "the human may claim anything".
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["human"], name="human")
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+        role="implementer",
+    )
+
+    assert result["error_type"] == "RoleNotAllowed"
+    chat.close_thread.assert_not_awaited()
+
+
 # ---- I-9: unregistered authors are not bound --------------------------
 
 
 @pytest.mark.asyncio
 async def test_unregistered_author_skips_the_second_stage(wired) -> None:
-    """I-9 / msg-002 §3.2. Not theoretical: ``orchestrator`` owns
-    ``T-pr-review-7`` and ``T-pr-review-11`` with no identity record, and the
-    naysayer driver closes those threads."""
+    """I-9 / msg-002 §3.2. Not theoretical, but not for the reason first
+    written here (msg-041 Q4): the naysayer driver never closes anything --
+    spirrow-mindwire@4ed9eb4 has no call site for it, and the orchestrator's
+    PR-review threads are closed by ``human``. What makes the skip
+    load-bearing is that unregistered identities close threads themselves:
+    ``claude-code`` has no identity record (verified live 2026-08-02) and
+    closed ``T-T183-plan-scope`` in spirrow-voxelworld."""
     tools, chat, prismind = wired
     prismind.get_identity.return_value = _UNREGISTERED
 
@@ -739,6 +807,84 @@ async def test_second_stage_fails_closed_when_the_lookup_is_unusable(wired) -> N
     assert result["error_type"] == "CloseRoleValidationUnavailableError"
     assert "connection refused" in result["details"]["reason"]
     chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_close_never_hands_back_a_remedy_it_will_refuse(wired) -> None:
+    """msg-041 Q3, the blocking objection: the two stages must not disagree
+    about what an outage means on a close.
+
+    The stage-1 envelope names a remedy -- "retry, or post without `role`" --
+    that is genuine on a post. On a close it is not: stage 2 does not read
+    ``role``, so the retry it invites is refused deterministically one round
+    trip later. Whichever way the caller spells the call, the close answers
+    with the terminal stage-2 error and no instruction to drop ``role``.
+
+    Falsified by: the with-role arm returning RoleValidationUnavailableError,
+    or the two arms disagreeing.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    with_role = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat", role="naysayer",
+    )
+    without_role = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat",
+    )
+
+    assert with_role["error_type"] == "CloseRoleValidationUnavailableError"
+    assert with_role["error_type"] == without_role["error_type"]
+    assert "without `role`" not in with_role["error"]
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_closing_decide_path_answers_an_outage_the_same_way(wired) -> None:
+    """The trap must not survive on the other close entrance.
+
+    ``post_message(decide, closes_thread=...)`` is a close, so it owes the
+    caller the same answer; otherwise the misleading remedy is still reachable
+    through the path msg-038 §3(b) brought under the stage.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="decide", author="Einstein",
+        content="c", closes_thread="T-1", embodiment="web_ai_chat",
+        role="naysayer",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_post_still_offers_the_remedy(wired) -> None:
+    """The stage-1 envelope is not wrong, it was in the wrong place.
+
+    On a post the advice holds -- dropping ``role`` records null and the write
+    proceeds -- so the fix must not blunt the error the non-close paths give.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    refused = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+    retried = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c",
+    )
+
+    assert refused["error_type"] == "RoleValidationUnavailableError"
+    assert "without `role`" in refused["error"]
+    assert "error_type" not in retried
+    assert chat.post_message.call_args.kwargs["role"] is None
 
 
 # ---- the closes_thread bypass -----------------------------------------
