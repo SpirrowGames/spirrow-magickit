@@ -887,6 +887,217 @@ async def test_an_ordinary_post_still_offers_the_remedy(wired) -> None:
     assert chat.post_message.call_args.kwargs["role"] is None
 
 
+# ---- the lookup contract: only a conforming answer is a verdict -------
+#
+# msg-044 §6.4 / msg-045 §3 (i). ``get_identity`` is documented to answer
+# ``{"success": bool, "found": bool, "identity": dict|None, "message": str}``
+# and "not registered" is carried by ``found=False`` alone. The skip that
+# answer triggers exists for I-3 / I-9 legacy compatibility, so it is only
+# ever correct when the service actually *said* "no such identity". A 200 OK
+# that does not carry the field says nothing -- and reading "no" out of its
+# absence turns the close gate off for the identity it exists to bind.
+
+
+def _malformed_success(**overrides: Any) -> dict:
+    """A 200 OK from the identity service that breaks the documented shape."""
+    base = {
+        "success": True,
+        "identity": {"identity_name": "Einstein", "allowed_roles": ["naysayer"]},
+        "message": "ok",
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_a_success_without_found_is_an_absent_verdict_not_a_negative_one(
+    wired,
+) -> None:
+    """The post path, where the same coercion is visible without a close.
+
+    ``not result.get("found", False)`` cannot tell "the record does not
+    exist" from "the answer never contained the field". Only the first is a
+    verdict; the second is the same nothing an outage returns, and it must
+    take the same branch.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success()
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+
+    assert result["error_type"] == "RoleValidationUnavailableError"
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_success_does_not_open_the_close_gate(wired) -> None:
+    """★ The reachable fail-open (msg-044 §6.4, measured: ``await_count=1``).
+
+    ``Einstein`` has ``allowed_roles=["naysayer"]``, which intersects
+    ``CLOSEABLE_ROLES`` nowhere -- the exact identity the second stage was
+    built to stop. A ``200 OK`` missing ``found`` classified it as an
+    unregistered legacy actor, so I-9's exemption carried it straight through
+    to ``close_thread``.
+
+    Falsified by: ``close_thread`` being awaited at all, or the call
+    answering with anything other than the terminal close envelope.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success()
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat", role="naysayer",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_success_does_not_open_the_close_gate_without_a_role(
+    wired,
+) -> None:
+    """Omitting ``role`` must not be the way around it either.
+
+    Stage 2 never reads ``role``, so the malformed answer has to be terminal
+    on the no-claim spelling as well -- otherwise the bypass survives the fix
+    and is simply spelled differently (the shape of msg-038 §3(b)).
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success()
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_closing_decide_path_rejects_a_malformed_success_too(wired) -> None:
+    """The other close entrance owes the same answer (``closes_thread``)."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success()
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="decide", author="Einstein",
+        content="c", closes_thread="T-1", embodiment="web_ai_chat",
+        role="naysayer",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("found", [None, 0, "", []])
+async def test_only_a_boolean_found_is_read_as_an_answer(wired, found: Any) -> None:
+    """The hinge is the field's *type*, not its truthiness.
+
+    Every value here is falsy, so ``.get("found", False)`` collapses each of
+    them onto the same "not registered" branch as a genuine ``False``. A JSON
+    ``null`` in particular is the shape a partially-populated response takes,
+    and it is the one that most looks like an answer without being one.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success(found=found)
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat", role="naysayer",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_found_true_without_a_record_is_not_an_empty_allowed_roles(
+    wired,
+) -> None:
+    """The mirror case, on the fail-closed side: do not invent a verdict.
+
+    ``found=True`` with no ``identity`` object left ``allowed_roles`` to
+    default to ``()``, which then produced ``RoleNotAllowed`` naming
+    ``allowed_roles=[]`` -- a statement about a record the response never
+    carried. It refuses, so it is not a hole; it is the same coercion of a
+    contract violation into a verdict, and it lies to the one audience that
+    reads the message. Both directions get the one rule.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success(found=True, identity=None)
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+
+    assert result["error_type"] == "RoleValidationUnavailableError"
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_negative_still_skips_and_only_it_does(wired) -> None:
+    """I-3 / I-9 non-regression, stated as the distinction itself.
+
+    Same author, same close, two responses. The well-formed ``found=False``
+    is a verdict and must keep working -- ``claude-code`` closes threads today
+    (msg-042 §4) and binding it would change traffic that exists. The
+    malformed one is not a verdict and must not. If the fix cost the first
+    arm, it traded a fail-open for a regression, so both are pinned in one
+    place where they cannot drift apart.
+    """
+    tools, chat, prismind = wired
+
+    prismind.get_identity.return_value = _UNREGISTERED
+    confirmed = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="claude-code",
+        embodiment="terminal_coding_agent",
+    )
+    assert "error_type" not in confirmed
+    chat.close_thread.assert_awaited_once()
+
+    prismind.get_identity.return_value = _malformed_success()
+    undetermined = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-2", summary_content="done", author="claude-code",
+        embodiment="terminal_coding_agent",
+    )
+    assert undetermined["error_type"] == "CloseRoleValidationUnavailableError"
+    chat.close_thread.assert_awaited_once()  # still the first one
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_success_leaves_the_post_remedy_intact(wired) -> None:
+    """The stage-1 remedy must stay true for the case that now produces it.
+
+    "post without `role`" works here for the same reason it works on an
+    outage: ``_check_role_allowed`` returns before it looks anything up, so
+    the retry the envelope invites does not re-enter the broken lookup. This
+    is the Q3 trap's falsification condition applied to the new branch.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _malformed_success()
+
+    refused = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+    retried = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c",
+    )
+
+    assert "without `role`" in refused["error"]
+    assert "error_type" not in retried
+    assert chat.post_message.call_args.kwargs["role"] is None
+
+
 # ---- the closes_thread bypass -----------------------------------------
 
 

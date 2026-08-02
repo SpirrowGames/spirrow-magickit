@@ -591,6 +591,31 @@ def _close_validation_unavailable_error(*, author: str, reason: str) -> dict[str
     }
 
 
+_IDENTITY_LOOKUP_CONTRACT = (
+    '{"success": bool, "found": bool, "identity": dict|None, "message": str}'
+)
+
+
+def _malformed_lookup_reason(*, field: str) -> str:
+    """Reason text for a ``200 OK`` that does not satisfy the documented shape.
+
+    A noun phrase, because both unavailable envelopes interpolate it into
+    "the identity lookup failed (...)".
+
+    Names the offending field on purpose: from ``error_type`` alone this is
+    indistinguishable from an outage -- which is correct, the gate owes the
+    same refusal either way -- but the remedies differ (wait for the service
+    vs. reconcile a Prismind that no longer speaks the contract), and nothing
+    else in the response tells the operator which one they are looking at.
+    """
+    return (
+        "the identity service returned a success response that does not satisfy "
+        f"the documented contract {_IDENTITY_LOOKUP_CONTRACT}: {field!r} is "
+        "missing or of the wrong type, so whether the identity is registered "
+        "could not be determined"
+    )
+
+
 class _IdentityLookup(NamedTuple):
     """One Prismind identity lookup, shared by both stages of the close gate.
 
@@ -599,8 +624,12 @@ class _IdentityLookup(NamedTuple):
     role" and "may you close at all").
 
     - ``unavailable_reason`` set -> the lookup produced no usable verdict.
-    - ``found`` False            -> a confirmed "no such identity" (legacy).
+    - ``found`` False            -> a *confirmed* "no such identity" (legacy).
     - otherwise                  -> ``allowed_roles`` is the record's value.
+
+    ``found=False`` is only ever set from an answer that said so. Both gates
+    read it as "unregistered, skip the check" (I-3 / I-9), so a shape that
+    merely fails to say "yes" must not land here -- see ``_lookup_identity``.
     """
 
     unavailable_reason: str | None
@@ -609,6 +638,16 @@ class _IdentityLookup(NamedTuple):
 
 
 _LOOKUP_UNREGISTERED = _IdentityLookup(None, False, ())
+
+
+def _lookup_unusable(reason: str) -> _IdentityLookup:
+    """No usable verdict: neither "registered" nor "not registered".
+
+    ``found=False`` in the returned tuple is filler, never read: every caller
+    tests ``unavailable_reason`` first. Constructed through one helper so a
+    new failure mode cannot accidentally be spelled as the legacy skip.
+    """
+    return _IdentityLookup(reason, False, ())
 
 
 class _RoleDecision(NamedTuple):
@@ -645,28 +684,58 @@ async def _lookup_identity(author: str) -> _IdentityLookup:
     (``found=False``) are kept apart here rather than at each call site,
     because the two gates built on this react to them differently and
     conflating them is what turns a gate into a no-op.
+
+    Which is why a ``200 OK`` is not by itself an answer. ``get_identity`` is
+    documented to return ``{"success": bool, "found": bool, "identity":
+    dict|None, "message": str}``, so a success response that does not carry
+    those fields has not answered the question the gates ask -- and the only
+    two things this function may say about a real record are both verdicts.
+    Reading a verdict out of a violated contract is what produced the reachable
+    fail-open of msg-044 §6.4: ``.get("found", False)`` returned the legacy
+    skip for a response that never mentioned ``found``, and ``Einstein``
+    (``allowed_roles=["naysayer"]``) passed the close gate it exists to stop.
+    Note the direction -- the missing field defaulted to the *permissive*
+    branch, so the malformed answer was strictly weaker than an outage.
+
+    So: parse, do not coerce. Anything that does not satisfy the contract is
+    the same "no verdict" a dead service gives, and both gates already know
+    what to do with that (post: refuse the role, offer role=null; close:
+    refuse, fail-closed). The rule is one rule, applied to every field this
+    function reads, so neither direction gets a second policy: a malformed
+    negative must not skip the check, and a malformed positive must not
+    manufacture ``allowed_roles=[]`` and reject in the name of a record that
+    was never received.
     """
     prismind = _prismind_adapter()
     try:
         result = await prismind.get_identity(identity_name=author)
     except Exception as e:  # transport failure, unknown tool, timeout, ...
         logger.warning("Identity lookup failed", author=author, error=str(e))
-        return _IdentityLookup(str(e), False, ())
+        return _lookup_unusable(str(e))
 
     if not isinstance(result, dict):
-        return _IdentityLookup("unexpected response from Prismind", False, ())
+        return _lookup_unusable("unexpected response from Prismind")
     if "error_type" in result:
-        return _IdentityLookup(
-            f"{result['error_type']}: {result.get('error', '')}", False, ()
+        return _lookup_unusable(f"{result['error_type']}: {result.get('error', '')}")
+    if result.get("success") is not True:
+        return _lookup_unusable(
+            result.get("message") or "identity lookup did not report success"
         )
-    if not result.get("success", False):
-        return _IdentityLookup(
-            result.get("message") or "identity lookup reported failure", False, ()
-        )
-    if not result.get("found", False):
+
+    # Below here the response claimed success, so every remaining branch is a
+    # statement about the record -- and may only be taken on the field that
+    # actually carries it. ``isinstance(..., bool)`` and not truthiness: JSON
+    # null / 0 / "" are all falsy, and each would otherwise be read as a
+    # confirmed "not registered".
+    found = result.get("found")
+    if not isinstance(found, bool):
+        return _lookup_unusable(_malformed_lookup_reason(field="found"))
+    if not found:
         return _LOOKUP_UNREGISTERED
 
-    identity = result.get("identity") or {}
+    identity = result.get("identity")
+    if not isinstance(identity, dict):
+        return _lookup_unusable(_malformed_lookup_reason(field="identity"))
     return _IdentityLookup(None, True, tuple(identity.get("allowed_roles") or ()))
 
 
@@ -677,8 +746,10 @@ async def _check_role_allowed(
 
     Outcomes:
     - ``role`` empty -> caller opted out (I-3); no lookup, record null.
-    - identity not registered -> legacy actor: the write is allowed (I-3) but
-      the unverified role is **not** recorded (see the section comment above).
+    - identity confirmed not registered -> legacy actor: the write is allowed
+      (I-3) but the unverified role is **not** recorded (see the section
+      comment above). Confirmed, not merely unproven: ``_lookup_identity``
+      routes an answer it cannot read to ``unavailable_reason`` instead.
     - role present in ``allowed_roles`` -> record the role.
     - role absent from ``allowed_roles`` -> ``RoleNotAllowed``, write nothing.
     - lookup unusable -> ``RoleValidationUnavailableError``, write nothing.
@@ -734,7 +805,10 @@ def _check_can_close(*, author: str, lookup: _IdentityLookup) -> dict[str, Any] 
 
     - unusable lookup -> refuse (fail-closed, see
       ``_close_validation_unavailable_error``).
-    - unregistered    -> skip (I-9). msg-002 §3.2: legacy actors keep working.
+    - confirmed unregistered -> skip (I-9). msg-002 §3.2: legacy actors keep
+      working. This is the branch a malformed success used to reach, which is
+      what made it a bypass rather than a nuisance (msg-044 §6.4); it is now
+      reachable only from a response that said ``found=false``.
       Load-bearing, but not for the reason first written here: unregistered
       identities do close threads (``claude-code`` has no identity record --
       verified live 2026-08-02 -- and closed ``T-T183-plan-scope`` / msg-037 in

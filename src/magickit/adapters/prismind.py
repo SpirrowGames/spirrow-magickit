@@ -941,6 +941,12 @@ class PrismindAdapter(MCPBaseAdapter):
             envelope) means the lookup could not be performed and callers must
             NOT treat it as a permissive verdict.
 
+            The shape is load-bearing, not descriptive: the gate's permissive
+            branch is selected by ``found`` being *present and false*. A
+            success response that omits it is treated as an unusable lookup,
+            not as "not registered" -- so a Prismind that stops emitting the
+            field fails closed instead of silently disarming the gate.
+
         Raises:
             RuntimeError: transport-level failure (connection / timeout).
         """

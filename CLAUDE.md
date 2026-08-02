@@ -319,6 +319,8 @@ identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロ�
 
 この表は post / open 経路の話。**close (`chatroom_close_thread` と `closes_thread` 付き `decide`) は最終行だけ挙動が違う** — 段 2 が続くので lookup 失敗は `CloseRoleValidationUnavailableError` になり、`role` を落とす救済策は使えない (下の段 2 表を見ること)。
 
+**「未登録」は確定回答のときだけ (`_lookup_identity` の契約検査)** — 上表の「identity 未登録」行に落ちるのは、lookup が `found=false` と**答えた**ときに限る。`get_identity` の契約は `{"success": bool, "found": bool, "identity": dict|None, "message": str}` で、permissive 側の分岐を選んでいるのは `found` が**存在して false** であること ∴ `found` を欠いた (あるいは bool でない) `200 OK` は「該当なし」ではなく**最終行 = lookup 失敗**として扱う。ここを truthiness (`.get("found", False)`) で読むと契約違反の成功応答が outage より*弱い*扱いになり、`Einstein` (`allowed_roles=["naysayer"]`) が close 段 2 を通過して `close_thread` に到達した (実測 msg-044 §6.4 / 修正 = 本節)。同じ規則を逆向きにも適用する — `found=true` なのに `identity` が無い応答から `allowed_roles=[]` を捏造して `RoleNotAllowed` を返さない (受け取っていない record について断定する error になる)。∴ **契約を満たさない成功応答は verdict ではなく「回答なし」**。
+
 ∴ 不変条件は「`messages.role` が非 null ⇔ その値は allowed_roles 検証を通っている」。gate は供給側 opt-in なので、**caller が `role` を渡さない限り発火しない** (msg-017 §4 I-6 = 実 caller の role 供給は本 PR のスコープ外・別途)。
 
 未登録 author の行を「素通り (role をそのまま記録)」にすると、この不変条件は**未登録の author 名を選ぶだけで破れる** = gate は協力的な登録済 identity だけを縛る (T-pr-review-11 msg-026)。∴ 通すのは msg であって role ではない。legacy 互換は損なわれない — `role` パラメータ自体が本変更で新設されるので、**legacy caller は構造的に `role` を渡せない**。副次的に、Prismind が別 `user_name` で再起動されて partition がずれた場合、全 lookup が「未登録」に落ちるので main-chain の `role` が**記録されなくなる** (= 欠落として可視。I-6 の反証条件がそのまま検出器になる) — 未検証 role が検証済と区別不能な形で溜まるのではなく。
