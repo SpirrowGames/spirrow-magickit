@@ -46,6 +46,28 @@ HUMAN_IDENTITY_NAMES = ("human",)
 # `ack` earns its place by being a state transition, not by being effortful.
 MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
 
+# --- second-stage close gate (P3) --------------------------------------
+#
+# F-07 (Einstein): record *why* this set is what it is, next to the set, so a
+# later reader does not have to reconstruct it from a 37-message thread.
+#
+# Decided in T-magickit-identity-extension msg-003 D-3 / msg-005: closing a
+# thread is an integrative act, so it belongs to the roles that carry the work
+# forward. `reviewer` and `dogfooder` are deliberately excluded -- both observe
+# rather than integrate, and neither should be able to declare a thread
+# settled. `Einstein` is excluded structurally rather than by name: its record
+# is `allowed_roles=["naysayer"]`, which does not intersect this set, so the
+# advisory naysayer cannot close the threads it reviews (the same separation
+# the naysayer gate enforces from the other direction).
+#
+# `human` is NOT in this set and must never be added to it. The human record is
+# `allowed_roles=["human"]` (verified live 2026-08-02), which intersects
+# nothing here -- so the human is exempted from this stage explicitly (I-8,
+# see `_check_can_close`) rather than by widening the set. Widening it would
+# put "human" into every identity's closeable vocabulary; the exemption keeps
+# the effect on the one identity it is meant for.
+CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
+
 # --- design-decide naysayer gate ---------------------------------------
 #
 # Binding design threads (those carrying the configured gate tag) may only
@@ -497,6 +519,83 @@ def _role_validation_unavailable_error(*, author: str, role: str, reason: str) -
     }
 
 
+def _role_not_allowed_to_close_error(
+    *, author: str, allowed_roles: list[str]
+) -> dict[str, Any]:
+    """I-7 rejection: a registered identity whose roles cannot close a thread.
+
+    Distinct ``error_type`` from ``RoleNotAllowed`` on purpose. That one means
+    "you claimed a role you may not assume"; this one means "the roles you may
+    assume do not include a closing role". Same author can hit either, and the
+    remedy differs, so they must not collapse into one string.
+
+    It is also distinct from the *first* stage of the close check in msg-002
+    §3.1 -- the owner check, which lives in Conclair (``assert_owner_can_close``
+    -> 403). This envelope is produced in Magickit before Conclair is contacted
+    at all, so "which stage rejected me" is answerable from the error alone.
+    """
+    return {
+        "error_type": "RoleNotAllowedToClose",
+        "error": (
+            f"identity {author!r} may not close threads: none of its "
+            f"allowed_roles={allowed_roles} is a closing role "
+            f"({list(CLOSEABLE_ROLES)}). Closing is reserved for the roles "
+            "that integrate the work; ask one of them to close, or have a "
+            "human close it."
+        ),
+        "details": {
+            "author": author,
+            "allowed_roles": list(allowed_roles),
+            "closeable_roles": list(CLOSEABLE_ROLES),
+        },
+    }
+
+
+def _close_validation_unavailable_error(*, author: str, reason: str) -> dict[str, Any]:
+    """The close gate could not run, so the close is refused (fail-closed).
+
+    Separate from ``RoleValidationUnavailableError`` because that envelope's
+    remedy -- "retry, or post without `role`" -- is wrong here: this stage does
+    not read ``role`` at all, so dropping it changes nothing. There is no
+    escape hatch by design; a stage that could be bypassed by making the
+    identity service unreachable would only bind callers who cannot.
+
+    Matches the close path's existing posture: ``_enforce_close_policies``
+    already fails closed when it cannot read the thread ("a gated/forced close
+    must prove its preconditions").
+    """
+    return {
+        "error_type": "CloseRoleValidationUnavailableError",
+        "error": (
+            f"cannot determine whether identity {author!r} may close threads: "
+            f"the identity lookup failed ({reason}). The close is refused "
+            "rather than allowed unchecked; retry once the identity service is "
+            "reachable."
+        ),
+        "details": {"author": author, "reason": reason},
+    }
+
+
+class _IdentityLookup(NamedTuple):
+    """One Prismind identity lookup, shared by both stages of the close gate.
+
+    Extracted so a close performs a single round-trip even though two
+    independent questions are asked of the same record ("may you claim this
+    role" and "may you close at all").
+
+    - ``unavailable_reason`` set -> the lookup produced no usable verdict.
+    - ``found`` False            -> a confirmed "no such identity" (legacy).
+    - otherwise                  -> ``allowed_roles`` is the record's value.
+    """
+
+    unavailable_reason: str | None
+    found: bool
+    allowed_roles: tuple[str, ...]
+
+
+_LOOKUP_UNREGISTERED = _IdentityLookup(None, False, ())
+
+
 class _RoleDecision(NamedTuple):
     """What the gate decided: block, or the role value that may be recorded.
 
@@ -516,8 +615,8 @@ class _RoleDecision(NamedTuple):
 _ALLOW_WITHOUT_ROLE = _RoleDecision(error=None, role=None)
 
 
-async def _check_role_allowed(*, author: str, role: str) -> _RoleDecision:
-    """Run the role × allowed_roles gate and decide what may be recorded.
+async def _lookup_identity(author: str) -> _IdentityLookup:
+    """Fetch one identity record, normalising every failure into one shape.
 
     Resolution goes through Prismind's ``get_identity`` (single-record,
     cross-project) rather than ``list_context_authors``. The latter is
@@ -527,6 +626,40 @@ async def _check_role_allowed(*, author: str, role: str) -> _RoleDecision:
     gate's input from the project-scoped listing would classify the actor the
     gate exists to stop as "unregistered" and skip the check.
 
+    "Could not answer" (``unavailable_reason``) and "answered: no such record"
+    (``found=False``) are kept apart here rather than at each call site,
+    because the two gates built on this react to them differently and
+    conflating them is what turns a gate into a no-op.
+    """
+    prismind = _prismind_adapter()
+    try:
+        result = await prismind.get_identity(identity_name=author)
+    except Exception as e:  # transport failure, unknown tool, timeout, ...
+        logger.warning("Identity lookup failed", author=author, error=str(e))
+        return _IdentityLookup(str(e), False, ())
+
+    if not isinstance(result, dict):
+        return _IdentityLookup("unexpected response from Prismind", False, ())
+    if "error_type" in result:
+        return _IdentityLookup(
+            f"{result['error_type']}: {result.get('error', '')}", False, ()
+        )
+    if not result.get("success", False):
+        return _IdentityLookup(
+            result.get("message") or "identity lookup reported failure", False, ()
+        )
+    if not result.get("found", False):
+        return _LOOKUP_UNREGISTERED
+
+    identity = result.get("identity") or {}
+    return _IdentityLookup(None, True, tuple(identity.get("allowed_roles") or ()))
+
+
+async def _check_role_allowed(
+    *, author: str, role: str, lookup: _IdentityLookup | None = None
+) -> _RoleDecision:
+    """Run the role × allowed_roles gate and decide what may be recorded.
+
     Outcomes:
     - ``role`` empty -> caller opted out (I-3); no lookup, record null.
     - identity not registered -> legacy actor: the write is allowed (I-3) but
@@ -534,47 +667,27 @@ async def _check_role_allowed(*, author: str, role: str) -> _RoleDecision:
     - role present in ``allowed_roles`` -> record the role.
     - role absent from ``allowed_roles`` -> ``RoleNotAllowed``, write nothing.
     - lookup unusable -> ``RoleValidationUnavailableError``, write nothing.
+
+    ``lookup`` lets a caller that has already fetched the record reuse it (the
+    close path asks two questions of one record). When omitted the record is
+    fetched here -- and only if ``role`` was supplied, which is what keeps an
+    ordinary post off the identity service's critical path (I-3).
     """
     if not role:
         return _ALLOW_WITHOUT_ROLE
 
-    prismind = _prismind_adapter()
-    try:
-        result = await prismind.get_identity(identity_name=author)
-    except Exception as e:  # transport failure, unknown tool, timeout, ...
-        logger.warning(
-            "Role validation lookup failed", author=author, role=role, error=str(e)
-        )
-        return _RoleDecision(
-            _role_validation_unavailable_error(author=author, role=role, reason=str(e)),
-            None,
-        )
+    if lookup is None:
+        lookup = await _lookup_identity(author)
 
-    if not isinstance(result, dict):
+    if lookup.unavailable_reason is not None:
         return _RoleDecision(
             _role_validation_unavailable_error(
-                author=author, role=role, reason="unexpected response from Prismind"
-            ),
-            None,
-        )
-    if "error_type" in result:
-        return _RoleDecision(
-            _role_validation_unavailable_error(
-                author=author, role=role,
-                reason=f"{result['error_type']}: {result.get('error', '')}",
-            ),
-            None,
-        )
-    if not result.get("success", False):
-        return _RoleDecision(
-            _role_validation_unavailable_error(
-                author=author, role=role,
-                reason=result.get("message") or "identity lookup reported failure",
+                author=author, role=role, reason=lookup.unavailable_reason
             ),
             None,
         )
 
-    if not result.get("found", False):
+    if not lookup.found:
         # Legacy / unregistered author: the post is allowed (I-3), but the
         # role was never validated, so it is dropped rather than persisted as
         # if it had been. WARNING, not INFO: the caller asked for something
@@ -588,16 +701,85 @@ async def _check_role_allowed(*, author: str, role: str) -> _RoleDecision:
         )
         return _ALLOW_WITHOUT_ROLE
 
-    identity = result.get("identity") or {}
-    allowed_roles = list(identity.get("allowed_roles") or [])
-    if role not in allowed_roles:
+    if role not in lookup.allowed_roles:
         return _RoleDecision(
             _role_not_allowed_error(
-                author=author, role=role, allowed_roles=allowed_roles
+                author=author, role=role, allowed_roles=list(lookup.allowed_roles)
             ),
             None,
         )
     return _RoleDecision(None, role)
+
+
+def _check_can_close(*, author: str, lookup: _IdentityLookup) -> dict[str, Any] | None:
+    """Second stage (I-7): may this identity close a thread at all?
+
+    Pure given the record. Returns an error envelope to return to the caller,
+    or None to proceed.
+
+    - unusable lookup -> refuse (fail-closed, see
+      ``_close_validation_unavailable_error``).
+    - unregistered    -> skip (I-9). msg-002 §3.2: legacy actors keep working.
+      This is load-bearing, not theoretical: ``orchestrator`` owns
+      ``T-pr-review-7`` / ``T-pr-review-11`` and has no identity record
+      (verified live 2026-08-02), so a stage that bound unregistered authors
+      would break the naysayer driver's close on day one.
+    - allowed_roles ∩ CLOSEABLE_ROLES = ∅ -> ``RoleNotAllowedToClose``.
+
+    Note what this deliberately does not read: the ``role`` the caller claimed
+    on *this* call. The decided form (msg-002 §3.1) binds the identity's
+    standing capability, so a naysayer-only identity cannot close by simply
+    omitting ``role``. Re-basing it on the claimed role is D-14, which msg-037
+    §4 leaves open for Einstein / Tier-C -- not decided here.
+    """
+    if author in HUMAN_IDENTITY_NAMES:
+        # I-8. See the note on CLOSEABLE_ROLES: the human record is
+        # allowed_roles=["human"], which intersects the closing roles nowhere,
+        # so without this the decided form would lock the human out of closing
+        # anything -- including the Tier-C force-close of a non-owned thread
+        # that ADR-2026-06-04-19 D-5 shipped. The human is the above-loop
+        # approval layer; this stage is about roles inside the loop.
+        return None
+    if lookup.unavailable_reason is not None:
+        return _close_validation_unavailable_error(
+            author=author, reason=lookup.unavailable_reason
+        )
+    if not lookup.found:
+        return None
+    if set(lookup.allowed_roles) & set(CLOSEABLE_ROLES):
+        return None
+    return _role_not_allowed_to_close_error(
+        author=author, allowed_roles=list(lookup.allowed_roles)
+    )
+
+
+async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
+    """Both role stages for a close, on a single identity lookup.
+
+    Stage order is claim-then-capability: a role the identity may not assume is
+    ``RoleNotAllowed`` regardless of whether it could have closed, so that the
+    error names the thing the caller got wrong first.
+
+    Both stages complete before Conclair is contacted, which is what makes them
+    distinguishable from the *owner* check -- that one lives in Conclair
+    (``assert_owner_can_close``) and is only reachable after these pass.
+
+    The human path never performs a lookup when ``role`` is omitted: I-8 exempts
+    it from stage 2, and stage 1 already skips the lookup without a role. A
+    human force-close therefore does not depend on Prismind being up.
+    """
+    if author in HUMAN_IDENTITY_NAMES:
+        return await _check_role_allowed(author=author, role=role)
+
+    lookup = await _lookup_identity(author)
+    decision = await _check_role_allowed(author=author, role=role, lookup=lookup)
+    if decision.error is not None:
+        return decision
+
+    close_error = _check_can_close(author=author, lookup=lookup)
+    if close_error is not None:
+        return _RoleDecision(close_error, None)
+    return decision
 
 
 def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
@@ -755,19 +937,20 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         some MCP clients reject schemas that use `type` as a property
         name — they collide with JSON Schema's own `type` keyword.
 
-        Naysayer gate + owner-override: a ``decide`` with ``closes_thread``
-        set resolves the thread, so it carries the same policies as
-        ``chatroom_close_thread`` — a gated thread requires a fresh approving
-        naysayer review unless ``naysayer_override_reason`` (human only) is
-        supplied, and a human may force-close a non-owned thread (set
+        Naysayer gate + owner-override + closeable_roles: a ``decide`` with
+        ``closes_thread`` set resolves the thread, so it carries the same
+        policies as ``chatroom_close_thread`` — a gated thread requires a fresh
+        approving naysayer review unless ``naysayer_override_reason`` (human
+        only) is supplied, a human may force-close a non-owned thread (set
         ``owner_override_reason``; required when non-gated, see
-        chatroom_close_thread).
+        chatroom_close_thread), and the author's identity must be able to act
+        as a closing role (``RoleNotAllowedToClose`` otherwise).
 
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
-            On failure (embodiment missing, role not allowed, naysayer
-            gate, conclair error, ...): error_type envelope.
+            On failure (embodiment missing, role not allowed, not allowed to
+            close, naysayer gate, conclair error, ...): error_type envelope.
         """
         # Magickit-side enforcement (F-04: Magickit is the sole role/
         # embodiment validation point; Conclair only persists).
@@ -781,7 +964,17 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         ):
             return _embodiment_required_error(msg_kind=f"msg_type={msg_type}")
 
-        gate = await _check_role_allowed(author=author, role=role)
+        # A decide that closes the thread IS a close, so it takes the close
+        # gate (both role stages), not just the per-message one. Anything less
+        # would leave `closes_thread` as the documented way around the second
+        # stage -- the same reasoning that already routes this path through
+        # `_enforce_close_policies` below.
+        closes = msg_type == "decide" and bool(closes_thread)
+        gate = await (
+            _check_close_permitted(author=author, role=role)
+            if closes
+            else _check_role_allowed(author=author, role=role)
+        )
         if gate.error is not None:
             return gate.error
 
@@ -849,6 +1042,15 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         wants to record a summary post. Only the original owner may
         call this; non-owner attempts return ChatroomPermissionError.
 
+        Who may close (two independent stages, both before the owner check):
+        1. ``role`` × ``allowed_roles`` -- as on every write path.
+        2. ``closeable_roles`` -- the author's identity must be able to act
+           as one of {implementer, integrator, proposer}; otherwise
+           ``RoleNotAllowedToClose``. This binds the identity's standing
+           ``allowed_roles``, not the ``role`` claimed on this call, so it
+           cannot be sidestepped by omitting ``role``. Unregistered authors
+           are exempt (legacy compatibility) and so is the human identity.
+
         embodiment (ADR-2026-05-29-12 self-declared runtime form):
         - mandatory because close emits a ``decide`` msg internally
           (msg-325 §4 mandatory set)
@@ -875,12 +1077,6 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 (msg-017 I-4) -- an out-of-allowed_roles close is rejected
                 with ``RoleNotAllowed``, and an unregistered author's
                 unvalidated role is recorded as null rather than as given.
-                NOTE: this is the role×allowed_roles
-                check only. The second-stage ``closeable_roles`` check
-                ({implementer, integrator, proposer}, msg-003 D-3) is P3 and
-                is NOT implemented here; a naysayer-only identity can still
-                close a thread it owns as long as it does not claim a role
-                outside its own allowed_roles.
             naysayer_override_reason: human-only override of the naysayer
                 gate. Non-empty engages the override (reason mandatory);
                 ignored on non-gated threads. A non-human author supplying
@@ -898,6 +1094,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             On failure (embodiment missing -> EmbodimentRequiredError,
             role gate -> RoleNotAllowed /
             RoleValidationUnavailableError,
+            closeable_roles gate -> RoleNotAllowedToClose /
+            CloseRoleValidationUnavailableError,
             naysayer gate -> NaysayerReviewRequiredError /
             NaysayerReviewStaleError / NaysayerChangesRequestedError /
             NaysayerOverrideForbiddenError, owner-override reason missing ->
@@ -910,8 +1108,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             return _embodiment_required_error(msg_kind="close_thread (emits decide)")
 
         # I-4: the emitted decide is a message like any other, so the role
-        # gate applies here too -- otherwise close would be a bypass.
-        gate = await _check_role_allowed(author=author, role=role)
+        # gate applies here too -- otherwise close would be a bypass. I-7 adds
+        # the second stage (closeable_roles) on the same lookup. Both run
+        # before any Conclair call, so a rejection here is unambiguously not
+        # the owner check.
+        gate = await _check_close_permitted(author=author, role=role)
         if gate.error is not None:
             return gate.error
 

@@ -329,15 +329,26 @@ async def test_partition_drift_shows_up_as_missing_roles_not_as_unverified_ones(
 
 
 @pytest.mark.asyncio
-async def test_role_omitted_close_thread_skips_lookup(wired) -> None:
+async def test_role_omitted_close_still_looks_the_identity_up(wired) -> None:
+    """P3 changes this deliberately; recorded here rather than silently.
+
+    Under P2 a close with no ``role`` consulted Prismind not at all. The
+    second stage (I-7) does not read ``role``, so it has to look the record
+    up regardless -- otherwise omitting ``role`` would be the bypass. The
+    no-lookup property survives untouched on the post / open paths, which are
+    not closes (``test_role_omitted_is_allowed_and_skips_lookup``).
+
+    The recording half of I-3 is unchanged: no role supplied, no role stored.
+    """
     tools, chat, prismind = wired
+    prismind.get_identity.return_value = _UNREGISTERED
 
     await tools["chatroom_close_thread"](
-        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        project="p", thread_id="T-1", summary_content="done", author="claude-code",
         embodiment="terminal_coding_agent",
     )
 
-    prismind.get_identity.assert_not_awaited()
+    prismind.get_identity.assert_awaited_once()
     chat.close_thread.assert_awaited_once()
     assert chat.close_thread.call_args.kwargs["role"] is None
 
@@ -492,18 +503,25 @@ async def test_human_own_role_passes(wired) -> None:
     assert chat.post_message.call_args.kwargs["role"] == "human"
 
 
-# ---- P3 boundary ------------------------------------------------------
+# ---- P3: closeable_roles, the second stage of the close check ---------
+#
+# Spec: msg-002 §3.1 / §3.2 (decided form), msg-037 §3 (I-7..I-11).
+# Stage 1 in that numbering is the *owner* check and lives in Conclair; this
+# stage runs in Magickit, before Conclair is contacted at all.
+
+
+def test_closeable_roles_is_the_decided_set() -> None:
+    """msg-003 D-3 / msg-005. Pinned as a set, not as behaviour, so a silent
+    widening (e.g. adding "human" instead of exempting it) shows up here."""
+    assert set(chatroom_tools.CLOSEABLE_ROLES) == {
+        "implementer", "integrator", "proposer",
+    }
 
 
 @pytest.mark.asyncio
-async def test_closeable_roles_second_stage_is_not_implemented(wired) -> None:
-    """Scope pin (msg-017 I-4): P2 is role x allowed_roles ONLY.
-
-    ``closeable_roles = {implementer, integrator, proposer}`` is P3. A
-    naysayer-only identity closing under its own allowed role must still
-    pass here -- if a future change starts rejecting this, that is P3
-    landing, and it should land deliberately rather than by drift.
-    """
+async def test_naysayer_only_identity_cannot_close(wired) -> None:
+    """I-7. ``Einstein`` is allowed_roles=["naysayer"]; that intersects the
+    closing roles nowhere, so the close is refused and no decide is written."""
     tools, chat, prismind = wired
     prismind.get_identity.return_value = _identity_response(["naysayer"])
 
@@ -512,8 +530,283 @@ async def test_closeable_roles_second_stage_is_not_implemented(wired) -> None:
         embodiment="web_ai_chat", role="naysayer",
     )
 
+    assert result["error_type"] == "RoleNotAllowedToClose"
+    assert result["details"]["allowed_roles"] == ["naysayer"]
+    assert result["details"]["closeable_roles"] == [
+        "implementer", "integrator", "proposer",
+    ]
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_second_stage_fires_without_any_role_claim(wired) -> None:
+    """I-7, the case that decides whether the stage is real.
+
+    The decided form binds the identity's standing ``allowed_roles``, not the
+    role claimed on this call. If it read the claim instead, omitting ``role``
+    would walk straight past it -- and omitting ``role`` is the default.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat",
+    )
+
+    assert result["error_type"] == "RoleNotAllowedToClose"
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_second_stage_rejection_is_distinguishable_from_the_owner_check(
+    wired,
+) -> None:
+    """I-7 ordering invariant, stated as msg-037 requires it.
+
+    ``Einstein`` here IS the thread owner, so Conclair's ``assert_owner_can_close``
+    would let this through: any rejection is therefore stage 2's and only
+    stage 2's. Stronger still, Conclair is never contacted -- not even the
+    read that the close policies would perform -- so the owner check is not
+    merely outvoted, it is unreachable.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+    chat.get_thread.return_value = {
+        "thread": {"owner": "Einstein", "tags": []}, "messages": [], "mode": "full",
+    }
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat", role="naysayer",
+    )
+
+    assert result["error_type"] == "RoleNotAllowedToClose"
+    chat.get_thread.assert_not_awaited()
+    chat.close_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closing_role_passes_the_second_stage(wired) -> None:
+    """The other side of I-7: an identity that can integrate can close."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(
+        ["proposer", "reviewer", "implementer", "integrator", "dogfooder"],
+        name="Heisenberg",
+    )
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Heisenberg",
+        embodiment="terminal_coding_agent", role="implementer",
+    )
+
     assert "error_type" not in result
     chat.close_thread.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_one_lookup_serves_both_stages(wired) -> None:
+    """Two questions of one record, not two round-trips per close."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(
+        ["implementer"], name="Heisenberg"
+    )
+
+    await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Heisenberg",
+        embodiment="terminal_coding_agent", role="implementer",
+    )
+
+    prismind.get_identity.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stage_one_rejection_wins_over_stage_two(wired) -> None:
+    """Claim-then-capability: a role the identity may not assume is reported
+    as such, even when the identity also could not have closed."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat", role="implementer",
+    )
+
+    assert result["error_type"] == "RoleNotAllowed"
+    chat.close_thread.assert_not_awaited()
+
+
+# ---- I-8: the human exemption -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_human_is_exempt_from_the_second_stage(wired) -> None:
+    """I-8, and the reason msg-037 §2 put it in front of the implementation.
+
+    The human record is ``allowed_roles=["human"]`` (verified live). Applied
+    literally, the decided set would intersect that nowhere and lock the human
+    out of closing anything.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["human"], name="human")
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+        role="human",
+    )
+
+    assert "error_type" not in result
+    chat.close_thread.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_human_force_close_of_a_non_owned_thread_survives_p3(wired) -> None:
+    """I-8's real target: the shipped Tier-C force-close (ADR-2026-06-04-19 D-5).
+
+    A human closing someone else's thread is the feature the naive form would
+    have killed -- it is reached only after both role stages pass.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["human"], name="human")
+    chat.get_thread.return_value = {
+        "thread": {"owner": "Bohr", "tags": []}, "messages": [], "mode": "full",
+    }
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+        owner_override_reason="Tier-C: superseded by the new design",
+    )
+
+    assert "error_type" not in result
+    chat.close_thread.assert_awaited_once()
+    assert chat.close_thread.call_args.kwargs["owner_override"] is True
+
+
+@pytest.mark.asyncio
+async def test_human_close_does_not_depend_on_prismind(wired) -> None:
+    """The exemption is applied before the lookup, not after it.
+
+    If the human path fetched the record first and then discarded the verdict,
+    a Prismind outage would still block the above-loop approval layer. It must
+    not even ask.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("down"))
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+    )
+
+    assert "error_type" not in result
+    prismind.get_identity.assert_not_awaited()
+    chat.close_thread.assert_awaited_once()
+
+
+# ---- I-9: unregistered authors are not bound --------------------------
+
+
+@pytest.mark.asyncio
+async def test_unregistered_author_skips_the_second_stage(wired) -> None:
+    """I-9 / msg-002 §3.2. Not theoretical: ``orchestrator`` owns
+    ``T-pr-review-7`` and ``T-pr-review-11`` with no identity record, and the
+    naysayer driver closes those threads."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _UNREGISTERED
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="orchestrator",
+        embodiment="terminal_coding_agent",
+    )
+
+    assert "error_type" not in result
+    chat.close_thread.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_second_stage_fails_closed_when_the_lookup_is_unusable(wired) -> None:
+    """A stage that opens when the identity service is unreachable binds only
+    the callers who cannot reach it. Distinct error_type from the stage-1
+    envelope because that one's remedy ("post without role") is inapplicable:
+    this stage never reads role."""
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="Einstein",
+        embodiment="web_ai_chat",
+    )
+
+    assert result["error_type"] == "CloseRoleValidationUnavailableError"
+    assert "connection refused" in result["details"]["reason"]
+    chat.close_thread.assert_not_awaited()
+
+
+# ---- the closes_thread bypass -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_decide_that_closes_a_thread_takes_the_second_stage(wired) -> None:
+    """``post_message(msg_type="decide", closes_thread=...)`` resolves a thread,
+    so it is a close. Leaving it on the per-message gate alone would document
+    the way around I-7 in the tool's own docstring."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="decide", author="Einstein",
+        content="c", closes_thread="T-1", embodiment="web_ai_chat",
+        role="naysayer",
+    )
+
+    assert result["error_type"] == "RoleNotAllowedToClose"
+    chat.get_thread.assert_not_awaited()
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_decide_that_does_not_close_is_not_a_close(wired) -> None:
+    """Scope: the second stage attaches to resolving a thread, not to the
+    ``decide`` msg_type. A non-closing decide is an ordinary post."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="decide", author="Einstein",
+        content="c", embodiment="web_ai_chat", role="naysayer",
+    )
+
+    assert "error_type" not in result
+    chat.post_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_posts_are_untouched_by_the_second_stage(wired) -> None:
+    """The naysayer must keep reviewing; only closing is restricted."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+
+    assert "error_type" not in result
+    assert chat.post_message.call_args.kwargs["role"] == "naysayer"
+
+
+@pytest.mark.asyncio
+async def test_open_thread_is_untouched_by_the_second_stage(wired) -> None:
+    """Opening is not closing."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["naysayer"])
+
+    result = await tools["chatroom_open_thread"](
+        project="p", thread_id="T-1", title="t", owner="Einstein",
+        propose_content="hi", role="naysayer",
+    )
+
+    assert "error_type" not in result
+    chat.open_thread.assert_awaited_once()
 
 
 # ---- adapter lifetimes (T-pr-review-11 msg-020 rebuttal) --------------

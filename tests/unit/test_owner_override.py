@@ -64,8 +64,39 @@ def _adapter(*, owner: str, tags: list[str], messages: list[dict[str, Any]]) -> 
     return adapter
 
 
+def _prismind(allowed_roles: list[str] | None = None) -> MagicMock:
+    """Identity lookup for the P3 close gate (closeable_roles, msg-037 I-7).
+
+    Every close now asks Prismind whether the author may close at all, so
+    these tests -- which are about the *naysayer gate* and the *owner*
+    override -- have to answer that question before they can reach what they
+    actually test. The default is a main-chain agent record (Bohr /
+    Heisenberg's real ``allowed_roles``), i.e. an identity that clears the
+    stage, so the behaviour under test is unchanged by it.
+    """
+    adapter = MagicMock()
+    adapter.get_identity = AsyncMock(return_value={
+        "success": True, "found": True,
+        "identity": {"allowed_roles": allowed_roles or [
+            "proposer", "reviewer", "implementer", "integrator", "dogfooder",
+        ]},
+        "message": "ok",
+    })
+    return adapter
+
+
+def _patched(adapter: MagicMock, prismind: MagicMock | None = None):
+    return (
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+        patch.object(
+            chatroom_tools, "_prismind_adapter", return_value=prismind or _prismind()
+        ),
+    )
+
+
 async def _close(tools, adapter, **kw):
-    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+    chat_patch, prismind_patch = _patched(adapter)
+    with chat_patch, prismind_patch:
         return await tools["chatroom_close_thread"](**kw)
 
 
@@ -198,7 +229,8 @@ async def test_g_owner_agent_closes_own(settings: Settings) -> None:
 async def test_post_message_decide_human_force_close(settings: Settings) -> None:
     adapter = _adapter(owner="Bohr", tags=["design"],
                        messages=[_msg("msg-001", "Bohr", "propose")])
-    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+    chat_patch, prismind_patch = _patched(adapter)
+    with chat_patch, prismind_patch:
         await _capture_tools(settings)["chatroom_post_message"](
             project="p", thread_id="T-1", msg_type="decide", author="human",
             content="force via post", closes_thread="T-1",

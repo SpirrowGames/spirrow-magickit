@@ -81,11 +81,32 @@ def fake_adapter() -> MagicMock:
 
 
 @pytest.fixture
-def registered(settings: Settings, fake_adapter: MagicMock):
+def fake_prismind() -> MagicMock:
+    """Identity lookup, answering "no such identity" for everyone.
+
+    P3 (msg-037 I-9): the close path consults Prismind to decide whether the
+    author may close at all, and unregistered authors are exempt. The
+    delegation tests here post as ``alice`` -- a legacy actor with no identity
+    record -- so this is the accurate answer, not a convenience: it is the
+    branch that keeps such callers working.
+    """
+    adapter = MagicMock()
+    adapter.get_identity = AsyncMock(
+        return_value={"success": True, "found": False, "identity": None,
+                      "message": "not found"}
+    )
+    return adapter
+
+
+@pytest.fixture
+def registered(settings: Settings, fake_adapter: MagicMock, fake_prismind: MagicMock):
     """Capture the tool fns, with _adapter() patched to the fake."""
     tools = _capture_tools(settings)
 
-    with patch.object(chatroom_tools, "_adapter", return_value=fake_adapter):
+    with (
+        patch.object(chatroom_tools, "_adapter", return_value=fake_adapter),
+        patch.object(chatroom_tools, "_prismind_adapter", return_value=fake_prismind),
+    ):
         yield tools, fake_adapter
 
 

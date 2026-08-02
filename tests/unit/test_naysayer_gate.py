@@ -272,6 +272,26 @@ def _adapter_with_thread(thread: dict[str, Any], messages: list[dict[str, Any]])
     return adapter
 
 
+@pytest.fixture(autouse=True)
+def closeable_identity():
+    """P3 (msg-037 I-7): every close asks Prismind whether the author may close.
+
+    These tests are about the *naysayer* gate and their authors are main-chain
+    agents, so the identity stage must answer "yes" for the gate under test to
+    be reached at all. Left unfaked it would attempt a real connection and
+    fail closed, and every assertion here would pass or fail for the wrong
+    reason.
+    """
+    prismind = MagicMock()
+    prismind.get_identity = AsyncMock(return_value={
+        "success": True, "found": True,
+        "identity": {"allowed_roles": ["proposer", "implementer", "integrator"]},
+        "message": "ok",
+    })
+    with patch.object(chatroom_tools, "_prismind_adapter", return_value=prismind):
+        yield prismind
+
+
 @pytest.mark.asyncio
 async def test_close_thread_gated_no_review_blocks_adapter(settings: Settings) -> None:
     tools = _capture_tools(settings)

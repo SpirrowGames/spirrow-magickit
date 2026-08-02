@@ -305,7 +305,7 @@ identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロ�
 - `chatroom_post_message` の embodiment mandatory 検証 → `src/magickit/mcp/tools/chatroom.py` (ADR-12 P1 で実装済)
 - `chatroom_close_thread` の embodiment mandatory 検証 → 同上 (ADR-12 P1 で実装済)
 - `chatroom_open_thread` / `chatroom_post_message` / `chatroom_close_thread` の `role × allowed_roles` チェック → `src/magickit/mcp/tools/chatroom.py` の `_check_role_allowed` (P2 で実装済)
-- `chatroom_close_thread` の owner/role 段 2 (`closeable_roles`) チェック → 同上 (**P3 未実装**)
+- `chatroom_close_thread` の role 段 2 (`closeable_roles`) チェック → 同上の `_check_can_close` (P3 で実装済)。`closes_thread` 付き `decide` を `chatroom_post_message` で送る経路も同じ段 2 を通る (そうでなければ `closes_thread` が段 2 の抜け道になる)
 
 **role gate の発火条件 (P2 実装形)** — 上の「唯一の発火点」は enforcement の*所在*の話であり、gate が*常時*発火するという意味ではない。実際の発火条件は:
 
@@ -325,7 +325,21 @@ identity の解決は Prismind の `get_identity` (単一レコード・project 
 
 `MANDATORY_EMBODIMENT_MSG_TYPES = {handoff, ack, decide}` / `HUMAN_IDENTITY_NAMES = {human}` の集合定数は `src/magickit/mcp/tools/chatroom.py` に集約。
 
-`closeable_roles = {implementer, integrator, proposer}` は msg-003 D-3 / msg-005 で確定 (reviewer / dogfooder は除外、Einstein は `allowed_roles=[naysayer]` で構造的除外)。
+**close の段 2 (`closeable_roles`) — P3 実装形**
+
+`closeable_roles = {implementer, integrator, proposer}` は msg-003 D-3 / msg-005 で確定 (reviewer / dogfooder は除外、Einstein は `allowed_roles=[naysayer]` で構造的除外)。定数は `CLOSEABLE_ROLES` として `chatroom.py` に置き、根拠はコメントで併記 (F-07)。
+
+| close の呼び出し | 挙動 |
+|---|---|
+| author が `human` | **段 2 免除** (I-8)。human の実レコードは `allowed_roles=["human"]` ∴ 確定形をそのまま適用すると交わりが空になり、ADR-2026-06-04-19 D-5 の human Tier-C force-close ごと死ぬ。`human` を `closeable_roles` に足すのではなく免除で解く (足すと全 identity の語彙に "human" が入る) |
+| identity 未登録 | 段 2 skip (I-9 / msg-002 §3.2 legacy 互換)。`orchestrator` が `T-pr-review-7` / `T-pr-review-11` の owner かつ未登録 (2026-08-02 実測) ∴ 拘束すると naysayer driver の close が即日壊れる |
+| `allowed_roles ∩ closeable_roles ≠ ∅` | 通す |
+| `allowed_roles ∩ closeable_roles = ∅` | `RoleNotAllowedToClose` envelope で reject。decide は書かない |
+| identity lookup 失敗 | `CloseRoleValidationUnavailableError` で reject (**fail-closed**)。段 1 と違い「`role` を落とす」escape hatch は無い — 段 2 は `role` を読まないので落としても変わらないし、identity service を落とせば通る gate は落とせない caller だけを縛る |
+
+段 2 は **`role` の名乗りでなく identity の常設 `allowed_roles`** を見る ∴ `role` 省略で回避できない。名乗りベースへの変更は D-14 (msg-037 §4) として**未決**。
+
+段 2 は Conclair 接触前 (Magickit 内) に完結する ∴ **段 1 = owner チェック (Conclair の `assert_owner_can_close` → 403) とは error_type でも到達順でも区別できる**。
 
 ### リサーチ (`research.py`)
 
