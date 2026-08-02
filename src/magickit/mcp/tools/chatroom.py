@@ -373,6 +373,31 @@ def _adapter() -> ChatroomAdapter:
 
 
 def _prismind_adapter() -> PrismindAdapter:
+    """Build the identity-lookup adapter for the role gate.
+
+    Deliberately NOT paired with a ``close()`` the way ``_adapter()`` is in
+    every write path below. The two adapters have different lifetimes and the
+    asymmetry is load-bearing, so it is written down here rather than left to
+    look like an omission (T-pr-review-11 msg-020 read it as one):
+
+    - ``ChatroomAdapter`` extends ``BaseAdapter``, which holds an
+      ``httpx.AsyncClient`` on ``self._client`` across calls. That client is a
+      real resource with a real ``async def close()``; leaving it open leaks a
+      connection pool, hence ``try/finally: await adapter.close()``.
+    - ``PrismindAdapter`` extends ``MCPBaseAdapter``, which stores only
+      ``sse_url`` (str) and ``timeout`` (float). Construction opens nothing.
+      Each call enters ``_get_session()``, whose ``async with sse_client(...)``
+      / ``async with ClientSession(...)`` open **and close** the SSE connection
+      within that one call. There is nothing left to release afterwards.
+
+    ``MCPBaseAdapter`` therefore has no ``close()`` anywhere in its MRO, and
+    none of the ~30 ``PrismindAdapter(...)`` sites in this codebase close one.
+    Adding ``await prismind.close()`` here would not be a no-op either: the
+    base class routes unknown attributes through ``__getattr__`` to dynamic MCP
+    tool dispatch, so it would issue ``call_tool("close", {})`` -- an extra SSE
+    connect + initialize + Unknown-tool round trip on every validated post.
+    ``test_role_gate.py::test_mcp_adapter_has_no_close_to_call`` pins this.
+    """
     if _settings is None:
         raise RuntimeError("Settings not initialized")
     return PrismindAdapter(

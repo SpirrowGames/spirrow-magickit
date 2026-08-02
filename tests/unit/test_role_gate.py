@@ -11,6 +11,8 @@ Conclair holds the message (role). Neither validates -- msg-002 §2.2 (c).
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -444,3 +446,88 @@ async def test_closeable_roles_second_stage_is_not_implemented(wired) -> None:
 
     assert "error_type" not in result
     chat.close_thread.assert_awaited_once()
+
+
+# ---- adapter lifetimes (T-pr-review-11 msg-020 rebuttal) --------------
+#
+# The naysayer read the missing `await prismind.close()` in
+# `_check_role_allowed` as a connection leak, because every write path in
+# chatroom.py wraps its *Conclair* adapter in `try/finally: await
+# adapter.close()`. The asymmetry is intentional: the two adapters have
+# different base classes and different lifetimes. These tests pin the
+# distinction so the "fix" cannot be reintroduced as a regression.
+
+
+def test_http_adapter_owns_a_client_and_must_be_closed() -> None:
+    """ChatroomAdapter holds an httpx client across calls -> close() is real."""
+    from magickit.adapters.base import BaseAdapter
+    from magickit.adapters.chatroom import ChatroomAdapter
+
+    adapter = ChatroomAdapter(base_url="http://localhost:8115", timeout=5.0)
+
+    # A resource slot exists on the instance, and close() is a real method
+    # defined in the MRO (not synthesised by attribute lookup).
+    assert "_client" in adapter.__dict__
+    assert any("close" in klass.__dict__ for klass in BaseAdapter.__mro__)
+    assert inspect.iscoroutinefunction(type(adapter).close)
+
+
+def test_mcp_adapter_holds_no_connection_to_leak() -> None:
+    """PrismindAdapter construction opens nothing: two scalars, no client."""
+    from magickit.adapters.prismind import PrismindAdapter
+
+    adapter = PrismindAdapter(sse_url="http://localhost:8002", timeout=5.0)
+
+    assert set(adapter.__dict__) == {"sse_url", "timeout"}
+    assert isinstance(adapter.sse_url, str)
+    assert isinstance(adapter.timeout, float)
+
+
+def test_mcp_adapter_has_no_close_to_call() -> None:
+    """`await prismind.close()` would be an MCP tool call, not a cleanup.
+
+    MCPBaseAdapter defines no close() anywhere in its MRO and routes unknown
+    attributes through __getattr__ to dynamic tool dispatch. Following the
+    Conclair pattern here would therefore issue `call_tool("close", {})` --
+    a whole extra SSE connect + initialize + Unknown-tool round trip per
+    validated post. That is the regression this test exists to block.
+    """
+    from magickit.adapters.mcp_base import MCPBaseAdapter
+    from magickit.adapters.prismind import PrismindAdapter
+
+    assert not any("close" in klass.__dict__ for klass in MCPBaseAdapter.__mro__)
+
+    adapter = PrismindAdapter(sse_url="http://localhost:8002", timeout=5.0)
+    assert not inspect.ismethod(adapter.close)  # synthesised, not a real method
+
+    calls: list[tuple[str, dict]] = []
+
+    async def spy(name: str, arguments: dict):
+        calls.append((name, arguments))
+
+    adapter.call_tool = spy  # type: ignore[method-assign]
+    asyncio.run(adapter.close())
+
+    assert calls == [("close", {})]
+
+
+@pytest.mark.asyncio
+async def test_role_gate_does_not_close_the_prismind_adapter(wired) -> None:
+    """The gate performs exactly one lookup and no lifecycle call.
+
+    `prismind_adapter` is a bare MagicMock, so `await adapter.close()` in
+    production would raise (`MagicMock` is not awaitable) -- the assertion
+    below makes the intent explicit rather than relying on that side effect.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _identity_response(["proposer"], name="Bohr")
+
+    await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Bohr",
+        content="c", role="proposer",
+    )
+
+    prismind.get_identity.assert_awaited_once()
+    assert "close" not in {name for name, _, _ in prismind.mock_calls}
+    # The Conclair adapter, by contrast, IS closed on every write path.
+    chat.close.assert_awaited_once()
