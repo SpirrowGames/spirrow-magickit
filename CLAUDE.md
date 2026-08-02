@@ -297,15 +297,31 @@ identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロ�
 
 **`embodiment` は ADR-2026-05-29-12 で identity レコードから外れ、5 API (`checkpoint` / `resume` / `chatroom_post_message` / `chatroom_open_thread` / `chatroom_close_thread`) の optional 実行時パラメータとして自己申告する形に変わった。** 状態遷移を起こす msg type ({handoff, ack, decide} + close_thread が emit する decide) では非 human 著者は申告必須 (Magickit 側で `EmbodimentRequiredError` envelope で reject、F-04 enforcement の延長)。enum 初期値は `web_ai_chat` / `terminal_coding_agent` / `unknown` の 3 値、`browser_ui_automation_gui` は T15 採用時に拡張 ADR で追加。`upsert_identity` の `embodiment` フィールドは deprecated として残置 (段階移行 step (i) / nullable + 後続版で列削除)。
 
-**Magickit は role × allowed_roles および embodiment mandatory-on-state-transition 検証の唯一の発火点。Prismind は identity レコードを永続化するのみで role 検証ロジックを持たず、Conclair は msg/embodiment を保存するだけで検証しない。** これは T-magickit-identity-extension msg-002 §2.2 / msg-003 D-2 + ADR-2026-05-29-12 §4 で確定した設計判断で、サービス境界 (Prismind = persistence、Conclair = append-only event log、Magickit = orchestration / enforcement) を尊重するための整理。代償として「Magickit を経由しない直接呼び出し (例: 別 client から Prismind / Conclair を直叩き) では role × allowed_roles + embodiment チェックが効かない」ことを許容する。AI session は必ず Magickit MCP 経由という前提下で「AI 間のドリフト防止」を実現する形 (UI 直叩きへの効力は現時点要件外、msg-003 D-2)。
+**Magickit は role × allowed_roles および embodiment mandatory-on-state-transition 検証の唯一の発火点。Prismind は identity レコードを永続化するのみで role 検証ロジックを持たず、Conclair は msg/embodiment/role を保存するだけで検証しない。** これは T-magickit-identity-extension msg-002 §2.2 / msg-003 D-2 + ADR-2026-05-29-12 §4 で確定した設計判断で、サービス境界 (Prismind = persistence、Conclair = append-only event log、Magickit = orchestration / enforcement) を尊重するための整理。代償として「Magickit を経由しない直接呼び出し (例: 別 client から Prismind / Conclair を直叩き) では role × allowed_roles + embodiment チェックが効かない」ことを許容する。AI session は必ず Magickit MCP 経由という前提下で「AI 間のドリフト防止」を実現する形 (UI 直叩きへの効力は現時点要件外、msg-003 D-2)。
 
 将来 Spirrow Platform が Prismind / Conclair を別 client (例: Thirdy 経由) から呼ぶケースが生じた場合、role/embodiment 検証の責務配置を再評価する必要がある。アーキテクチャ上の明示的な単独 enforcement point として、本ドキュメントに記録しておく (Einstein F-04 反映)。
 
 実装位置:
 - `chatroom_post_message` の embodiment mandatory 検証 → `src/magickit/mcp/tools/chatroom.py` (ADR-12 P1 で実装済)
 - `chatroom_close_thread` の embodiment mandatory 検証 → 同上 (ADR-12 P1 で実装済)
-- `chatroom_post_message` の `role × allowed_roles` チェック → `src/magickit/mcp/tools/chatroom.py` (P2 実装予定)
-- `chatroom_close_thread` の owner/role 段 2 チェック → 同上 (P3 実装予定)
+- `chatroom_open_thread` / `chatroom_post_message` / `chatroom_close_thread` の `role × allowed_roles` チェック → `src/magickit/mcp/tools/chatroom.py` の `_check_role_allowed` (P2 で実装済)
+- `chatroom_close_thread` の owner/role 段 2 (`closeable_roles`) チェック → 同上 (**P3 未実装**)
+
+**role gate の発火条件 (P2 実装形)** — 上の「唯一の発火点」は enforcement の*所在*の話であり、gate が*常時*発火するという意味ではない。実際の発火条件は:
+
+| 呼び出し | 挙動 |
+|---|---|
+| `role` 省略 | 検証しない・`role=null` で記録 (I-3 legacy 互換)。identity lookup も行わない |
+| `role` 指定 ∧ identity 未登録 | **msg は通す** (I-3 legacy actor を拒否しない)。ただし検証を経ていない `role` は記録せず `role=null` にする。lookup は成功しており「該当なし」という確定回答 |
+| `role` 指定 ∧ `allowed_roles` 内 | 通す。`role` を Conclair に記録 |
+| `role` 指定 ∧ `allowed_roles` 外 | `RoleNotAllowed` envelope で reject、msg は書かない |
+| `role` 指定 ∧ identity lookup 失敗 | `RoleValidationUnavailableError` で reject。**未検証の role を記録しない** |
+
+∴ 不変条件は「`messages.role` が非 null ⇔ その値は allowed_roles 検証を通っている」。gate は供給側 opt-in なので、**caller が `role` を渡さない限り発火しない** (msg-017 §4 I-6 = 実 caller の role 供給は本 PR のスコープ外・別途)。
+
+未登録 author の行を「素通り (role をそのまま記録)」にすると、この不変条件は**未登録の author 名を選ぶだけで破れる** = gate は協力的な登録済 identity だけを縛る (T-pr-review-11 msg-026)。∴ 通すのは msg であって role ではない。legacy 互換は損なわれない — `role` パラメータ自体が本変更で新設されるので、**legacy caller は構造的に `role` を渡せない**。副次的に、Prismind が別 `user_name` で再起動されて partition がずれた場合、全 lookup が「未登録」に落ちるので main-chain の `role` が**記録されなくなる** (= 欠落として可視。I-6 の反証条件がそのまま検出器になる) — 未検証 role が検証済と区別不能な形で溜まるのではなく。
+
+identity の解決は Prismind の `get_identity` (単一レコード・project 横断) を使う。`list_context_authors` は project スコープで SessionState partition を列挙するため、**登録済だがその project で checkpoint していない identity は現れない** (実測 2026-08-02: `spirrow-magickit` の listing は Bohr / Heisenberg / `""` のみで、登録済の `Einstein` / `human` は不在)。そちらを gate の入力にすると、まさに止めるべき actor が「未登録」と判定されて素通りする。
 
 `MANDATORY_EMBODIMENT_MSG_TYPES = {handoff, ack, decide}` / `HUMAN_IDENTITY_NAMES = {human}` の集合定数は `src/magickit/mcp/tools/chatroom.py` に集約。
 

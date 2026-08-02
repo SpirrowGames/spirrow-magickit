@@ -184,6 +184,63 @@ async def test_close_thread_payload(adapter: ChatroomAdapter) -> None:
     assert body["affects_threads"] == ["T-other"]
 
 
+# ---- role forwarding (msg-017 I-1) ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_paths_forward_role_when_supplied(
+    adapter: ChatroomAdapter,
+) -> None:
+    """All three write endpoints put `role` on the wire.
+
+    Conclair accepts `role` on OpenThreadRequest / PostMessageRequest /
+    CloseThreadRequest (PR#5). If the adapter dropped it on any one of
+    them, that path would silently record role=NULL after passing the gate.
+    """
+    for method, kwargs, path in (
+        (
+            "open_thread",
+            dict(project="p", thread_id="T-1", title="t", owner="a",
+                 propose_content="hi", role="proposer"),
+            "/v1/projects/p/threads",
+        ),
+        (
+            "post_message",
+            dict(project="p", thread_id="T-1", type="report", author="a",
+                 content="c", role="implementer"),
+            "/v1/projects/p/threads/T-1/messages",
+        ),
+        (
+            "close_thread",
+            dict(project="p", thread_id="T-1", summary_content="done",
+                 author="a", role="proposer"),
+            "/v1/projects/p/threads/T-1/close",
+        ),
+    ):
+        request_mock = _patch_request(adapter, _resp(201, {}))
+        await getattr(adapter, method)(**kwargs)
+        call = request_mock.call_args
+        assert call.args[1] == path
+        assert call.kwargs["json"]["role"] == kwargs["role"], method
+
+
+@pytest.mark.asyncio
+async def test_write_paths_omit_role_when_none(adapter: ChatroomAdapter) -> None:
+    """role=None must be absent from the body, not sent as JSON null --
+    same thin-wrapper convention the other optional fields follow."""
+    for method, kwargs in (
+        ("open_thread", dict(project="p", thread_id="T-1", title="t",
+                             owner="a", propose_content="hi")),
+        ("post_message", dict(project="p", thread_id="T-1", type="report",
+                              author="a", content="c")),
+        ("close_thread", dict(project="p", thread_id="T-1",
+                              summary_content="done", author="a")),
+    ):
+        request_mock = _patch_request(adapter, _resp(201, {}))
+        await getattr(adapter, method)(**kwargs)
+        assert "role" not in request_mock.call_args.kwargs["json"], method
+
+
 # ---- list_threads -----------------------------------------------------
 
 

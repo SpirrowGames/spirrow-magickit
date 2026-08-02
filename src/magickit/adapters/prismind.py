@@ -909,6 +909,54 @@ class PrismindAdapter(MCPBaseAdapter):
 
         return self._parse_json_result(result)
 
+    async def get_identity(
+        self,
+        identity_name: str,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Look up one identity record by name (cross-project, read-only).
+
+        Backs Magickit's role × allowed_roles gate. Deliberately does NOT go
+        through ``list_context_authors``: that call is project-scoped and
+        enumerates saved session state, so an identity registered but never
+        checkpointed in the queried project is simply absent from it. Reading
+        the gate's input from there would report such an actor as
+        "unregistered" and skip the check — measured on 2026-08-02,
+        ``list_context_authors("spirrow-magickit")`` returns Bohr / Heisenberg
+        / "" while ``Einstein`` and ``human`` are registered identities that do
+        not appear.
+
+        Args:
+            identity_name: Stable identity slug (same value as the chatroom
+                ``author`` / ``owner`` string).
+            user: Owning user. Empty defers to Prismind's configured
+                ``user_name`` — the same fallback ``upsert_identity`` applies,
+                so a record registered without an explicit user is readable
+                without one.
+
+        Returns:
+            ``{"success": bool, "found": bool, "identity": dict | None,
+            "message": str}``. ``success=True, found=False`` is a well-formed
+            "not registered" answer; ``success=False`` (or an ``error_type``
+            envelope) means the lookup could not be performed and callers must
+            NOT treat it as a permissive verdict.
+
+        Raises:
+            RuntimeError: transport-level failure (connection / timeout).
+        """
+        if not identity_name:
+            raise ValueError("identity_name is required")
+
+        arguments: dict[str, Any] = {"identity_name": identity_name}
+        if user:
+            arguments["user"] = user
+
+        success, result = await self._call_tool_safe("get_identity", arguments)
+        if not success:
+            raise RuntimeError(f"get_identity failed: {result}")
+
+        return self._parse_json_result(result)
+
     async def upsert_identity(
         self,
         identity_name: str,
