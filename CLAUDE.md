@@ -312,12 +312,14 @@ identity (Bohr / Heisenberg / Einstein / human) は `upsert_identity` でクロ�
 | 呼び出し | 挙動 |
 |---|---|
 | `role` 省略 | 検証しない・`role=null` で記録 (I-3 legacy 互換)。identity lookup も行わない |
-| `role` 指定 ∧ identity 未登録 | 検証 skip (legacy actor)。lookup は成功しており「該当なし」という確定回答 |
+| `role` 指定 ∧ identity 未登録 | **msg は通す** (I-3 legacy actor を拒否しない)。ただし検証を経ていない `role` は記録せず `role=null` にする。lookup は成功しており「該当なし」という確定回答 |
 | `role` 指定 ∧ `allowed_roles` 内 | 通す。`role` を Conclair に記録 |
 | `role` 指定 ∧ `allowed_roles` 外 | `RoleNotAllowed` envelope で reject、msg は書かない |
 | `role` 指定 ∧ identity lookup 失敗 | `RoleValidationUnavailableError` で reject。**未検証の role を記録しない** |
 
 ∴ 不変条件は「`messages.role` が非 null ⇔ その値は allowed_roles 検証を通っている」。gate は供給側 opt-in なので、**caller が `role` を渡さない限り発火しない** (msg-017 §4 I-6 = 実 caller の role 供給は本 PR のスコープ外・別途)。
+
+未登録 author の行を「素通り (role をそのまま記録)」にすると、この不変条件は**未登録の author 名を選ぶだけで破れる** = gate は協力的な登録済 identity だけを縛る (T-pr-review-11 msg-026)。∴ 通すのは msg であって role ではない。legacy 互換は損なわれない — `role` パラメータ自体が本変更で新設されるので、**legacy caller は構造的に `role` を渡せない**。副次的に、Prismind が別 `user_name` で再起動されて partition がずれた場合、全 lookup が「未登録」に落ちるので main-chain の `role` が**記録されなくなる** (= 欠落として可視。I-6 の反証条件がそのまま検出器になる) — 未検証 role が検証済と区別不能な形で溜まるのではなく。
 
 identity の解決は Prismind の `get_identity` (単一レコード・project 横断) を使う。`list_context_authors` は project スコープで SessionState partition を列挙するため、**登録済だがその project で checkpoint していない identity は現れない** (実測 2026-08-02: `spirrow-magickit` の listing は Bohr / Heisenberg / `""` のみで、登録済の `Einstein` / `human` は不在)。そちらを gate の入力にすると、まさに止めるべき actor が「未登録」と判定されて素通りする。
 

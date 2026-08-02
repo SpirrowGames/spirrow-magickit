@@ -246,18 +246,86 @@ async def test_role_omitted_is_allowed_and_skips_lookup(wired) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unregistered_identity_is_allowed_any_role(wired) -> None:
-    """I-3: an author with no identity record is a legacy actor -> skip."""
+async def test_unregistered_identity_posts_but_its_role_is_not_recorded(wired) -> None:
+    """I-3 + the invariant, in the one place they pull against each other.
+
+    An author with no identity record is a legacy actor, so the *message*
+    must not be refused. But its role was never validated, so recording it
+    would create the third state the invariant rules out -- and one reachable
+    by simply choosing an unregistered author name, which would leave the
+    gate binding only the identities that cooperate. Post: yes. Role: null.
+
+    Falsified if the message is rejected, or if "anything" reaches Conclair.
+    """
     tools, chat, prismind = wired
     prismind.get_identity.return_value = _UNREGISTERED
 
-    await tools["chatroom_post_message"](
+    result = await tools["chatroom_post_message"](
         project="p", thread_id="T-1", msg_type="report", author="claude-code",
         content="c", role="anything",
     )
 
+    assert "error_type" not in result
     chat.post_message.assert_awaited_once()
-    assert chat.post_message.call_args.kwargs["role"] == "anything"
+    assert chat.post_message.call_args.kwargs["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_unregistered_identity_role_is_not_recorded_on_open_thread(wired) -> None:
+    """Same rule on the open path: the thread opens, the role does not stick."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _UNREGISTERED
+
+    result = await tools["chatroom_open_thread"](
+        project="p", thread_id="T-1", title="t", owner="claude-code",
+        propose_content="hi", role="proposer",
+    )
+
+    assert "error_type" not in result
+    chat.open_thread.assert_awaited_once()
+    assert chat.open_thread.call_args.kwargs["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_unregistered_identity_role_is_not_recorded_on_close(wired) -> None:
+    """Same rule on the close path -- otherwise close is the way around it."""
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _UNREGISTERED
+
+    result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="claude-code",
+        embodiment="terminal_coding_agent", role="naysayer",
+    )
+
+    assert "error_type" not in result
+    chat.close_thread.assert_awaited_once()
+    assert chat.close_thread.call_args.kwargs["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_partition_drift_shows_up_as_missing_roles_not_as_unverified_ones(
+    wired,
+) -> None:
+    """The failure mode Bohr's post-deploy live check cannot catch.
+
+    If Prismind is restarted resolving a different ``user_name``, every
+    identity lookup answers found=false -- including for main-chain actors.
+    Under a pass-through rule that degrades silently to "everything is
+    allowed" while the data still looks verified. Under this rule the roles
+    stop being written, so the drift is visible in the thread itself: it is
+    exactly I-6's falsification condition (post-merge Bohr / Heisenberg /
+    Einstein posts carry a non-null role) going red.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity.return_value = _UNREGISTERED  # empty partition
+
+    await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="Einstein",
+        content="c", role="naysayer",
+    )
+
+    chat.post_message.assert_awaited_once()
+    assert chat.post_message.call_args.kwargs["role"] is None
 
 
 @pytest.mark.asyncio

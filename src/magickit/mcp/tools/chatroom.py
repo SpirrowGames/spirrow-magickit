@@ -10,7 +10,7 @@ envelope (`{error_type, error, details}`) when the upstream returned
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from fastmcp import FastMCP
 
@@ -415,7 +415,7 @@ def _prismind_adapter() -> PrismindAdapter:
 # The gate is deliberately opt-in on the *supply* side and mandatory on the
 # *validation* side:
 #
-#   role omitted   -> no lookup, no check, forward nothing. This is I-3
+#   role omitted   -> no lookup, no check, record null. This is I-3
 #                     (legacy compatibility): every caller predating this
 #                     change keeps working, and the identity service is not
 #                     on the critical path of an unrelated post.
@@ -432,6 +432,25 @@ def _prismind_adapter() -> PrismindAdapter:
 # invisible in the data afterwards (an unverified role is byte-identical to a
 # verified one). Callers that genuinely cannot reach the identity service can
 # still post -- by omitting `role`, which records the absence honestly.
+#
+# The unregistered-author case (I-3) is resolved the same way, and this is the
+# one place where the gate's two halves pull against each other (T-pr-review-11
+# msg-026): the post must still go through (msg-002 §2.3 "legacy actors are
+# always let through"), but the role it claimed was never checked. Writing that
+# claim into `messages.role` would create exactly the third state the invariant
+# above rules out -- and it would be *reachable by choosing an unregistered
+# author name*, i.e. the check would bind only the cooperative. So the post is
+# allowed and the unverified role is dropped: `role=null`, the same honest
+# "unverified" marker every pre-gate message carries. Nothing a legacy caller
+# could previously do is refused -- a legacy caller cannot supply `role` at
+# all, since this change is what introduces the parameter.
+#
+# Second-order property, load-bearing enough to write down: this makes
+# identity-partition drift *visible*. If Prismind is later restarted resolving
+# a different `user_name`, every lookup answers found=false, so main-chain
+# roles stop being recorded rather than being recorded unverified -- the
+# absence shows up directly in the thread (I-6's own falsification condition)
+# instead of degrading into silent all-pass.
 
 
 def _role_not_allowed_error(
@@ -478,8 +497,27 @@ def _role_validation_unavailable_error(*, author: str, role: str, reason: str) -
     }
 
 
-async def _check_role_allowed(*, author: str, role: str) -> dict[str, Any] | None:
-    """Run the role × allowed_roles gate. Return an error envelope, or None to allow.
+class _RoleDecision(NamedTuple):
+    """What the gate decided: block, or the role value that may be recorded.
+
+    Two fields rather than a bare ``error | None`` so that the write paths
+    cannot forward the caller's raw ``role``: the only value they are given
+    is ``role``, which is non-null exclusively on the verified branch.
+
+    - ``error`` set   -> return it, write nothing.
+    - ``role`` str    -> validated against ``allowed_roles``; record it.
+    - ``role`` None   -> the write proceeds, recording ``role=null``.
+    """
+
+    error: dict[str, Any] | None
+    role: str | None
+
+
+_ALLOW_WITHOUT_ROLE = _RoleDecision(error=None, role=None)
+
+
+async def _check_role_allowed(*, author: str, role: str) -> _RoleDecision:
+    """Run the role × allowed_roles gate and decide what may be recorded.
 
     Resolution goes through Prismind's ``get_identity`` (single-record,
     cross-project) rather than ``list_context_authors``. The latter is
@@ -489,13 +527,16 @@ async def _check_role_allowed(*, author: str, role: str) -> dict[str, Any] | Non
     gate's input from the project-scoped listing would classify the actor the
     gate exists to stop as "unregistered" and skip the check.
 
-    Allow cases:
-    - ``role`` empty -> caller opted out (I-3); no lookup is performed.
-    - identity not registered -> legacy actor, skip (I-3).
-    - role present in ``allowed_roles`` -> pass.
+    Outcomes:
+    - ``role`` empty -> caller opted out (I-3); no lookup, record null.
+    - identity not registered -> legacy actor: the write is allowed (I-3) but
+      the unverified role is **not** recorded (see the section comment above).
+    - role present in ``allowed_roles`` -> record the role.
+    - role absent from ``allowed_roles`` -> ``RoleNotAllowed``, write nothing.
+    - lookup unusable -> ``RoleValidationUnavailableError``, write nothing.
     """
     if not role:
-        return None
+        return _ALLOW_WITHOUT_ROLE
 
     prismind = _prismind_adapter()
     try:
@@ -504,38 +545,59 @@ async def _check_role_allowed(*, author: str, role: str) -> dict[str, Any] | Non
         logger.warning(
             "Role validation lookup failed", author=author, role=role, error=str(e)
         )
-        return _role_validation_unavailable_error(author=author, role=role, reason=str(e))
+        return _RoleDecision(
+            _role_validation_unavailable_error(author=author, role=role, reason=str(e)),
+            None,
+        )
 
     if not isinstance(result, dict):
-        return _role_validation_unavailable_error(
-            author=author, role=role, reason="unexpected response from Prismind"
+        return _RoleDecision(
+            _role_validation_unavailable_error(
+                author=author, role=role, reason="unexpected response from Prismind"
+            ),
+            None,
         )
     if "error_type" in result:
-        return _role_validation_unavailable_error(
-            author=author, role=role,
-            reason=f"{result['error_type']}: {result.get('error', '')}",
+        return _RoleDecision(
+            _role_validation_unavailable_error(
+                author=author, role=role,
+                reason=f"{result['error_type']}: {result.get('error', '')}",
+            ),
+            None,
         )
     if not result.get("success", False):
-        return _role_validation_unavailable_error(
-            author=author, role=role,
-            reason=result.get("message") or "identity lookup reported failure",
+        return _RoleDecision(
+            _role_validation_unavailable_error(
+                author=author, role=role,
+                reason=result.get("message") or "identity lookup reported failure",
+            ),
+            None,
         )
 
     if not result.get("found", False):
-        # Legacy / unregistered author: skip (I-3). Not a silent hole -- the
-        # lookup succeeded and gave a definite "no such identity" answer.
-        logger.info(
-            "Role check skipped: identity not registered", author=author, role=role
+        # Legacy / unregistered author: the post is allowed (I-3), but the
+        # role was never validated, so it is dropped rather than persisted as
+        # if it had been. WARNING, not INFO: the caller asked for something
+        # that did not happen, and if this fires for a main-chain identity it
+        # is the signature of identity-partition drift, not of legacy traffic.
+        logger.warning(
+            "Role not recorded: identity not registered",
+            author=author,
+            requested_role=role,
+            recorded_role=None,
         )
-        return None
+        return _ALLOW_WITHOUT_ROLE
 
     identity = result.get("identity") or {}
     allowed_roles = list(identity.get("allowed_roles") or [])
     if role not in allowed_roles:
-        return _role_not_allowed_error(
-            author=author, role=role, allowed_roles=allowed_roles
+        return _RoleDecision(
+            _role_not_allowed_error(
+                author=author, role=role, allowed_roles=allowed_roles
+            ),
+            None,
         )
-    return None
+    return _RoleDecision(None, role)
 
 
 def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
@@ -601,7 +663,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             role: role ``owner`` is acting under for the propose msg (e.g.
                 "proposer"). Optional. When supplied it is validated
                 against the identity's ``allowed_roles`` and recorded on
-                the msg; when omitted nothing is checked or recorded.
+                the msg; when omitted nothing is checked or recorded. An
+                unregistered ``owner`` still opens the thread, but the
+                unvalidated role is recorded as null rather than as given.
                 Validated against ``owner``, who authors the propose msg.
 
         Returns:
@@ -611,9 +675,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
              "details": {...}}, or "RoleNotAllowed" /
             "RoleValidationUnavailableError" from the role gate.
         """
-        role_error = await _check_role_allowed(author=owner, role=role)
-        if role_error is not None:
-            return role_error
+        gate = await _check_role_allowed(author=owner, role=role)
+        if gate.error is not None:
+            return gate.error
 
         adapter = _adapter()
         try:
@@ -626,7 +690,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
-                role=role or None,
+                role=gate.role,
             )
         finally:
             await adapter.close()
@@ -682,7 +746,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         - supplied -> checked against the identity's ``allowed_roles``
           before anything is written. A role the identity may not assume is
           rejected with ``RoleNotAllowed`` and no message is created.
-        - an author with no registered identity is not checked (legacy).
+        - supplied by an author with no registered identity -> the message is
+          posted (legacy actors are never refused) but the unverified role is
+          dropped, i.e. recorded as null.
         A recorded role therefore always means "this was verified".
 
         NOTE: this parameter is named `msg_type` (not `type`) because
@@ -715,9 +781,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         ):
             return _embodiment_required_error(msg_kind=f"msg_type={msg_type}")
 
-        role_error = await _check_role_allowed(author=author, role=role)
-        if role_error is not None:
-            return role_error
+        gate = await _check_role_allowed(author=author, role=role)
+        if gate.error is not None:
+            return gate.error
 
         adapter = _adapter()
         try:
@@ -755,7 +821,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
-                role=role or None,
+                role=gate.role,
                 owner_override=owner_override,
                 owner_override_reason=owner_override_reason_out,
             )
@@ -807,7 +873,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 and recorded on the emitted decide msg. Close emits a
                 decide, so it carries the same role gate as post_message
                 (msg-017 I-4) -- an out-of-allowed_roles close is rejected
-                with ``RoleNotAllowed``. NOTE: this is the role×allowed_roles
+                with ``RoleNotAllowed``, and an unregistered author's
+                unvalidated role is recorded as null rather than as given.
+                NOTE: this is the role×allowed_roles
                 check only. The second-stage ``closeable_roles`` check
                 ({implementer, integrator, proposer}, msg-003 D-3) is P3 and
                 is NOT implemented here; a naysayer-only identity can still
@@ -843,9 +911,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         # I-4: the emitted decide is a message like any other, so the role
         # gate applies here too -- otherwise close would be a bypass.
-        role_error = await _check_role_allowed(author=author, role=role)
-        if role_error is not None:
-            return role_error
+        gate = await _check_role_allowed(author=author, role=role)
+        if gate.error is not None:
+            return gate.error
 
         adapter = _adapter()
         try:
@@ -871,7 +939,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
-                role=role or None,
+                role=gate.role,
                 owner_override=policy["owner_override"],
                 owner_override_reason=policy["owner_override_reason"],
             )
