@@ -15,6 +15,7 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 
 from magickit.adapters.chatroom import ChatroomAdapter
+from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
 
@@ -34,6 +35,15 @@ HUMAN_IDENTITY_NAMES = ("human",)
 # msg types whose post requires an embodiment declaration (state-
 # transitioning per msg-325 §4 N-2 取り込み). close_thread emits a
 # decide internally so it's enforced separately by the close wrapper.
+#
+# G-01 (Einstein, msg-014 / accepted msg-015, msg-016 §1): why `ack` is in
+# the mandatory set is not self-evident, so record it here rather than let a
+# future reader infer "ack is passive, make it optional". All three entries
+# move thread.status (msg-325 §4 / ADR-2026-05-29-12):
+#   handoff: active          -> awaiting_reply
+#   ack:     awaiting_reply  -> active          (the reverse transition)
+#   decide:  active/awaiting_reply -> resolved  (paired with closes_thread)
+# `ack` earns its place by being a state transition, not by being effortful.
 MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
 
 # --- design-decide naysayer gate ---------------------------------------
@@ -362,6 +372,147 @@ def _adapter() -> ChatroomAdapter:
     )
 
 
+def _prismind_adapter() -> PrismindAdapter:
+    if _settings is None:
+        raise RuntimeError("Settings not initialized")
+    return PrismindAdapter(
+        sse_url=_settings.prismind_url,
+        timeout=_settings.prismind_timeout,
+    )
+
+
+# --- role × allowed_roles gate -----------------------------------------
+#
+# msg-002 §2.3 / msg-017 I-1..I-4. Magickit is the sole enforcement point
+# (F-04): Prismind persists the identity record, Conclair persists the
+# per-message `role` column, neither validates.
+#
+# The gate is deliberately opt-in on the *supply* side and mandatory on the
+# *validation* side:
+#
+#   role omitted   -> no lookup, no check, forward nothing. This is I-3
+#                     (legacy compatibility): every caller predating this
+#                     change keeps working, and the identity service is not
+#                     on the critical path of an unrelated post.
+#   role supplied  -> the check MUST actually run. A supplied role that
+#                     reaches Conclair is therefore a role that passed
+#                     validation -- `messages.role IS NOT NULL` implies "an
+#                     allowed_roles check succeeded", with no third state
+#                     where the value was recorded but unverified.
+#
+# That second half is why a failed lookup blocks instead of falling through.
+# msg-017 §2 diagnosed the shape of failure this design has to avoid: a gate
+# that ships, looks armed, and silently never fires. "Prismind was
+# unreachable so we let it through" would reintroduce exactly that, and be
+# invisible in the data afterwards (an unverified role is byte-identical to a
+# verified one). Callers that genuinely cannot reach the identity service can
+# still post -- by omitting `role`, which records the absence honestly.
+
+
+def _role_not_allowed_error(
+    *, author: str, role: str, allowed_roles: list[str]
+) -> dict[str, Any]:
+    """I-2 rejection: a registered identity used a role it may not assume.
+
+    ``error_type`` is ``RoleNotAllowed`` verbatim per msg-002 §2.3 and
+    msg-017 I-2 (both name that exact string as the falsification target).
+    Note it lacks the ``Error`` suffix the sibling envelopes in this module
+    use; the spec's literal is preserved over local naming symmetry.
+    """
+    return {
+        "error_type": "RoleNotAllowed",
+        "error": (
+            f"identity {author!r} is not allowed to act as role {role!r} "
+            f"(allowed_roles={allowed_roles}). Post under one of the allowed "
+            "roles, or update the identity record with upsert_identity."
+        ),
+        "details": {
+            "author": author,
+            "role": role,
+            "allowed_roles": list(allowed_roles),
+        },
+    }
+
+
+def _role_validation_unavailable_error(*, author: str, role: str, reason: str) -> dict[str, Any]:
+    """The gate could not run, so the write is refused rather than waved through.
+
+    Distinct ``error_type`` from ``RoleNotAllowed``: this is not a verdict
+    about the author, it is the absence of one. Retrying without ``role``
+    succeeds and records ``role=null`` -- an honest "unverified" marker --
+    which is the intended fallback when the identity service is down.
+    """
+    return {
+        "error_type": "RoleValidationUnavailableError",
+        "error": (
+            f"cannot validate role {role!r} for identity {author!r}: the identity "
+            f"lookup failed ({reason}). The role is not recorded unverified; "
+            "retry, or post without `role` to record role=null."
+        ),
+        "details": {"author": author, "role": role, "reason": reason},
+    }
+
+
+async def _check_role_allowed(*, author: str, role: str) -> dict[str, Any] | None:
+    """Run the role × allowed_roles gate. Return an error envelope, or None to allow.
+
+    Resolution goes through Prismind's ``get_identity`` (single-record,
+    cross-project) rather than ``list_context_authors``. The latter is
+    project-scoped and enumerates saved session state, so an identity that is
+    registered but has never checkpointed in this project is absent from it --
+    ``Einstein`` in ``spirrow-magickit`` is exactly that case. Reading the
+    gate's input from the project-scoped listing would classify the actor the
+    gate exists to stop as "unregistered" and skip the check.
+
+    Allow cases:
+    - ``role`` empty -> caller opted out (I-3); no lookup is performed.
+    - identity not registered -> legacy actor, skip (I-3).
+    - role present in ``allowed_roles`` -> pass.
+    """
+    if not role:
+        return None
+
+    prismind = _prismind_adapter()
+    try:
+        result = await prismind.get_identity(identity_name=author)
+    except Exception as e:  # transport failure, unknown tool, timeout, ...
+        logger.warning(
+            "Role validation lookup failed", author=author, role=role, error=str(e)
+        )
+        return _role_validation_unavailable_error(author=author, role=role, reason=str(e))
+
+    if not isinstance(result, dict):
+        return _role_validation_unavailable_error(
+            author=author, role=role, reason="unexpected response from Prismind"
+        )
+    if "error_type" in result:
+        return _role_validation_unavailable_error(
+            author=author, role=role,
+            reason=f"{result['error_type']}: {result.get('error', '')}",
+        )
+    if not result.get("success", False):
+        return _role_validation_unavailable_error(
+            author=author, role=role,
+            reason=result.get("message") or "identity lookup reported failure",
+        )
+
+    if not result.get("found", False):
+        # Legacy / unregistered author: skip (I-3). Not a silent hole -- the
+        # lookup succeeded and gave a definite "no such identity" answer.
+        logger.info(
+            "Role check skipped: identity not registered", author=author, role=role
+        )
+        return None
+
+    identity = result.get("identity") or {}
+    allowed_roles = list(identity.get("allowed_roles") or [])
+    if role not in allowed_roles:
+        return _role_not_allowed_error(
+            author=author, role=role, allowed_roles=allowed_roles
+        )
+    return None
+
+
 def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
     """Magickit-side embodiment-required rejection envelope.
 
@@ -399,6 +550,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         tags: list[str] | None = None,
         commit_ref: str = "",
         embodiment: str = "",
+        role: str = "",
     ) -> dict[str, Any]:
         """Open a new chatroom thread (creates the thread + propose msg).
 
@@ -421,13 +573,23 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 for ``propose`` (Einstein N-3 / msg-325 §4: propose is
                 covered by the receiver here but not in the mandatory
                 set). Recorded on the propose msg if supplied.
+            role: role ``owner`` is acting under for the propose msg (e.g.
+                "proposer"). Optional. When supplied it is validated
+                against the identity's ``allowed_roles`` and recorded on
+                the msg; when omitted nothing is checked or recorded.
+                Validated against ``owner``, who authors the propose msg.
 
         Returns:
             On success: {"thread": {...}, "msg": {...}}.
             On failure: conclair error envelope
             {"error_type": "ChatroomIntegrityError", "error": "...",
-             "details": {...}}.
+             "details": {...}}, or "RoleNotAllowed" /
+            "RoleValidationUnavailableError" from the role gate.
         """
+        role_error = await _check_role_allowed(author=owner, role=role)
+        if role_error is not None:
+            return role_error
+
         adapter = _adapter()
         try:
             return await adapter.open_thread(
@@ -439,6 +601,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
+                role=role or None,
             )
         finally:
             await adapter.close()
@@ -459,6 +622,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         tags: list[str] | None = None,
         commit_ref: str = "",
         embodiment: str = "",
+        role: str = "",
         naysayer_override_reason: str = "",
         owner_override_reason: str = "",
     ) -> dict[str, Any]:
@@ -486,6 +650,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
           humans don't operate Magickit as a calling agent)
         - optional for question / answer / report (recorded if supplied)
 
+        role (ADR-2026-05-27-09 / msg-002 §2.3): the role ``author`` is
+        acting under for THIS message (e.g. "proposer" / "implementer" /
+        "naysayer"). Optional, but not merely decorative:
+        - omitted -> nothing is validated and ``role`` is recorded as null.
+        - supplied -> checked against the identity's ``allowed_roles``
+          before anything is written. A role the identity may not assume is
+          rejected with ``RoleNotAllowed`` and no message is created.
+        - an author with no registered identity is not checked (legacy).
+        A recorded role therefore always means "this was verified".
+
         NOTE: this parameter is named `msg_type` (not `type`) because
         some MCP clients reject schemas that use `type` as a property
         name — they collide with JSON Schema's own `type` keyword.
@@ -501,17 +675,24 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
-            On failure (embodiment missing, naysayer gate, conclair
-            error, ...): error_type envelope.
+            On failure (embodiment missing, role not allowed, naysayer
+            gate, conclair error, ...): error_type envelope.
         """
         # Magickit-side enforcement (F-04: Magickit is the sole role/
         # embodiment validation point; Conclair only persists).
+        # Ordered cheapest-first: the embodiment rule is a pure parameter
+        # check, the role gate costs one Prismind round-trip, and the close
+        # policies cost a Conclair read. All three precede any write.
         if (
             msg_type in MANDATORY_EMBODIMENT_MSG_TYPES
             and author not in HUMAN_IDENTITY_NAMES
             and not embodiment
         ):
             return _embodiment_required_error(msg_kind=f"msg_type={msg_type}")
+
+        role_error = await _check_role_allowed(author=author, role=role)
+        if role_error is not None:
+            return role_error
 
         adapter = _adapter()
         try:
@@ -549,6 +730,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
+                role=role or None,
                 owner_override=owner_override,
                 owner_override_reason=owner_override_reason_out,
             )
@@ -566,6 +748,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         tags: list[str] | None = None,
         commit_ref: str = "",
         embodiment: str = "",
+        role: str = "",
         naysayer_override_reason: str = "",
         owner_override_reason: str = "",
     ) -> dict[str, Any]:
@@ -594,6 +777,17 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             affects_threads: optional list of thread_ids this decision
                 impacts; recorded on the thread row.
             embodiment: see above. Mandatory for non-human authors.
+            role: role ``author`` is acting under. Optional; when supplied
+                it is validated against the identity's ``allowed_roles``
+                and recorded on the emitted decide msg. Close emits a
+                decide, so it carries the same role gate as post_message
+                (msg-017 I-4) -- an out-of-allowed_roles close is rejected
+                with ``RoleNotAllowed``. NOTE: this is the role×allowed_roles
+                check only. The second-stage ``closeable_roles`` check
+                ({implementer, integrator, proposer}, msg-003 D-3) is P3 and
+                is NOT implemented here; a naysayer-only identity can still
+                close a thread it owns as long as it does not claim a role
+                outside its own allowed_roles.
             naysayer_override_reason: human-only override of the naysayer
                 gate. Non-empty engages the override (reason mandatory);
                 ignored on non-gated threads. A non-human author supplying
@@ -609,6 +803,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             On success: {"thread": {... status=resolved ...},
                          "decide_msg": {...}}.
             On failure (embodiment missing -> EmbodimentRequiredError,
+            role gate -> RoleNotAllowed /
+            RoleValidationUnavailableError,
             naysayer gate -> NaysayerReviewRequiredError /
             NaysayerReviewStaleError / NaysayerChangesRequestedError /
             NaysayerOverrideForbiddenError, owner-override reason missing ->
@@ -619,6 +815,12 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         # rule as msg_type="decide" on post_message.
         if author not in HUMAN_IDENTITY_NAMES and not embodiment:
             return _embodiment_required_error(msg_kind="close_thread (emits decide)")
+
+        # I-4: the emitted decide is a message like any other, so the role
+        # gate applies here too -- otherwise close would be a bypass.
+        role_error = await _check_role_allowed(author=author, role=role)
+        if role_error is not None:
+            return role_error
 
         adapter = _adapter()
         try:
@@ -644,6 +846,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
+                role=role or None,
                 owner_override=policy["owner_override"],
                 owner_override_reason=policy["owner_override_reason"],
             )

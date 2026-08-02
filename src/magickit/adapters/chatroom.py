@@ -79,6 +79,7 @@ class ChatroomAdapter(BaseAdapter):
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
         embodiment: str | None = None,
+        role: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "thread_id": thread_id,
@@ -94,6 +95,8 @@ class ChatroomAdapter(BaseAdapter):
             body["timestamp"] = self._isoformat(timestamp)
         if embodiment is not None:
             body["embodiment"] = embodiment
+        if role is not None:
+            body["role"] = role
         return await self._request_json(
             "POST", f"/v1/projects/{project}/threads", json=body
         )
@@ -114,6 +117,7 @@ class ChatroomAdapter(BaseAdapter):
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
         embodiment: str | None = None,
+        role: str | None = None,
         owner_override: bool = False,
         owner_override_reason: str | None = None,
     ) -> dict[str, Any]:
@@ -142,6 +146,8 @@ class ChatroomAdapter(BaseAdapter):
             body["timestamp"] = self._isoformat(timestamp)
         if embodiment is not None:
             body["embodiment"] = embodiment
+        if role is not None:
+            body["role"] = role
         return await self._request_json(
             "POST",
             f"/v1/projects/{project}/threads/{thread_id}/messages",
@@ -161,6 +167,7 @@ class ChatroomAdapter(BaseAdapter):
         commit_ref: str | None = None,
         timestamp: datetime | str | None = None,
         embodiment: str | None = None,
+        role: str | None = None,
         owner_override: bool = False,
         owner_override_reason: str | None = None,
     ) -> dict[str, Any]:
@@ -184,6 +191,8 @@ class ChatroomAdapter(BaseAdapter):
             body["timestamp"] = self._isoformat(timestamp)
         if embodiment is not None:
             body["embodiment"] = embodiment
+        if role is not None:
+            body["role"] = role
         return await self._request_json(
             "POST",
             f"/v1/projects/{project}/threads/{thread_id}/close",
