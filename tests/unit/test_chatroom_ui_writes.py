@@ -348,14 +348,42 @@ async def test_conclair_error_envelope_is_rendered_not_swallowed():
 # --- routing ------------------------------------------------------------
 
 
-def test_write_routes_are_claimed_before_the_read_proxy():
-    """A POST must not fall through to Conclair's own ungated handler."""
-    routes = [
-        (getattr(r, "path", None), getattr(r, "methods", set()) or set())
-        for r in create_app().router.routes
-    ]
-    post_paths = [p for p, m in routes if "POST" in m and p and p.startswith("/ui/")]
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,form",
+    [
+        (
+            f"/ui/projects/{PROJECT}/threads",
+            {"thread_id": THREAD, "title": "t", "owner": "a", "propose_content": "c"},
+        ),
+        (
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {"type": "question", "author": "a", "content": "c"},
+        ),
+        (
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/close",
+            {"author": "human", "summary_content": "s"},
+        ),
+    ],
+)
+async def test_every_write_route_is_claimed_by_the_gated_handler(
+    path: str, form: dict[str, str]
+):
+    """A POST must be handled here, not forwarded to Conclair's ungated one.
 
-    assert f"/ui/projects/{{project}}/threads" in post_paths
-    assert "/ui/projects/{project}/threads/{thread_id}/messages" in post_paths
-    assert "/ui/projects/{project}/threads/{thread_id}/close" in post_paths
+    Proven by making the gate refuse and seeing its envelope come back: only
+    Magickit's handler consults the gate, so the envelope is evidence the
+    request never reached the proxy. Asserted this way rather than by reading
+    the route table, whose shape varies across Starlette versions.
+    """
+    envelope = {"error_type": "RoleNotAllowed", "error": "sentinel"}
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _blocking_gate(envelope)),
+        patch.object(chatroom_tools, "_check_close_permitted", _blocking_gate(envelope)),
+        patch.object(chatroom_tools, "_adapter", return_value=AsyncMock()),
+    ):
+        response = await _post(path, form)
+
+    assert response.status_code == 200
+    assert "sentinel" in response.text

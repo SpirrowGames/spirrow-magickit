@@ -95,12 +95,27 @@ async def test_query_string_survives_the_hop():
 # --- route ordering vs. Magickit's own /static --------------------------
 
 
-def test_conclair_assets_are_registered_before_the_static_mount():
-    """Starlette matches in insertion order; losing this ordering 404s the UI."""
-    paths = [getattr(route, "path", None) for route in create_app().router.routes]
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "asset", ["/static/css/conclair.css", "/static/js/conclair.js"]
+)
+async def test_conclair_assets_win_over_magickit_static_mount(asset: str):
+    """Conclair's two assets must reach the proxy, not Magickit's own mount.
 
-    assert paths.index("/static/css/conclair.css") < paths.index("/static")
-    assert paths.index("/static/js/conclair.js") < paths.index("/static")
+    Asserted through the response rather than by reading route order:
+    Starlette's routing internals differ enough between versions that
+    introspection here has been fragile, while the behaviour is the actual
+    invariant -- if the mount won, the UI would load unstyled.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="/* from conclair */")
+
+    _install_upstream(handler)
+    response = await _get(asset)
+
+    assert response.status_code == 200
+    assert response.text == "/* from conclair */"
 
 
 @pytest.mark.asyncio
