@@ -29,6 +29,8 @@ from magickit.core.state_manager import StateManager
 from magickit.core.task_queue import TaskQueue
 from magickit.core.workspace_manager import WorkspaceManager
 from magickit.utils.logging import configure_logging, get_logger
+from magickit.web import close_client as close_chatroom_ui_client
+from magickit.web import router as chatroom_ui_router
 
 logger = get_logger(__name__)
 
@@ -146,6 +148,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("Shutting down Magickit")
+    await close_chatroom_ui_client()
     await state_manager.close()
 
 
@@ -176,6 +179,12 @@ def create_app() -> FastAPI:
     # Phase 2: Add auth middleware (will be configured in lifespan)
     # Note: We need to defer JWT handler creation to lifespan
     # For now, middleware will check app.state for configuration
+
+    # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
+    # Starlette matches routes in insertion order, and this router claims the
+    # two Conclair assets (conclair.css / conclair.js) that would otherwise
+    # fall into Magickit's own /static mount and 404 there.
+    app.include_router(chatroom_ui_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():
