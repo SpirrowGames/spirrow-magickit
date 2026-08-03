@@ -29,6 +29,11 @@ from magickit.core.state_manager import StateManager
 from magickit.core.task_queue import TaskQueue
 from magickit.core.workspace_manager import WorkspaceManager
 from magickit.utils.logging import configure_logging, get_logger
+from magickit.mcp.tools import chatroom as chatroom_tools
+from magickit.web import close_client as close_chatroom_ui_client
+from magickit.web import dashboard_router as chatroom_dashboard_router
+from magickit.web import router as chatroom_ui_router
+from magickit.web import writes_router as chatroom_writes_router
 
 logger = get_logger(__name__)
 
@@ -62,6 +67,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         host=settings.host,
         port=settings.port,
     )
+
+    # Bind settings for the chatroom gates. The MCP process does this via
+    # register_tools; this process serves the browser write path, which runs
+    # the same gates and would otherwise find them unconfigured.
+    chatroom_tools.configure(settings)
 
     # Initialize state manager
     state_manager = StateManager(db_path=settings.db_path)
@@ -146,6 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("Shutting down Magickit")
+    await close_chatroom_ui_client()
     await state_manager.close()
 
 
@@ -176,6 +187,20 @@ def create_app() -> FastAPI:
     # Phase 2: Add auth middleware (will be configured in lifespan)
     # Note: We need to defer JWT handler creation to lifespan
     # For now, middleware will check app.state for configuration
+
+    # Gated chatroom writes. Registered before the proxy so the three POST
+    # routes are handled here -- with the role / naysayer / embodiment gates
+    # -- instead of being forwarded to Conclair's own ungated form handlers.
+    app.include_router(chatroom_writes_router)
+
+    # Chatroom panel for the dashboard.
+    app.include_router(chatroom_dashboard_router)
+
+    # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
+    # Starlette matches routes in insertion order, and this router claims the
+    # two Conclair assets (conclair.css / conclair.js) that would otherwise
+    # fall into Magickit's own /static mount and 404 there.
+    app.include_router(chatroom_ui_router)
 
     # Mount static files if directory exists
     if STATIC_DIR.exists():

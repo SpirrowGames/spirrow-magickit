@@ -19,6 +19,20 @@
     </div>
 </div>
 
+<!-- Chatroom: the other half of a project's state -->
+<section class="card">
+    <div class="card-header">
+        <h2>Chatroom</h2>
+        <a class="btn btn-sm" href="/ui/">Open UI</a>
+    </div>
+    <div class="card-body" id="chatroom-summary"
+         hx-get="/dashboard/chatroom"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+        <p class="loading">Loading chatroom...</p>
+    </div>
+</section>
+
 <!-- Two Column Layout -->
 <div class="dashboard-grid">
     <!-- Recent Events -->

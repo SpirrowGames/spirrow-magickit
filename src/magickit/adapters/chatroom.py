@@ -220,6 +220,16 @@ class ChatroomAdapter(BaseAdapter):
             "GET", f"/v1/projects/{project}/threads", params=params
         )
 
+    async def list_project_summaries(self) -> dict[str, Any]:
+        """Per-project thread counts across every project, in one request.
+
+        The cross-project counterpart to ``list_threads``. Used by the
+        dashboard, which needs to rank projects rather than read any one
+        of them; going through ``list_threads`` would cost a round trip
+        per project and still not say which projects exist.
+        """
+        return await self._request_json("GET", "/v1/projects")
+
     async def get_thread(
         self,
         *,
