@@ -183,6 +183,20 @@ async def test_conclair_error_envelope_degrades_to_a_notice():
 
 
 @pytest.mark.asyncio
+async def test_missing_endpoint_is_not_reported_as_no_activity():
+    """A stale Conclair 404s; that is a deploy fact, not a data fact."""
+    with patch.object(
+        chatroom_tools,
+        "_adapter",
+        return_value=_adapter_returning({"detail": "Not Found"}),
+    ):
+        body = (await _get_panel()).text
+
+    assert "no chatroom activity yet" not in body
+    assert "unavailable" in body
+
+
+@pytest.mark.asyncio
 async def test_no_projects_yet():
     with patch.object(
         chatroom_tools, "_adapter", return_value=_adapter_returning({"items": [], "total": 0})

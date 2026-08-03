@@ -91,7 +91,19 @@ async def dashboard_chatroom(request: Request) -> HTMLResponse:
             f'{html.escape(str(payload.get("error", "")))}</p>'
         )
 
-    items = payload.get("items", [])
+    # A response without `items` is not an empty chatroom -- it is a Conclair
+    # that does not serve this endpoint (a 404 body is `{"detail": ...}`, and
+    # `_request_json` only wraps 4xx into an envelope for non-JSON bodies).
+    # Defaulting to [] would render "no activity yet" over a deploy skew,
+    # which reads as a fact about the data rather than about the deploy.
+    if "items" not in payload:
+        return HTMLResponse(
+            '<p class="empty-state">chatroom summary unavailable: '
+            "conclair did not return a summary "
+            "(is <code>spirrow-conclair.service</code> up to date?)</p>"
+        )
+
+    items = payload["items"]
     # Projects with nothing open are noise on a "what needs me" panel, but a
     # project that has gone quiet is worth seeing too -- so rank by open
     # work and keep the ordering the API gave us within that.
