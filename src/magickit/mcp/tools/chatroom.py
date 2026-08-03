@@ -986,10 +986,23 @@ def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
     }
 
 
-def register_tools(mcp: FastMCP, settings: Settings) -> None:
-    """Register chatroom MCP tools."""
+def configure(settings: Settings) -> None:
+    """Bind the settings every gate helper in this module reads.
+
+    ``register_tools`` is the MCP process's entry point and calls this, but
+    the gates are not MCP-specific: the FastAPI process that serves the human
+    chatroom UI enforces the same ones on browser writes and never registers
+    an MCP tool. Both processes must call this before any gate runs --
+    ``_adapter()`` / ``_prismind_adapter()`` raise without it, and
+    ``_enforce_close_policies`` reads ``naysayer_gate_enabled`` off it.
+    """
     global _settings
     _settings = settings
+
+
+def register_tools(mcp: FastMCP, settings: Settings) -> None:
+    """Register chatroom MCP tools."""
+    configure(settings)
 
     @mcp.tool()
     async def chatroom_open_thread(
