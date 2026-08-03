@@ -21,6 +21,7 @@ from magickit.mcp.tools import (
     generation,
     health,
     lifecycle,
+    loop_control,
     orchestration,
     progress,
     project,
@@ -139,6 +140,7 @@ rather than calling individual services separately.""",
     reporting.register_tools(mcp, settings)
     smart_read.register_tools(mcp, settings)
     chatroom.register_tools(mcp, settings)
+    loop_control.register_tools(mcp, settings)
 
     # Expose github-mcp via passthrough dispatcher (no-op unless PAT set)
     _install_github(mcp)

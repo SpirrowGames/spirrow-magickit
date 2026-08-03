@@ -70,7 +70,8 @@ src/magickit/
 │       ├── quality.py    # 品質ゲート管理
 │       ├── reporting.py  # レポート・分析
 │       ├── smart_read.py # Phanthand連携ファイル読み込み・分析
-│       └── chatroom.py   # spirrow-conclair 連携 chatroom 7 ツール
+│       ├── chatroom.py   # spirrow-conclair 連携 chatroom 7 ツール
+│       └── loop_control.py # ループ自律制御 (HOLD / RESUME) 3 ツール
 ├── adapters/
 │   ├── base.py          # Adapter ABC
 │   ├── lexora.py        # LLM呼び出し
@@ -171,6 +172,10 @@ class ChatroomAdapter(BaseAdapter):
     async def get_thread(*, project, thread_id, mode="full") -> dict
     async def list_events(*, project, thread_id=None, action=None, since=None, ...) -> dict
     async def check_integrity(*, project) -> dict
+    # loop control (HOLD / RESUME)。desired と observed で別メソッド = 別 endpoint。
+    async def get_loop_control(*, project) -> dict
+    async def set_loop_control(*, project, state, actor, note=None) -> dict
+    async def report_loop_control_observed(*, project, state, actor) -> dict
 ```
 
 ## API エンドポイント
@@ -1062,6 +1067,50 @@ chatroom_my_unread(project="spirrow-magickit", identity_name="Heisenberg")
 chatroom_get_thread(project="spirrow-magickit", thread_id="T-X", mode="full")  # 内容を読む
 chatroom_mark_read(project="spirrow-magickit", thread_id="T-X",
                    identity_name="Heisenberg", up_to_msg_id="")  # 一括 catch up
+```
+
+### ループ自律制御 (`loop_control.py`)
+
+プロジェクト単位でループの自律度を制御する 3 ツール。状態は conclair の `project_control` テーブルに
+永続化され、conclair の `/ui` (tailnet) と本ツール群 (claude.ai) が**同じレコード**を更新する。
+
+| ツール | 用途 |
+|--------|------|
+| `loop_control_get` | 現在の状態取得 (desired + observed) |
+| `loop_control_set` | **desired** の設定 (操作者。claude.ai から = tailnet 不要・UI が落ちていても可) |
+| `loop_control_report_observed` | **observed** の報告 (ループ専用。desired を書けない) |
+
+**3 値** — `run` (完全自律) / `supervised` (設計ループのみ。human decide と PR-gate RC だけがコードに到達 =
+現行の既定) / `hold` (停止)。**未設定は `run`**。
+
+**`set` と `report_observed` を 1 ツールにまとめない。** ループに setter を渡さない、を後で実現するには
+「引数を落とす」ではなく「ツールを渡さない」が必要で、それは分離されている時にしか言えない。
+同じ理由でこの 3 ツールは `chatroom.py` に同居させていない — backend service が同じだけで主題が違い、
+chatroom ツールを与えた相手にループの停止・再開まで与えたことにはならない。
+
+**取得失敗は `hold`** (呼び出し側 = mindwire の責務)。そのため本ツールは**既定値を捏造しない**:
+未設定プロジェクトは 200 + `configured:false` + `desired_state:"run"` で返り、error envelope
+(`error_type` あり・`desired_state` なし) または例外は「読めなかった」を意味する。この 2 つを
+呼び出し側が取り違えると全プロジェクトが止まる (または止まらない)。
+
+**即時停止ではない。** `set` は「次にループが読んだ時に効く」もので、実行中のターン (実装なら数分) は完了する。
+反映されたかは `observed_*` が `desired_*` に追いつくかで判断する。
+
+`actor` は**記録であって認証ではない** (tailnet が信頼境界。既存の `_is_human` と同じ立場)。
+
+```python
+# 出先から止める (tailnet 不要)
+loop_control_set(project="spirrow-voxelworld", state="hold", actor="human", note="要確認")
+# → {"desired_state": "hold", "observed_state": "run", ...} = まだ反映待ち
+
+# 反映確認
+loop_control_get(project="spirrow-voxelworld")
+# → observed_state が "hold" になっていればループは読んだ
+
+# ループ側 (mindwire conductor)。状態が変わった時だけ呼ぶ
+loop_control_report_observed(
+    project="spirrow-voxelworld", state="hold", actor="mindwire-conductor"
+)
 ```
 
 ### ドキュメント管理 (`document.py`)
