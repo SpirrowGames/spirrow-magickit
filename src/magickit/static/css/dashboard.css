@@ -576,12 +576,22 @@ textarea {
         padding: 10px 12px;
     }
     .nav-brand a { font-size: 17px; }
+    /* A single unbreakable token -- a URL, an id, a JSON blob rendered
+       where cards were expected -- must not be able to set the page width.
+       `break-word` only breaks strings that would overflow on their own,
+       so ordinary prose is unaffected. */
+    body { overflow-wrap: break-word; }
+
     .nav-links {
         order: 3;
         width: 100%;
         gap: 16px;
         overflow-x: auto;
         scrollbar-width: none;
+        /* Flex items default to `min-width: auto` -- "never shrink below
+           your content" -- which makes the overflow-x above a no-op. */
+        min-width: 0;
+        flex-basis: 100%;
     }
     .nav-links::-webkit-scrollbar { display: none; }
     .nav-links a {
@@ -611,8 +621,13 @@ textarea {
 
     /* Four stat cards at 32px each is most of a phone screen spent on
        numbers. Two across, smaller, keeps the panels below in view. */
+    /* minmax(0, ...) rather than 1fr: a bare `1fr` track will not shrink
+       below its content's min-content width, so one oversized item (a long
+       id, or the raw JSON this panel currently renders when
+       /dashboard/stats loses its route to the API's JSON handler) stretches
+       the grid and takes the document with it. */
     .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
         margin-bottom: 16px;
     }
@@ -621,7 +636,7 @@ textarea {
     .stat-label { font-size: 12px; }
 
     .dashboard-grid { gap: 16px; margin-bottom: 16px; }
-    .projects-grid { grid-template-columns: 1fr; }
+    .projects-grid { grid-template-columns: minmax(0, 1fr); }
 
     /* Filter selects side by side end up ~100px each. Full width each. */
     .toolbar { gap: 8px; }
@@ -691,7 +706,17 @@ textarea {
         padding: 3px 0;
         display: flex;
         align-items: baseline;
-        gap: 10px;
+        /* Cells hold several siblings (status badges), and flex does not
+           wrap by default -- so without this they stay on one line however
+           many there are, and overflow-wrap cannot help: the badges are
+           nowrap and offer no break opportunity to find. */
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        /* `anywhere`, not `break-word`: only `anywhere` shrinks min-content
+           width, and min-content is the floor a flex item refuses to go
+           below. It sits on the cell so the anonymous flex item wrapping a
+           bare text node inherits it -- that item cannot be selected. */
+        overflow-wrap: anywhere;
     }
     .table-stack td::before {
         content: attr(data-label);
@@ -700,8 +725,5 @@ textarea {
         font-size: 12px;
     }
     .table-stack td:not([data-label])::before { display: none; }
-    .table-stack td > * {
-        min-width: 0;
-        overflow-wrap: anywhere;
-    }
+    .table-stack td > * { min-width: 0; }
 }
