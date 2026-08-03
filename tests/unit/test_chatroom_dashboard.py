@@ -8,6 +8,7 @@ dashboard with it.
 
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -89,8 +90,8 @@ async def test_open_count_excludes_resolved():
         body = (await _get_panel()).text
 
     # 3 open (2 active + 1 awaiting), 10 total -- both present, not conflated.
-    assert "<td>3</td>" in body
-    assert "<td>10</td>" in body
+    assert '<td data-label="open">3</td>' in body
+    assert '<td data-label="threads">10</td>' in body
 
 
 @pytest.mark.asyncio
@@ -204,3 +205,40 @@ async def test_no_projects_yet():
         body = (await _get_panel()).text
 
     assert "no chatroom activity yet" in body
+
+
+# ---- phone layout ---------------------------------------------------------
+#
+# The stacked (phone) table renders each cell's label from its `data-label`,
+# so a column's name lives twice: in the `<th>` and in the cell. Drift is
+# invisible in a browser -- the desktop table stays correct while the phone
+# view starts labelling values wrongly.
+
+_TH_RE = re.compile(r"<th(?:\s[^>]*)?>(.*?)</th>", re.DOTALL)
+_LABEL_RE = re.compile(r'<td[^>]*\bdata-label="([^"]*)"')
+
+
+@pytest.mark.asyncio
+async def test_panel_labels_match_its_headers():
+    payload = {"items": [_summary()], "total": 1}
+
+    with patch.object(
+        chatroom_tools, "_adapter", return_value=_adapter_returning(payload)
+    ):
+        body = (await _get_panel()).text
+
+    headers = [re.sub(r"\s+", " ", h).strip() for h in _TH_RE.findall(body)]
+    assert _LABEL_RE.findall(body) == headers
+
+
+@pytest.mark.asyncio
+async def test_panel_opts_into_stacking():
+    """Without the class the labels render but nothing reads them."""
+    payload = {"items": [_summary()], "total": 1}
+
+    with patch.object(
+        chatroom_tools, "_adapter", return_value=_adapter_returning(payload)
+    ):
+        body = (await _get_panel()).text
+
+    assert 'class="table table-stack"' in body

@@ -59,13 +59,16 @@ def _row(entry: dict[str, Any]) -> str:
     if not badges:
         badges = "—"
 
+    # `data-label` is what the stacked (phone) layout renders in front of
+    # each cell -- see `.table-stack` in dashboard.css. Each must match the
+    # <th> below: same column, named twice.
     return f"""
         <tr>
-            <td><a href="/ui/projects/{safe}/threads">{safe}</a></td>
-            <td>{open_threads}</td>
-            <td>{entry.get('thread_count', 0)}</td>
-            <td>{entry.get('message_count', 0)}</td>
-            <td>{badges}</td>
+            <td data-label="project"><a href="/ui/projects/{safe}/threads">{safe}</a></td>
+            <td data-label="open">{open_threads}</td>
+            <td data-label="threads">{entry.get('thread_count', 0)}</td>
+            <td data-label="msgs">{entry.get('message_count', 0)}</td>
+            <td data-label="needs attention">{badges}</td>
         </tr>
     """
 
@@ -124,7 +127,7 @@ async def dashboard_chatroom(request: Request) -> HTMLResponse:
 
     return HTMLResponse(
         f"""
-        <table class="table">
+        <table class="table table-stack">
             <thead>
                 <tr>
                     <th>project</th>
