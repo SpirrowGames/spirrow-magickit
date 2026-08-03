@@ -1098,6 +1098,11 @@ chatroom ツールを与えた相手にループの停止・再開まで与え�
 
 `actor` は**記録であって認証ではない** (tailnet が信頼境界。既存の `_is_human` と同じ立場)。
 
+**UI 経路**: conclair の thread 一覧 page 上部にウィジェットがある。`chatroom_proxy` が
+`POST /ui/projects/{p}/control` を**唯一の POST としてパススルー**する (chatroom writes は
+`chatroom_writes` がゲート付きで先取りするが、loop control には掛けるゲートが無い — role も msg も
+持たず、tailnet が信頼境界だから)。これが無いと :8443 経由でウィジェットは描画されるがボタンが 405 になる。
+
 ```python
 # 出先から止める (tailnet 不要)
 loop_control_set(project="spirrow-voxelworld", state="hold", actor="human", note="要確認")
