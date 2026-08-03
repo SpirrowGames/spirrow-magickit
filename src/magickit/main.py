@@ -283,7 +283,19 @@ def create_app() -> FastAPI:
         )
 
     # Dashboard API endpoints for HTMX
-    @app.get("/dashboard/stats")
+    #
+    # `_stats`, not `stats`: routes_v2 serves the JSON DashboardStats API at
+    # /dashboard/stats, and it is registered first (include_router above runs
+    # before these decorators), so Starlette matched it and this handler was
+    # dead. The dashboard rendered a raw JSON dump where the stat cards
+    # belong -- silently, because both handlers answer 200.
+    #
+    # The API route keeps the plain name: it is typed, authenticated and
+    # covered by a test, so it is the contract. This one is a fragment for
+    # one template. The sibling fragments below (events / locks / queue) do
+    # not collide today and are left as they are; a duplicate-route test now
+    # fails loudly if that ever changes.
+    @app.get("/dashboard/_stats")
     async def dashboard_stats_html(request: Request) -> HTMLResponse:
         """Return stats cards HTML for HTMX."""
         state_manager = request.app.state.state_manager
