@@ -112,7 +112,8 @@
 <script>
 function showTaskDetail(taskId) {
     showModal('task-detail-modal');
-    htmx.ajax('GET', '/dashboard/tasks/' + taskId, '#task-detail-content');
+    htmx.ajax('GET', '/dashboard/_tasks/' + encodeURIComponent(taskId),
+              '#task-detail-content');
 }
 
 // WebSocket for real-time task updates

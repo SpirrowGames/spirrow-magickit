@@ -63,8 +63,8 @@ def route_table(app) -> dict[tuple[str, str], list[str]]:
     return dict(table)
 
 
-def sole_handler(app, method: str, path: str) -> str:
-    """The one handler on (method, path). Fails if there are none or several.
+def sole_route(app, method: str, path: str):
+    """The one route on (method, path). Fails if there are none or several.
 
     "Several" was the original bug -- two handlers answering 200 while only
     the first is reachable -- so this refuses to pick a winner instead of
@@ -73,11 +73,26 @@ def sole_handler(app, method: str, path: str) -> str:
     on the version's matching rules, and the invariant the tests actually
     want is that the question never comes up.
     """
-    handlers = route_table(app).get((method, path), [])
+    matches = [
+        route
+        for route in _leaf_routes(app.routes)
+        if getattr(route, "path", None) == path
+        and method in (getattr(route, "methods", None) or ())
+        and getattr(route, "endpoint", None) is not None
+    ]
 
-    assert handlers, f"no route registered for {method} {path}"
-    assert len(handlers) == 1, (
+    assert matches, f"no route registered for {method} {path}"
+    assert len(matches) == 1, (
         f"{method} {path} has more than one handler, so only one of them is "
-        f"reachable: {handlers}"
+        f"reachable: {[r.endpoint for r in matches]}"
     )
-    return handlers[0]
+    return matches[0]
+
+
+def sole_handler(app, method: str, path: str) -> str:
+    """module.function of the one handler on (method, path)."""
+    endpoint = sole_route(app, method, path).endpoint
+    return (
+        f"{getattr(endpoint, '__module__', '?')}."
+        f"{getattr(endpoint, '__name__', '?')}"
+    )

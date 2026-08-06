@@ -22,12 +22,14 @@
         </option>
         {% endfor %}
     </select>
-
-    <button class="btn btn-primary"
-            onclick="showModal('create-project-modal')">
-        New Project
-    </button>
 </div>
+
+{# No New Project control here. Projects are created through `init_project`,
+   which allocates the project_uid and registers the project with Prismind;
+   there is no path from this page that produces a project the rest of the
+   platform knows about. The button that used to sit here posted to
+   /dashboard/projects, which has never had a POST handler -- it opened a
+   modal and 405'd on submit. #}
 
 <!-- Projects List -->
 <div id="projects-list" class="projects-grid"
@@ -37,51 +39,7 @@
     <p class="loading">Loading projects...</p>
 </div>
 
-<!-- Create Project Modal -->
-<div id="create-project-modal" class="modal hidden">
-    <div class="modal-content">
-        <div class="modal-header">
-            <h3>Create Project</h3>
-            <button class="close-btn" onclick="hideModal('create-project-modal')">&times;</button>
-        </div>
-        <form hx-post="/dashboard/projects"
-              hx-target="#projects-list"
-              hx-swap="innerHTML"
-              hx-on::after-request="hideModal('create-project-modal')">
-            <input type="hidden" name="workspace_id" id="new-project-workspace">
-
-            <div class="form-group">
-                <label for="project-name">Name</label>
-                <input type="text" id="project-name" name="name" required
-                       placeholder="My Project">
-            </div>
-
-            <div class="form-group">
-                <label for="project-description">Description</label>
-                <textarea id="project-description" name="description"
-                          placeholder="Project description..."></textarea>
-            </div>
-
-            <div class="form-actions">
-                <button type="button" class="btn" onclick="hideModal('create-project-modal')">
-                    Cancel
-                </button>
-                <button type="submit" class="btn btn-primary">
-                    Create
-                </button>
-            </div>
-        </form>
-    </div>
-</div>
 {% endblock %}
 
-{% block scripts %}
-<script>
-document.getElementById('workspace-select').addEventListener('change', function() {
-    document.getElementById('new-project-workspace').value = this.value;
-});
-// Initialize
-document.getElementById('new-project-workspace').value =
-    document.getElementById('workspace-select').value;
-</script>
-{% endblock %}
+{# The scripts block held nothing but the wiring that copied the workspace
+   selection into the create form's hidden field. Both are gone. #}

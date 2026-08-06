@@ -40,6 +40,12 @@ htmlcov/
 # Database
 *.db
 *.sqlite3
+# SQLite's sidecar files. `*.db` does not match these -- which is how
+# data/magickit.db-journal came to be tracked while the database next to
+# it was correctly ignored.
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Runtime data (FastMCP OAuth client storage etc.)
 data/oauth-storage*/
