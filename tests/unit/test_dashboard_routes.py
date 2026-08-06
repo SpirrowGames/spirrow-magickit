@@ -79,50 +79,30 @@ def _htmx_targets():
             yield template.name, verb.upper(), url.split("?", 1)[0]
 
 
-# The New Project form posts here and gets a 405: there has never been a
-# POST handler, on any branch. Left that way on purpose. Projects in this
-# platform are created through `init_project`, which allocates the
-# project_uid (a Drive folder id) and registers the project with Prismind;
-# `state_manager.create_project` writes the SQLite row alone. Wiring the
-# form to it would make projects that exist for the dashboard and not for
-# anything else, and choosing between "the form does the full lifecycle"
-# and "the form goes away" is a product decision, not a fix for the
-# nesting bug this change is about.
-KNOWN_MISSING = {("POST", "/dashboard/projects")}
-
-
 def test_every_htmx_target_is_a_real_route():
     """A fragment slot pointed at a path nobody serves polls 404s forever.
 
     `/dashboard/task-stats` did exactly that: tasks.html asked for it every
     10 seconds, got a 404 every time, and the four stat pills sat at their
     placeholder dashes. Nothing about the page said so.
+
+    This check had an exemption for the New Project form, which posted to
+    /dashboard/projects and 405'd because no POST handler had ever existed.
+    The form has since been removed rather than given one -- projects are
+    created through `init_project`, which allocates the project_uid and
+    registers with Prismind, and nothing on this page could produce a
+    project the rest of the platform knows about. With the form gone the
+    exemption is gone too, and this check is now unconditional.
     """
     table = route_table(create_app())
 
     missing = [
         f"{name}: {method} {path}"
         for name, method, path in _htmx_targets()
-        if (method, path) not in table and (method, path) not in KNOWN_MISSING
+        if (method, path) not in table
     ]
 
     assert not missing, f"HTMX targets with no route: {missing}"
-
-
-def test_the_known_gap_is_still_a_gap():
-    """Pairs with KNOWN_MISSING so the exemption cannot outlive the bug.
-
-    If someone gives the create form a handler, this fails and says to
-    drop the entry rather than leaving a permanent hole in the check above.
-    """
-    table = route_table(create_app())
-
-    still_missing = {key for key in KNOWN_MISSING if key not in table}
-
-    assert still_missing == KNOWN_MISSING, (
-        "these are handled now -- remove them from KNOWN_MISSING: "
-        f"{KNOWN_MISSING - still_missing}"
-    )
 
 
 def test_every_scripted_htmx_target_has_a_route_under_it():
