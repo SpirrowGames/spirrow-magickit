@@ -20,6 +20,7 @@ import pytest
 
 from magickit.main import create_app
 from magickit.web import chatroom_proxy
+from tests.route_table import sole_handler
 
 
 @pytest.fixture(autouse=True)
@@ -320,14 +321,10 @@ async def test_loop_control_post_returns_the_widget_partial():
     ],
 )
 def test_post_routes_are_owned_by_the_right_module(path: str, expected_module: str):
-    app = create_app()
+    # `sole_handler` rather than "first registration wins": each of these
+    # paths must have exactly one POST handler, and if a second one ever
+    # appears, which of them Starlette picks is not the reassuring answer
+    # -- the duplicate is.
+    owner = sole_handler(create_app(), "POST", path)
 
-    owners = [
-        route.endpoint.__module__
-        for route in app.routes
-        if getattr(route, "path", None) == path and "POST" in getattr(route, "methods", ())
-    ]
-
-    assert owners, f"no POST route registered for {path}"
-    # Starlette matches in insertion order, so the first registration wins.
-    assert owners[0] == expected_module
+    assert owner.rsplit(".", 1)[0] == expected_module
