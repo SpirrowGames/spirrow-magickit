@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -14,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from magickit import __version__
+from magickit.api.models import TaskStatus
 from magickit.api.routes import router, set_dependencies
 from magickit.api.routes_v2 import router as router_v2, set_v2_dependencies
 from magickit.api.websocket import router as ws_router, broadcast_to_project
@@ -328,6 +330,152 @@ def create_app() -> FastAPI:
         </div>
         """
         return HTMLResponse(html)
+
+    # `_projects`, not `projects`: the same split as `_stats` above, for a
+    # different cause. Nothing collided here -- there was simply no fragment
+    # handler at all, so projects.html pointed its `#projects-list` at its
+    # own page URL and HTMX swapped the whole page into the grid inside it.
+    # Each copy brought another `#projects-list` with `hx-trigger="load"`,
+    # so it fed itself: measured at 250 nested copies of the page and a
+    # 137,870px document before it stopped, plus a burst of requests at the
+    # server for each one.
+    #
+    # A page and a fragment of that page cannot share a URL: HTMX asks the
+    # same path a full navigation asks, and only one of the two answers can
+    # be right.
+    @app.get("/dashboard/_projects")
+    async def dashboard_projects_html(
+        request: Request, workspace_id: str = "default"
+    ) -> HTMLResponse:
+        """Return project cards HTML for HTMX."""
+        state_manager = request.app.state.state_manager
+
+        try:
+            projects = await state_manager.get_projects_in_workspace(workspace_id)
+        except Exception:
+            # Sibling fragments answer with their empty state rather than an
+            # error; a 500 into an innerHTML swap shows as a blank panel.
+            projects = []
+
+        if not projects:
+            return HTMLResponse('<p class="empty-state">No projects yet</p>')
+
+        # escape(): these are user-supplied names and descriptions going into
+        # an f-string. The sibling fragments interpolate their own values raw,
+        # which is a pre-existing question for the ones carrying user input --
+        # not a reason to add another.
+        html = ""
+        for project in projects:
+            created = project.created_at.strftime("%Y-%m-%d")
+            html += f"""
+            <div class="project-card">
+                <h3>{escape(project.name)}</h3>
+                <p>{escape(project.description or "No description")}</p>
+                <div class="project-meta">
+                    <span class="status-badge {escape(project.status.value)}">
+                        {escape(project.status.value)}
+                    </span>
+                    <span>Created {created}</span>
+                </div>
+            </div>
+            """
+        return HTMLResponse(html)
+
+    # tasks.html had the same self-nesting as projects.html, in four places
+    # -- both filter selects, the refresh button and the `#tasks-list` tbody
+    # all pointed at /dashboard/tasks, the page. Measured at 121 nested
+    # copies and a 64,284px document. This is the fragment they meant.
+    @app.get("/dashboard/_tasks")
+    async def dashboard_tasks_html(
+        request: Request, project_id: str = "", status: str = ""
+    ) -> HTMLResponse:
+        """Return task table rows HTML for HTMX."""
+        state_manager = request.app.state.state_manager
+
+        # An unrecognised status filters nothing rather than 500ing into a
+        # table body; the select cannot produce one, but the URL can.
+        wanted: TaskStatus | None = None
+        if status:
+            try:
+                wanted = TaskStatus(status)
+            except ValueError:
+                wanted = None
+
+        try:
+            if project_id:
+                tasks = await state_manager.get_tasks_by_project(project_id, wanted)
+            elif wanted is not None:
+                tasks = await state_manager.get_tasks_by_status(wanted)
+            else:
+                tasks = await state_manager.get_all_tasks()
+        except Exception:
+            tasks = []
+
+        if not tasks:
+            return HTMLResponse(
+                '<tr><td colspan="7" class="empty-state">No tasks</td></tr>'
+            )
+
+        # Bounded because this table is not paginated and the fragment
+        # re-fetches every 5s. The cap is visible in the table rather than
+        # silent -- a list that stops at a round number with no explanation
+        # reads as data loss.
+        capped = tasks[:100]
+
+        html = ""
+        for task in capped:
+            html += f"""
+            <tr>
+                <td>{escape(task.id[:8])}...</td>
+                <td>{escape(task.name)}</td>
+                <td>{escape(task.service.value)}</td>
+                <td>{task.priority}</td>
+                <td><span class="status-badge {escape(task.status.value)}">{escape(task.status.value)}</span></td>
+                <td>{task.created_at.strftime('%Y-%m-%d %H:%M')}</td>
+                <td>
+                    <button class="btn btn-sm" onclick="showTaskDetail('{escape(task.id)}')">
+                        Details
+                    </button>
+                </td>
+            </tr>
+            """
+
+        if len(tasks) > len(capped):
+            html += (
+                f'<tr><td colspan="7" class="empty-state">'
+                f"showing {len(capped)} of {len(tasks)} tasks"
+                f"</td></tr>"
+            )
+        return HTMLResponse(html)
+
+    # `/dashboard/task-stats` never existed: tasks.html polled it every 10s
+    # and took a 404 each time, so the four pills sat at their placeholder
+    # "-" forever while the console filled up. Same data the stat cards use.
+    @app.get("/dashboard/_task_stats")
+    async def dashboard_task_stats_html(request: Request) -> HTMLResponse:
+        """Return task stat pills HTML for HTMX."""
+        state_manager = request.app.state.state_manager
+
+        try:
+            stats = await state_manager.get_dashboard_stats()
+            by_status = stats.get("tasks_by_status", {})
+        except Exception:
+            by_status = {}
+
+        pills = ""
+        for key, label in (
+            ("pending", "Pending"),
+            ("running", "Running"),
+            ("completed", "Completed"),
+            ("failed", "Failed"),
+        ):
+            pills += f"""
+            <div class="stat-pill {key}">
+                <span class="count">{by_status.get(key, 0)}</span>
+                <span class="label">{label}</span>
+            </div>
+            """
+        return HTMLResponse(pills)
 
     @app.get("/dashboard/events")
     async def dashboard_events_html(request: Request) -> HTMLResponse:

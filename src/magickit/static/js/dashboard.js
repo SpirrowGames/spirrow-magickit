@@ -321,9 +321,23 @@ setInterval(function() {
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Magickit Dashboard initialized');
 
-    // Connect WebSocket if on dashboard
-    if (window.location.pathname.startsWith('/dashboard')) {
-        // Delay connection slightly to allow page to render
-        setTimeout(connectWebSocket, 500);
-    }
+    // No WebSocket here. This used to open one on any path under
+    // /dashboard, on top of whichever connection the page had already
+    // opened for itself, and it did something different and wrong on each
+    // of the three:
+    //
+    //   /dashboard        two connections, so the "Connected to real-time
+    //                     updates" toast appeared twice, and the first
+    //                     socket was left open with nothing referencing it
+    //                     -- `ws` is a single global and the second
+    //                     connect overwrote it.
+    //   /dashboard/tasks  it ran 500ms after the page subscribed to the
+    //                     selected project, overwrote `ws`, and left the
+    //                     page subscribed to `default` instead. The project
+    //                     filter looked like it did nothing.
+    //   /dashboard/projects  a connection no part of the page listens to.
+    //
+    // Each template that wants live updates opens its own connection and
+    // knows which project it wants: dashboard.html calls connectWebSocket,
+    // tasks.html calls connectProjectWebSocket with the filter's value.
 });
