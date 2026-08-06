@@ -11,7 +11,7 @@
 <!-- Filters -->
 <div class="toolbar">
     <select id="project-filter" class="select" name="project_id"
-            hx-get="/dashboard/tasks"
+            hx-get="/dashboard/_tasks"
             hx-target="#tasks-list"
             hx-include="[name='status']">
         <option value="">All Projects</option>
@@ -24,7 +24,7 @@
     </select>
 
     <select id="status-filter" class="select" name="status"
-            hx-get="/dashboard/tasks"
+            hx-get="/dashboard/_tasks"
             hx-target="#tasks-list"
             hx-include="[name='project_id']">
         <option value="">All Statuses</option>
@@ -37,7 +37,7 @@
     </select>
 
     <button class="btn"
-            hx-get="/dashboard/tasks"
+            hx-get="/dashboard/_tasks"
             hx-target="#tasks-list"
             hx-include="#project-filter, #status-filter">
         Refresh
@@ -46,7 +46,7 @@
 
 <!-- Task Stats -->
 <div class="task-stats"
-     hx-get="/dashboard/task-stats"
+     hx-get="/dashboard/_task_stats"
      hx-trigger="load, every 10s"
      hx-swap="innerHTML">
     <div class="stat-pill pending">
@@ -83,7 +83,7 @@
                 </tr>
             </thead>
             <tbody id="tasks-list"
-                   hx-get="/dashboard/tasks"
+                   hx-get="/dashboard/_tasks"
                    hx-trigger="load, every 5s"
                    hx-swap="innerHTML">
                 <tr>

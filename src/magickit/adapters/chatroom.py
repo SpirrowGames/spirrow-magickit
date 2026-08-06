@@ -330,3 +330,50 @@ class ChatroomAdapter(BaseAdapter):
         return await self._request_json(
             "GET", f"/v1/projects/{project}/unread", params=params,
         )
+
+    # --- loop control (HOLD / RESUME) ------------------------------------
+    #
+    # Two writers, two methods, on purpose. `set_loop_control` is the
+    # operator's; `report_loop_control_observed` is the loop's. Conclair
+    # keeps the two in separate columns, and collapsing them here would
+    # put the "a loop can resume itself" failure back one layer up.
+
+    async def get_loop_control(self, *, project: str) -> dict[str, Any]:
+        """Read the project's loop control state.
+
+        Never 404s upstream: an unconfigured project answers 200 with
+        ``configured=false`` and the ``run`` default. An error envelope
+        from here therefore means the read genuinely failed, and callers
+        must treat that as ``hold`` rather than fall back to a default.
+        """
+        return await self._request_json("GET", f"/v1/projects/{project}/control")
+
+    async def set_loop_control(
+        self,
+        *,
+        project: str,
+        state: str,
+        actor: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Set the *desired* state. Operator action; records ``actor``."""
+        body: dict[str, Any] = {"state": state, "actor": actor}
+        if note is not None:
+            body["note"] = note
+        return await self._request_json(
+            "PUT", f"/v1/projects/{project}/control", json=body
+        )
+
+    async def report_loop_control_observed(
+        self,
+        *,
+        project: str,
+        state: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Report the state the loop observed. Never touches ``desired``."""
+        return await self._request_json(
+            "POST",
+            f"/v1/projects/{project}/control/observed",
+            json={"state": state, "actor": actor},
+        )

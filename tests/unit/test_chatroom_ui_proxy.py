@@ -20,6 +20,7 @@ import pytest
 
 from magickit.main import create_app
 from magickit.web import chatroom_proxy
+from tests.route_table import sole_handler
 
 
 @pytest.fixture(autouse=True)
@@ -241,3 +242,89 @@ async def test_upstream_error_status_is_passed_through():
     response = await _get("/ui/projects/p/threads/nope")
 
     assert response.status_code == 404
+
+
+# --- loop control POST --------------------------------------------------
+#
+# The one POST this proxy carries. Chatroom writes are claimed by
+# chatroom_writes ahead of it; loop control has no gate to run, so it is
+# forwarded. Without the route the widget's buttons 405 through Magickit --
+# which is the tailnet front door the feature is reached from.
+
+
+async def _post(path: str, **kwargs) -> httpx.Response:
+    app = create_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        follow_redirects=False,
+    ) as client:
+        return await client.post(path, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_loop_control_post_is_forwarded_with_its_body():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["method"] = request.method
+        seen["body"] = request.content.decode()
+        seen["content_type"] = request.headers.get("content-type")
+        return httpx.Response(200, text="<section id='control-widget'></section>")
+
+    _install_upstream(handler)
+    response = await _post(
+        "/ui/projects/spirrow-voxelworld/control",
+        data={"state": "hold", "author": "takahito"},
+    )
+
+    assert response.status_code == 200
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/ui/projects/spirrow-voxelworld/control"
+    # The form body has to survive the hop, or the state never changes.
+    assert "state=hold" in seen["body"]
+    assert "author=takahito" in seen["body"]
+    assert seen["content_type"] == "application/x-www-form-urlencoded"
+
+
+@pytest.mark.asyncio
+async def test_loop_control_post_returns_the_widget_partial():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<section id='control-widget'>HOLD</section>")
+
+    _install_upstream(handler)
+    response = await _post(
+        "/ui/projects/p/control", data={"state": "hold", "author": "takahito"}
+    )
+
+    assert "control-widget" in response.text
+
+
+@pytest.mark.parametrize(
+    "path,expected_module",
+    [
+        # Loop control: the proxy owns it (nothing to gate).
+        ("/ui/projects/{project}/control", "magickit.web.chatroom_proxy"),
+        # Chatroom writes: still claimed ahead of the proxy, so the role /
+        # naysayer / embodiment gates keep running. Adding a POST route to
+        # the proxy must not have widened it into these paths.
+        (
+            "/ui/projects/{project}/threads/{thread_id}/messages",
+            "magickit.web.chatroom_writes",
+        ),
+        ("/ui/projects/{project}/threads", "magickit.web.chatroom_writes"),
+        (
+            "/ui/projects/{project}/threads/{thread_id}/close",
+            "magickit.web.chatroom_writes",
+        ),
+    ],
+)
+def test_post_routes_are_owned_by_the_right_module(path: str, expected_module: str):
+    # `sole_handler` rather than "first registration wins": each of these
+    # paths must have exactly one POST handler, and if a second one ever
+    # appears, which of them Starlette picks is not the reassuring answer
+    # -- the duplicate is.
+    owner = sole_handler(create_app(), "POST", path)
+
+    assert owner.rsplit(".", 1)[0] == expected_module

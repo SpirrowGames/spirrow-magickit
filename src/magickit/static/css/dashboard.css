@@ -552,3 +552,178 @@ textarea {
 .htmx-request.htmx-indicator {
     opacity: 1;
 }
+
+/* ==========================================================================
+   Small screens
+   ==========================================================================
+   The dashboard is read from a phone as often as from a desk, so this block
+   is not a courtesy fallback -- it is the layout for one of the two normal
+   viewing widths.
+
+   768px is the width the .dashboard-grid rule above already switches at;
+   Conclair's /ui uses the same number so the two halves of the same origin
+   reflow at the same moment on the same device.
+   ========================================================================== */
+
+@media (max-width: 768px) {
+    /* The navbar is a fixed 60px row of brand + links + user at desktop
+       width. Let it grow instead: three links and an email do not fit a
+       phone on one line, and shrinking them makes them unhittable. */
+    .navbar {
+        height: auto;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        padding: 10px 12px;
+    }
+    .nav-brand a { font-size: 17px; }
+    /* A single unbreakable token -- a URL, an id, a JSON blob rendered
+       where cards were expected -- must not be able to set the page width.
+       `break-word` only breaks strings that would overflow on their own,
+       so ordinary prose is unaffected. */
+    body { overflow-wrap: break-word; }
+
+    .nav-links {
+        order: 3;
+        width: 100%;
+        gap: 16px;
+        overflow-x: auto;
+        scrollbar-width: none;
+        /* Flex items default to `min-width: auto` -- "never shrink below
+           your content" -- which makes the overflow-x above a no-op. */
+        min-width: 0;
+        flex-basis: 100%;
+    }
+    .nav-links::-webkit-scrollbar { display: none; }
+    .nav-links a {
+        white-space: nowrap;
+        padding: 6px 0;
+    }
+    .nav-user { margin-left: auto; }
+    /* The address identifies the session; on a phone the Logout button is
+       what you came to the corner for. */
+    .user-name {
+        max-width: 40vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .container { padding: 12px; }
+    .page-header { margin-bottom: 16px; }
+    .page-header h1 { font-size: 20px; }
+
+    .card-header {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px 14px;
+    }
+    .card-body { padding: 14px; }
+
+    /* Four stat cards at 32px each is most of a phone screen spent on
+       numbers. Two across, smaller, keeps the panels below in view. */
+    /* minmax(0, ...) rather than 1fr: a bare `1fr` track will not shrink
+       below its content's min-content width, so one oversized item (a long
+       id, or the raw JSON this panel currently renders when
+       /dashboard/stats loses its route to the API's JSON handler) stretches
+       the grid and takes the document with it. */
+    .stats-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    .stat-card { padding: 14px; }
+    .stat-value { font-size: 24px; }
+    .stat-label { font-size: 12px; }
+
+    .dashboard-grid { gap: 16px; margin-bottom: 16px; }
+    .projects-grid { grid-template-columns: minmax(0, 1fr); }
+
+    /* Filter selects side by side end up ~100px each. Full width each. */
+    .toolbar { gap: 8px; }
+    .toolbar > * { width: 100%; }
+
+    /* 16px is the threshold below which iOS Safari zooms the page on focus,
+       and it does not zoom back out afterwards. */
+    .select,
+    input[type="text"],
+    input[type="email"],
+    input[type="password"],
+    textarea {
+        font-size: 16px;
+    }
+
+    .btn { min-height: 44px; }
+    .btn-sm { min-height: 34px; padding: 6px 12px; }
+    /* Right-aligned Cancel / Create becomes two full-width taps, primary
+       first so the thumb lands on it. */
+    .form-actions {
+        flex-direction: column-reverse;
+        gap: 8px;
+    }
+    .form-actions .btn { width: 100%; }
+
+    /* The modal is centred with no room to spare; without padding on the
+       backdrop it runs edge to edge. */
+    .modal { padding: 12px; }
+    .modal-content { max-height: 88vh; }
+    .modal-body { padding: 14px; }
+
+    /* Any table not converted to the stacked form still must not drag the
+       page sideways with it. */
+    .table:not(.table-stack) {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+
+    .lock-item { flex-wrap: wrap; gap: 8px; }
+    .footer { padding: 16px 12px; }
+}
+
+/* Stacked tables ----------------------------------------------------------
+   A row becomes a card and each cell carries its own label via `data-label`,
+   so the label and the <th> stay one string in one file. Opt-in per table:
+   dense tables where lining values up column-wise is the point are better
+   left scrolling. */
+@media (max-width: 768px) {
+    .table-stack,
+    .table-stack tbody,
+    .table-stack tr,
+    .table-stack td {
+        display: block;
+        width: 100%;
+    }
+    .table-stack thead { display: none; }
+    .table-stack tr {
+        border: 1px solid var(--gray-200);
+        border-radius: var(--border-radius);
+        padding: 10px 12px;
+        margin-bottom: 10px;
+    }
+    .table-stack tr:hover { background: none; }
+    .table-stack td {
+        border: none;
+        padding: 3px 0;
+        display: flex;
+        align-items: baseline;
+        /* Cells hold several siblings (status badges), and flex does not
+           wrap by default -- so without this they stay on one line however
+           many there are, and overflow-wrap cannot help: the badges are
+           nowrap and offer no break opportunity to find. */
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        /* `anywhere`, not `break-word`: only `anywhere` shrinks min-content
+           width, and min-content is the floor a flex item refuses to go
+           below. It sits on the cell so the anonymous flex item wrapping a
+           bare text node inherits it -- that item cannot be selected. */
+        overflow-wrap: anywhere;
+    }
+    .table-stack td::before {
+        content: attr(data-label);
+        flex: 0 0 96px;
+        color: var(--gray-500);
+        font-size: 12px;
+    }
+    .table-stack td:not([data-label])::before { display: none; }
+    .table-stack td > * { min-width: 0; }
+}

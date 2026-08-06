@@ -6,10 +6,12 @@ role / naysayer / embodiment enforcement applies to it -- the gap recorded
 in CLAUDE.md as "UI 直叩きへの効力は現時点要件外 (msg-003 D-2)".
 
 This module closes that gap by claiming the three write routes before the
-read-only proxy forwards them. A browser write now runs the *same* helpers
-the MCP tools run (``_check_role_allowed``, ``_enforce_close_policies``,
+proxy forwards them. A browser write now runs the *same* helpers the MCP
+tools run (``_check_role_allowed``, ``_enforce_close_policies``,
 ``_check_can_close``) and only then reaches Conclair, via the adapter.
-GETs still proxy straight through -- reads have nothing to enforce.
+GETs still proxy straight through -- reads have nothing to enforce, and so
+does the loop control form post, which carries no role and no msg (see
+``chatroom_proxy.chatroom_loop_control``).
 
 Keeping enforcement here rather than in Conclair preserves the service
 boundary: Conclair stays an append-only log that validates nothing and

@@ -11,7 +11,7 @@
 <!-- Workspace Selector -->
 <div class="toolbar">
     <select id="workspace-select" class="select"
-            hx-get="/dashboard/projects"
+            hx-get="/dashboard/_projects"
             hx-target="#projects-list"
             hx-include="[name='workspace_id']"
             name="workspace_id">
@@ -31,7 +31,7 @@
 
 <!-- Projects List -->
 <div id="projects-list" class="projects-grid"
-     hx-get="/dashboard/projects?workspace_id={{ selected_workspace }}"
+     hx-get="/dashboard/_projects?workspace_id={{ selected_workspace }}"
      hx-trigger="load"
      hx-swap="innerHTML">
     <p class="loading">Loading projects...</p>

@@ -29,6 +29,15 @@ all of ``/static``: Magickit mounts its own ``/static`` for the dashboard
 (``dashboard.css`` / ``dashboard.js``). The filenames do not collide, so
 the two Conclair assets are forwarded individually and everything else
 still falls through to Magickit's own mount.
+
+Which methods are proxied
+-------------------------
+GET, plus exactly one POST: the loop control form
+(``/ui/projects/{project}/control``). Chatroom writes are *not* proxied --
+``chatroom_writes`` claims those routes ahead of this router so they run
+the role / naysayer / embodiment gates first. Loop control has no such
+gate to run, so it is forwarded rather than reimplemented behind an empty
+one; see the route's own docstring.
 """
 
 from __future__ import annotations
@@ -157,7 +166,9 @@ def _proxied_response(upstream: httpx.Response, upstream_base: str) -> Response:
     )
 
 
-async def _proxy(request: Request, upstream_path: str) -> Response:
+async def _proxy(
+    request: Request, upstream_path: str, *, body: bytes | None = None
+) -> Response:
     client = _get_client()
     try:
         upstream = await client.request(
@@ -165,6 +176,7 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
             upstream_path,
             params=dict(request.query_params),
             headers=_forwardable_request_headers(request),
+            content=body,
         )
     except httpx.HTTPError as e:
         logger.error(
@@ -183,6 +195,29 @@ async def _proxy(request: Request, upstream_path: str) -> Response:
             media_type="text/html; charset=utf-8",
         )
     return _proxied_response(upstream, str(client.base_url))
+
+
+@router.post("/ui/projects/{project}/control")
+async def chatroom_loop_control(request: Request, project: str) -> Response:
+    """Forward the loop control (HOLD / RESUME) form post to Conclair.
+
+    The one POST this module carries, and the exception proves the rule
+    stated in ``chatroom_writes``: writes are intercepted there because
+    they need the role / naysayer / embodiment gates. Loop control has
+    none to run. It carries no ``role`` and no msg, the tailnet is the
+    trust boundary by decision, and its ``actor`` is a record rather than
+    a credential -- so a gate handler here would be an empty passthrough
+    wearing a gate's clothes, and the next reader would have to prove
+    that before touching it.
+
+    Without this route the widget renders through Magickit (GETs proxy
+    fine) but its buttons 405 -- and Magickit is the tailnet front door,
+    i.e. the phone-from-anywhere path the whole feature exists for.
+    Conclair direct (:8115) is a tunnel, not that path.
+    """
+    return await _proxy(
+        request, f"/ui/projects/{project}/control", body=await request.body()
+    )
 
 
 @router.get("/ui")
