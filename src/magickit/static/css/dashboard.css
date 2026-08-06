@@ -442,6 +442,40 @@ textarea {
     padding: 20px;
 }
 
+/* Task detail rows (the /dashboard/_tasks/{id} fragment) */
+.detail-row {
+    display: flex;
+    gap: 16px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--gray-100);
+    font-size: 13px;
+}
+
+.detail-row:last-child {
+    border-bottom: none;
+}
+
+.detail-label {
+    flex: 0 0 110px;
+    color: var(--gray-500);
+}
+
+/* minmax-style floor: a long id or error must wrap inside the row rather
+   than push the modal wider than the screen. */
+.detail-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.detail-pre {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    color: var(--gray-700);
+}
+
 /* Events List */
 .event-item {
     display: flex;

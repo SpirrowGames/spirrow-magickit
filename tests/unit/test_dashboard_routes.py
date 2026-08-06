@@ -125,6 +125,33 @@ def test_the_known_gap_is_still_a_gap():
     )
 
 
+def test_every_scripted_htmx_target_has_a_route_under_it():
+    """The scan above only sees hx-* attributes, and not every target is one.
+
+    tasks.html builds one in JavaScript -- `htmx.ajax('GET',
+    '/dashboard/_tasks/' + id, ...)` for the Details button -- and it
+    pointed at `/dashboard/tasks/{id}`, which has never existed. The button
+    opened the modal and left it on "Loading..." forever, because a 404 into
+    an HTMX swap puts nothing on the page and says nothing.
+
+    Only the literal prefix is checkable; the rest is concatenation. That is
+    enough to catch a prefix that leads nowhere, which is the failure this
+    had.
+    """
+    paths = {path for _, path in route_table(create_app())}
+
+    dangling = []
+    for template in sorted(TEMPLATES.glob("*.html")):
+        source = template.read_text()
+        for method, prefix in re.findall(
+            r"""htmx\.ajax\(\s*['"](\w+)['"]\s*,\s*['"]([^'"]+)['"]""", source
+        ):
+            if not any(p.startswith(prefix) for p in paths):
+                dangling.append(f"{template.name}: {method} {prefix}...")
+
+    assert not dangling, f"scripted HTMX targets with no route under them: {dangling}"
+
+
 def test_no_htmx_target_is_a_whole_page():
     """The general form of the self-nesting bug.
 

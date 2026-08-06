@@ -477,6 +477,68 @@ def create_app() -> FastAPI:
             """
         return HTMLResponse(pills)
 
+    # The Details button in each task row opened the modal and left it on
+    # "Loading..." -- tasks.html asks for the task here and nothing served
+    # it. Under `_tasks/` rather than `tasks/{id}` so the fragment prefix
+    # stays the thing that marks a fragment: a real task *page* is a
+    # plausible thing to add later, and it would want /dashboard/tasks/{id}.
+    @app.get("/dashboard/_tasks/{task_id}")
+    async def dashboard_task_detail_html(
+        request: Request, task_id: str
+    ) -> HTMLResponse:
+        """Return one task's detail HTML for the modal."""
+        state_manager = request.app.state.state_manager
+
+        try:
+            task = await state_manager.get_task(task_id)
+        except Exception:
+            task = None
+
+        if task is None:
+            return HTMLResponse(
+                '<p class="empty-state">Task not found</p>', status_code=404
+            )
+
+        def row(label: str, value: str) -> str:
+            return (
+                f'<div class="detail-row"><span class="detail-label">{label}'
+                f'</span><span class="detail-value">{value}</span></div>'
+            )
+
+        rows = [
+            row("ID", escape(task.id)),
+            row("Name", escape(task.name)),
+            row("Description", escape(task.description or "—")),
+            row("Service", escape(task.service.value)),
+            row("Priority", str(task.priority)),
+            row(
+                "Status",
+                f'<span class="status-badge {escape(task.status.value)}">'
+                f"{escape(task.status.value)}</span>",
+            ),
+            row("Created", task.created_at.strftime("%Y-%m-%d %H:%M:%S")),
+        ]
+        if task.started_at:
+            rows.append(row("Started", task.started_at.strftime("%Y-%m-%d %H:%M:%S")))
+        if task.completed_at:
+            rows.append(
+                row("Completed", task.completed_at.strftime("%Y-%m-%d %H:%M:%S"))
+            )
+        if task.retry_count:
+            rows.append(row("Retries", str(task.retry_count)))
+        if task.dependencies:
+            rows.append(
+                row("Depends on", escape(", ".join(task.dependencies)))
+            )
+        if task.error:
+            rows.append(row("Error", f'<pre class="detail-pre">{escape(task.error)}</pre>'))
+        if task.result:
+            rows.append(
+                row("Result", f'<pre class="detail-pre">{escape(str(task.result))}</pre>')
+            )
+
+        return HTMLResponse("".join(rows))
+
     @app.get("/dashboard/events")
     async def dashboard_events_html(request: Request) -> HTMLResponse:
         """Return events list HTML for HTMX."""
@@ -495,8 +557,8 @@ def create_app() -> FastAPI:
                     {_get_event_icon(event.event_type.value)}
                 </div>
                 <div class="event-content">
-                    <div class="event-title">Task {event.event_type.value}</div>
-                    <div class="event-time">{event.task_id[:8]}... - {event.created_at.strftime('%H:%M:%S')}</div>
+                    <div class="event-title">Task {escape(event.event_type.value)}</div>
+                    <div class="event-time">{escape(event.task_id[:8])}... - {event.created_at.strftime('%H:%M:%S')}</div>
                 </div>
             </div>
             """
@@ -516,8 +578,8 @@ def create_app() -> FastAPI:
             html += f"""
             <div class="lock-item">
                 <div class="lock-info">
-                    <div class="lock-resource">{lock.resource_type}: {lock.resource_id[:8]}...</div>
-                    <div class="lock-holder">Held by: {lock.holder_id[:8]}...</div>
+                    <div class="lock-resource">{escape(lock.resource_type)}: {escape(lock.resource_id[:8])}...</div>
+                    <div class="lock-holder">Held by: {escape(lock.holder_id[:8])}...</div>
                 </div>
             </div>
             """
@@ -540,10 +602,10 @@ def create_app() -> FastAPI:
             status_class = task.status.value
             html += f"""
             <tr>
-                <td>{task.name}</td>
-                <td>{task.service.value}</td>
+                <td>{escape(task.name)}</td>
+                <td>{escape(task.service.value)}</td>
                 <td>{task.priority}</td>
-                <td><span class="status-badge {status_class}">{task.status.value}</span></td>
+                <td><span class="status-badge {escape(status_class)}">{escape(task.status.value)}</span></td>
             </tr>
             """
         html += '</tbody></table>'
