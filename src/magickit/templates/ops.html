@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}稼働状況 - Magickit{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>稼働状況</h1>
+    <p class="subtitle">
+        自律ループが回っているか、止まっているか、何を待っているか。
+        <span class="muted">{{ stall_minutes }} 分無音で「停止疑い」。</span>
+    </p>
+</div>
+
+<!-- Backend health. Its own slower poll: the Prismind probe is an MCP
+     round trip and must not hold up the status table. -->
+<section class="ops-health"
+         hx-get="/dashboard/_ops_health"
+         hx-trigger="load, every 60s"
+         hx-swap="innerHTML">
+    <p class="loading">backend を確認中...</p>
+</section>
+
+<!-- The actor box lives on the page, not in the fragment: the fragment is
+     replaced on every poll, and an input inside it would lose whatever
+     was half-typed into it every 20 seconds. -->
+<div class="ops-actor-bar">
+    <label for="ops-actor">actor</label>
+    <input type="text" id="ops-actor" name="actor" placeholder="takahito"
+           autocomplete="off">
+    <span class="muted">ループ制御の操作者として記録されます</span>
+</div>
+
+<!-- The table redraws itself every 20s, and every control button swaps
+     this same target so a state change is visible without waiting for
+     the next tick. -->
+<section id="ops-table"
+         hx-get="/dashboard/_ops"
+         hx-trigger="load, every 20s"
+         hx-target="this"
+         hx-swap="innerHTML">
+    <p class="loading">プロジェクトを確認中...</p>
+</section>
+
+<p class="ops-trust muted">
+    actor は <strong>記録であって認証ではありません</strong>。
+    tailnet に到達できる者は誰でもループを停止・再開できます。
+</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// The actor box shares Conclair's localStorage key: the chatroom UI is
+// served from this same origin through the proxy, so a name typed there
+// is the name used here. Two boxes asking the same question and keeping
+// separate answers would be worse than one.
+(function () {
+    var KEY = "conclair.author";
+    document.addEventListener("DOMContentLoaded", function () {
+        var input = document.getElementById("ops-actor");
+        if (!input) return;
+        input.value = localStorage.getItem(KEY) || "";
+        input.addEventListener("change", function () {
+            var v = input.value.trim();
+            if (v) { localStorage.setItem(KEY, v); } else { localStorage.removeItem(KEY); }
+        });
+    });
+})();
+</script>
+{% endblock %}

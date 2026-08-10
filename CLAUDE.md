@@ -1440,6 +1440,52 @@ github(operation="list_issues", arguments={"owner": "SpirrowGames", "repo": "spi
 - 上流通信は **ステートレスな per-call httpx JSON-RPC** (`initialize → notifications/initialized → method`)。FastMCP の StreamableHttp クライアント (ステートフルな SSE GET ストリームで github-mcp が 405 → 無限 reconnect → 長時間稼働で 400) を回避した経緯あり
 - 補足: Claude Code (CLI) は `tools/list_changed` を自動反映するため、CLI 利用に限れば動的 gate 方式も成立する (本構成はコネクタ=モバイル前提なのでディスパッチャを採用)
 
+## 稼働状況ページ (`web/ops.py`)
+
+`/dashboard` = **稼働状況**。「自律ループが今回っているのか、止まっているのか、何を待っているのか」に
+1 画面で答える。従来の Magickit 内部ダッシュボード (自前 SQLite の task queue / locks / events) は
+`/dashboard/system` に移動した — あれは Magickit というサービスの状態であって、コードを書いている
+ループの状態ではない。
+
+データ源はすべて Conclair (Magickit は集約と判定のみ):
+
+| 源 | 得られるもの |
+|---|---|
+| `GET /v1/projects` | project ごとの thread 数・status 内訳・gate 数・最終メッセージ時刻 |
+| `GET /v1/projects/{p}/control` | `desired` (許可されているか) と `observed` (ループが最後に見た時刻 = heartbeat) |
+| `GET /v1/projects/{p}/events?limit=1` | 直近に動いた thread と actor (「稼働中」の根拠) |
+
+**2 軸を潰さない。** 稼働軸 (`running` / `stalled` / `held` / `unmanaged` / `unknown`) は
+ループが回っているか、ブロック軸 (`返答待ち` / `gate 待ち`) は何を待っているか。
+潰すと「naysayer 待ち」と「naysayer 待ちのまま 2 時間前に死んだ」が同じバッジになる。
+
+判定の優先順位 (`classify()`。この順序自体が仕様):
+
+1. control の**読み取り失敗**は `unknown`。呼び出し側は読み取り失敗を `hold` として扱う契約なので、
+   ここで「たぶん動いている」を捏造すると同じ間違いになる (`GET` が 404 を返さない理由と同根)
+2. `desired == hold` は `held`。意図的な停止を赤くすると赤が読まれなくなる
+3. `observed` の報告が一度も無いものは `unmanaged`。conductor が付いていない古い scratch project を
+   `stalled` にすると、対処不能な警告で画面が埋まる
+4. それ以外は `max(observed_at, last_activity_at)` からの経過が `ops_stall_minutes` (既定 30) 超で `stalled`
+
+**`stalled` は疑いであって事実ではない。** プロセスは観測していない。長いターンの途中も同じに見えるので、
+色ではなく文章でそう書いてある。Conclair 側 control widget の `stale` (15 分) とは別の問い —
+あちらは 1 project の `observed_at` だけを見る。こちらは chatroom の活動も畳むので、
+報告が疎でも AI が喋っていれば「止まっている」とは言わない。
+
+HOLD / RESUME ボタンは Conclair の `PUT /control` をそのまま叩く (Conclair `/ui` のウィジェットと同一
+レコード)。`actor` は `conclair.author` の localStorage を共有する — proxy 越しで同一 origin だから。
+**記録であって認証ではない**点も同じ。
+
+backend ヘルス帯は別 fragment・別 poll (60s)。`PROBE_TIMEOUT` (10s) で頭打ちにしてある:
+adapter 側の timeout は実作業向けに 240〜360s あり、それを継ぐと自分の poll 間隔より長生きする。
+**Lexora の `/health` は断続的に 20〜30s ブロックする** (2026-08-11 実測、素の httpx でも再現) ため、
+`確認不可` が出るのは概ねこれ。なお cleanup は `isinstance(adapter, BaseAdapter)` で判定する —
+`MCPBaseAdapter.__getattr__` は未知の属性を MCP ツール呼び出しに変えるので、`getattr(a, "close", None)`
+は close を*見つける*のではなく*でっち上げて*毎回 bogus な `close` ツールを飛ばす。
+
+設定: `ops.stall_minutes` (YAML) / `MAGICKIT_OPS_STALL_MINUTES` (env)。
+
 ### ヘルスチェック (`health.py`)
 
 全サービスのヘルス状態を一括確認。

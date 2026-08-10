@@ -70,13 +70,24 @@ def test_dashboard_template_points_at_a_route_that_exists():
 def _htmx_targets():
     """(template, method, path) for every hx-get / hx-post in the templates.
 
+    `rglob`, not `glob`: the partials under templates/partials are the
+    HTMX swap targets themselves and carry hx-* attributes of their own
+    (the ops table's control buttons post from inside one). Scanning only
+    the top level checked the pages and skipped exactly the files whose
+    whole reason for existing is to be fetched.
+
     Query strings are dropped: they carry Jinja expressions, and the route
-    table is keyed on path.
+    table is keyed on path. Paths interpolating a Jinja expression are
+    skipped -- `/dashboard/_ops/{{ row.project }}/control` is not a
+    literal, and the route table is keyed on the declared path.
     """
-    for template in sorted(TEMPLATES.glob("*.html")):
+    for template in sorted(TEMPLATES.rglob("*.html")):
         source = template.read_text()
         for verb, url in re.findall(r'hx-(get|post)="([^"]+)"', source):
-            yield template.name, verb.upper(), url.split("?", 1)[0]
+            path = url.split("?", 1)[0]
+            if "{{" in path or "{%" in path:
+                continue
+            yield template.name, verb.upper(), path
 
 
 def test_every_htmx_target_is_a_real_route():
@@ -121,7 +132,7 @@ def test_every_scripted_htmx_target_has_a_route_under_it():
     paths = {path for _, path in route_table(create_app())}
 
     dangling = []
-    for template in sorted(TEMPLATES.glob("*.html")):
+    for template in sorted(TEMPLATES.rglob("*.html")):
         source = template.read_text()
         for method, prefix in re.findall(
             r"""htmx\.ajax\(\s*['"](\w+)['"]\s*,\s*['"]([^'"]+)['"]""", source
