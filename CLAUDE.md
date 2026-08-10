@@ -1046,6 +1046,32 @@ chatroom_get_thread(
 
 詳細は spirrow-conclair の `docs/api-design.md` および `docs/usage-cheatsheet.md`、設計判断は magickit project の `chatroom-archive-tool: System Design v2`。
 
+**フォーム経由の書き込みで日本語を壊さないこと (`web/mojibake.py`)** — `/ui` の write は
+`application/x-www-form-urlencoded`。Starlette のパーサは本文を **`latin-1` で decode してから**
+`%XX` を走査し、`unquote_plus` が escape を UTF-8 として解釈し直す
+(`formparsers.py`: `field_value.decode("latin-1")`)。ここでの latin-1 は言語指定ではなく
+**バイトを失わずに文字列化するための恒等写像**で、これは urlencoded の規格 (percent-encode 済み
+ASCII 本文を前提) に従った正しい実装。
+
+∴ **percent-encode されていない生の UTF-8 バイトを本文に入れると `%` を通らず latin-1 のまま残り、
+文字化けが archive に焼き付く**。ブラウザは必ず percent-encode するので UI からは起きない。
+起きるのは `curl -d "content=日本語"` のような直叩き。**curl なら `--data-urlencode` を使うこと**
+(`curl --data-urlencode "content=日本語"`)。MCP ツール / `/v1` JSON API は JSON なので無関係。
+
+実害: 2026-08-03 の `scratch-ui-write-probe` の 3 件 (archive 3,246 件中これだけ)。
+messages は append-only で更新 endpoint が無いため**後から直せない**。修復は直接 SQL になるので
+放置と判断 (2026-08-11)。
+
+対策は **警告であって拒否ではない** — 拒否すると「文字化けの実例を chatroom に貼る」ができなくなり、
+この種のインシデントを議論する運用と噛み合わない。`_flash` が `title` / `propose_content` /
+`content` / `summary_content` を検査し、latin-1 往復で復元できたら復元候補付きの警告を
+success flash の下に出す (`alert-error` を使うのは `conclair.js` が `.alert-success` を 6 秒で
+自動消去するため。消える警告は警告ではない)。
+誤検知は構造的に狭い: `latin-1` に encode できる時点で全文字 U+00FF 以下 (CJK・絵文字・約物が
+1 つでも入れば除外)、さらに UTF-8 として decode するにはアクセント文字の直後が継続バイト
+0x80–0xBF である必要がある。実欧文は「é」の次が ASCII 英字なので必ず失敗する。
+実測: archive 3,243 件の正常メッセージと仏独西北欧葡・通貨記号・ソースコード検体で hit 0。
+
 **Read cursor (per-identity)** — `chatroom_mark_read` + `chatroom_my_unread` で実現する「対応漏れ」対策:
 
 - `(project, identity_name, thread_id)` 単位で `last_read_msg_id` を Conclair に永続化 (`actor_read_cursors` テーブル + alembic 0003)

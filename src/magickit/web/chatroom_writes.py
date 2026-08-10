@@ -31,6 +31,7 @@ from fastapi import APIRouter, Form, Request, Response
 
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.mcp.tools import chatroom as chatroom_tools
+from magickit.web.mojibake import first_mojibake
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -45,10 +46,53 @@ def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _flash(message: str, *, status_code: int = 200) -> Response:
-    """Render a success flash into Conclair's alert markup."""
+def _mojibake_notice(field: str, recovered: str) -> str:
+    """Warn that the write landed but its text looks mis-decoded.
+
+    Rendered as ``alert-error`` rather than a warning class of its own:
+    Conclair's stylesheet has only error and success, and -- more to the
+    point -- ``conclair.js`` auto-dismisses ``.alert-success`` after six
+    seconds. A warning that disappears on its own is no warning, and this
+    one cannot be acted on later: the message is already in an append-only
+    log with no update endpoint. The copy leads with the success so the
+    red box is not read as a failed post.
+    """
+    return (
+        '<div class="alert alert-error">'
+        "<strong>投稿は成功しました</strong>が、"
+        f"<code>{html.escape(field)}</code> が文字化けしている可能性があります"
+        "（UTF-8 が latin-1 として読まれた形）。<br>"
+        f"復元候補: <code>{html.escape(recovered[:200])}</code><br>"
+        "フォーム本文の percent-encode 漏れが原因です"
+        "（curl なら <code>--data-urlencode</code> を使ってください）。"
+        "<strong>メッセージは append-only なので後から修正できません。</strong>"
+        "</div>"
+    )
+
+
+def _flash(
+    message: str,
+    *,
+    status_code: int = 200,
+    text_fields: dict[str, str] | None = None,
+) -> Response:
+    """Render a success flash into Conclair's alert markup.
+
+    ``text_fields`` are the free-text fields the caller submitted; if any
+    looks mis-decoded, the warning is appended below the success. The
+    check runs on what the author typed, not on what was stored, so a body
+    rewritten by the close policies is not what gets inspected.
+    """
+    body = f'<div class="alert alert-success">{html.escape(message)}</div>'
+    hit = first_mojibake(text_fields or {})
+    if hit is not None:
+        field, recovered = hit
+        logger.warning(
+            "Mojibake detected on a chatroom write", field=field, recovered=recovered
+        )
+        body += _mojibake_notice(field, recovered)
     return Response(
-        content=f'<div class="alert alert-success">{html.escape(message)}</div>',
+        content=body,
         status_code=status_code,
         media_type="text/html; charset=utf-8",
         headers={"HX-Trigger": "messagePosted"},
@@ -121,7 +165,10 @@ async def open_thread(
 
     if _is_error(result):
         return _error_flash(result)
-    return _flash(f"opened {thread_id}")
+    return _flash(
+        f"opened {thread_id}",
+        text_fields={"title": title, "propose_content": propose_content},
+    )
 
 
 @router.post("/ui/projects/{project}/threads/{thread_id}/messages")
@@ -219,7 +266,7 @@ async def post_message(
     text = f"posted {msg.get('msg_id', '?')} ({msg.get('type', type)})"
     if result.get("thread_status_changed_to"):
         text += f" — status → {result['thread_status_changed_to']}"
-    return _flash(text)
+    return _flash(text, text_fields={"content": content})
 
 
 @router.post("/ui/projects/{project}/threads/{thread_id}/close")
@@ -288,7 +335,10 @@ async def close_thread(
 
     if _is_error(result):
         return _error_flash(result)
-    return _flash(f"closed {thread_id} — status → resolved")
+    return _flash(
+        f"closed {thread_id} — status → resolved",
+        text_fields={"summary_content": summary_content},
+    )
 
 
 def _adapter() -> ChatroomAdapter:
