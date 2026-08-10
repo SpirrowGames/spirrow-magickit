@@ -40,3 +40,11 @@ auth:
   enabled: false
   # jwt_secret: 環境変数 MAGICKIT_JWT_SECRET で設定してください
   jwt_expire_minutes: 60
+
+# 稼働状況ページ (/dashboard)
+ops:
+  # 直近の chatroom 活動もループの heartbeat も、これだけ途絶えたら
+  # 「停止疑い」と表示する。1 ターン (実装なら数分) をまたげる長さで、
+  # かつ「夜中に落ちていた」を翌朝まで気づかない長さにはしない。
+  # これは推測であって観測ではない (web/ops.py を参照)。
+  stall_minutes: 30

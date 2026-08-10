@@ -1,0 +1,139 @@
+{#
+  The status table. Rendered for the 20s poll and for every control-button
+  post, so this file is the single definition of what a row says.
+
+  Errors render *inside* the fragment rather than replacing it: swapping a
+  flash over the table would take the control buttons and the poll trigger
+  off the page, leaving no way to retry.
+#}
+
+{% if flash_error %}
+<div class="alert alert-error">{{ flash_error }}</div>
+{% endif %}
+
+{% if unavailable %}
+<p class="empty-state">{{ unavailable }}</p>
+<p class="muted">
+    稼働状況は Conclair の記録から組み立てています。読めない間は
+    <strong>「動いている」とも「止まっている」とも言えません</strong>
+    （既定値で埋めると停止を見落とすため、そうしていません）。
+</p>
+
+{% elif not rows %}
+<p class="empty-state">プロジェクトがまだありません</p>
+
+{% else %}
+<div class="ops-summary">
+    {% for state in status_order %}
+    {% if counts.get(state) %}
+    <span class="ops-chip ops-chip-{{ state }}">
+        {{ status_labels[state] }} <strong>{{ counts[state] }}</strong>
+    </span>
+    {% endif %}
+    {% endfor %}
+    <span class="muted ops-checked">{{ checked_at | iso }} 時点</span>
+</div>
+
+<table class="table table-stack ops-table">
+    <thead>
+        <tr>
+            <th>project</th>
+            <th>状態</th>
+            <th>最終活動</th>
+            <th>直近の動き</th>
+            <th>ブロック</th>
+            <th>ループ制御</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+        <tr class="ops-row ops-row-{{ row.status }}">
+            <td data-label="project">
+                <a href="/ui/projects/{{ row.project }}/threads">{{ row.project }}</a>
+                <div class="muted ops-sub">
+                    open {{ row.open_threads }} / {{ row.thread_count }} thread,
+                    {{ row.message_count }} msg
+                </div>
+            </td>
+
+            <td data-label="状態">
+                <span class="ops-badge ops-badge-{{ row.status }}">{{ row.status_label }}</span>
+                {% if row.diverged %}
+                <span class="ops-badge ops-badge-pending" title="設定はしたが、ループがまだ読んでいません">反映待ち</span>
+                {% endif %}
+                {% if row.status == 'stalled' %}
+                <div class="muted ops-sub">
+                    {{ stall_minutes }} 分以上動きなし。長いターンの途中でもこう見えます
+                </div>
+                {% elif row.status == 'unknown' %}
+                <div class="muted ops-sub">{{ row.control_error }}</div>
+                {% elif row.status == 'unmanaged' or not row.observed_at %}
+                <div class="muted ops-sub">ループからの報告が一度もありません</div>
+                {% endif %}
+            </td>
+
+            <td data-label="最終活動">
+                <span class="ops-idle" title="{{ row.heartbeat_at | iso }}">{{ row.idle_text }}</span>
+                <div class="muted ops-sub">
+                    {% if row.observed_at %}
+                    heartbeat {{ row.observed_at | ago }}
+                    {% if row.observed_actor %}({{ row.observed_actor }}){% endif %}
+                    {% else %}
+                    heartbeat なし
+                    {% endif %}
+                </div>
+            </td>
+
+            <td data-label="直近の動き">
+                {% if row.last_event.thread_id %}
+                <a href="/ui/projects/{{ row.project }}/threads/{{ row.last_event.thread_id }}">{{ row.last_event.thread_id }}</a>
+                <div class="muted ops-sub">
+                    {{ row.last_event.actor }} / {{ row.last_event.action }}
+                    / {{ row.last_event.timestamp | ago }}
+                </div>
+                {% else %}
+                <span class="muted">—</span>
+                {% endif %}
+            </td>
+
+            <td data-label="ブロック">
+                {% if row.blocked_note %}
+                <span class="ops-badge ops-badge-blocked">{{ row.blocked_note }}</span>
+                {% else %}
+                <span class="muted">—</span>
+                {% endif %}
+            </td>
+
+            <td data-label="ループ制御">
+                <div class="ops-control" role="group" aria-label="loop control {{ row.project }}">
+                {% for state, label, desc in control_choices %}
+                    <button type="button"
+                            class="ops-control-btn ops-control-btn-{{ state }}{% if row.desired == state %} is-selected{% endif %}"
+                            title="{{ desc }}"
+                            aria-pressed="{{ 'true' if row.desired == state else 'false' }}"
+                            hx-post="/dashboard/_ops/{{ row.project }}/control"
+                            hx-vals='{"state": "{{ state }}"}'
+                            hx-include="#ops-actor"
+                            hx-target="#ops-table"
+                            hx-swap="innerHTML">{{ label }}</button>
+                {% endfor %}
+                </div>
+                <div class="muted ops-sub">
+                    {% if row.configured %}
+                    設定 {{ row.desired | upper }}{% if row.desired_actor %} ({{ row.desired_actor }}){% endif %}
+                    {% elif row.control_error %}
+                    設定 不明
+                    {% else %}
+                    未設定 — 既定 {{ (row.desired or 'run') | upper }}
+                    {% endif %}
+                </div>
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if hidden %}
+<p class="empty-state">+{{ hidden }} 件は表示していません（優先度の低い順に省略）</p>
+{% endif %}
+{% endif %}

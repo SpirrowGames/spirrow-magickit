@@ -1,0 +1,16 @@
+{#
+  Backend health strip. Three states, not two: `None` means the probe
+  itself failed, which is not the same claim as "the service answered and
+  said it was unhealthy" -- and on a page whose job is to explain why
+  nothing is moving, the difference is the difference between "restart
+  the service" and "the check is broken".
+#}
+<div class="ops-health-strip">
+    <span class="muted">backend:</span>
+    {% for name, ok in services.items() %}
+    <span class="ops-health-item ops-health-{{ 'up' if ok is true else ('down' if ok is false else 'unknown') }}">
+        {{ name }}
+        {% if ok is true %}up{% elif ok is false %}down{% else %}確認不可{% endif %}
+    </span>
+    {% endfor %}
+</div>

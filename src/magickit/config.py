@@ -115,6 +115,13 @@ class Settings(BaseSettings):
     # requires.
     naysayer_identities: list[str] = Field(default_factory=lambda: ["Einstein"])
 
+    # Ops view: how long a project may go without any chatroom activity or
+    # loop heartbeat before the page calls it stalled. Long enough to sit
+    # through an implementation turn (minutes) plus a slow review, short
+    # enough that "it died overnight" is not discovered the next morning.
+    # This is a *suspicion* threshold, not a fact -- see web/ops.py.
+    ops_stall_minutes: int = Field(default=30)
+
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Settings":
         """Load settings from a YAML config file.
@@ -198,6 +205,10 @@ class Settings(BaseSettings):
                 flat_config["naysayer_gate_enabled"] = naysayer_gate.get("enabled")
             flat_config["naysayer_gate_tag"] = naysayer_gate.get("tag")
             flat_config["naysayer_identities"] = naysayer_gate.get("identities")
+
+        # Ops view settings
+        if ops := yaml_config.get("ops"):
+            flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
 
         # Remove None values
         flat_config = {k: v for k, v in flat_config.items() if v is not None}

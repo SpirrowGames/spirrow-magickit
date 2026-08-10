@@ -19,9 +19,11 @@
             <a href="/dashboard">Magickit</a>
         </div>
         <div class="nav-links">
-            <a href="/dashboard" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/dashboard" class="{% if active_page == 'ops' %}active{% endif %}">稼働状況</a>
+            <a href="/ui/">Chatroom</a>
             <a href="/dashboard/projects" class="{% if active_page == 'projects' %}active{% endif %}">Projects</a>
             <a href="/dashboard/tasks" class="{% if active_page == 'tasks' %}active{% endif %}">Tasks</a>
+            <a href="/dashboard/system" class="{% if active_page == 'system' %}active{% endif %}">System</a>
         </div>
         <div class="nav-user">
             {% if user %}

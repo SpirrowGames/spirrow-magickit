@@ -761,3 +761,153 @@ textarea {
     .table-stack td:not([data-label])::before { display: none; }
     .table-stack td > * { min-width: 0; }
 }
+
+/* ==========================================================================
+   稼働状況 (ops) view
+   ==========================================================================
+   Colour carries the 稼働軸 only. The ブロック軸 gets one neutral badge on
+   purpose: "waiting for a gate" is a normal state of a healthy loop, and
+   painting it amber next to a genuinely stalled project would make the two
+   compete for the same alarm. */
+
+.muted { color: var(--gray-500); }
+
+.alert {
+    padding: 10px 14px;
+    border-radius: var(--border-radius);
+    margin-bottom: 12px;
+    font-size: 13px;
+}
+.alert-error { background: #FEE2E2; color: #B91C1C; }
+
+/* --- backend health strip --- */
+.ops-health { margin-bottom: 12px; }
+
+.ops-health-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.ops-health-item {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+}
+.ops-health-up      { background: #D1FAE5; color: #047857; }
+.ops-health-down    { background: #FEE2E2; color: #B91C1C; }
+.ops-health-unknown { background: var(--gray-100); color: var(--gray-600); }
+
+/* --- actor bar --- */
+.ops-actor-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    font-size: 13px;
+}
+.ops-actor-bar label { font-weight: 600; color: var(--gray-600); }
+.ops-actor-bar input {
+    padding: 5px 10px;
+    border: 1px solid var(--gray-300);
+    border-radius: var(--border-radius);
+    font: inherit;
+    min-width: 0;
+    width: 160px;
+}
+
+/* --- summary chips --- */
+.ops-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.ops-chip {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: var(--gray-100);
+    color: var(--gray-700);
+}
+.ops-chip-running   { background: #D1FAE5; color: #047857; }
+.ops-chip-stalled   { background: #FEE2E2; color: #B91C1C; }
+.ops-chip-held      { background: #E0E7FF; color: #3730A3; }
+.ops-chip-unknown   { background: #FEF3C7; color: #B45309; }
+.ops-chip-unmanaged { background: var(--gray-100); color: var(--gray-500); }
+.ops-checked { margin-left: auto; font-size: 12px; }
+
+/* --- table --- */
+.ops-table td { vertical-align: top; }
+
+.ops-sub {
+    font-size: 12px;
+    margin-top: 2px;
+    /* Thread ids and actor names are long and unbreakable; without this
+       they set the column's min-content width and push the control
+       buttons off a narrow screen. */
+    overflow-wrap: anywhere;
+}
+
+.ops-idle { font-weight: 600; }
+
+/* The stalled row gets a rule down its edge, not a fill: a filled row
+   makes its own text harder to read, and this table is mostly text. */
+.ops-row-stalled { box-shadow: inset 3px 0 0 var(--danger-color); }
+.ops-row-unknown { box-shadow: inset 3px 0 0 var(--warning-color); }
+.ops-row-held    { box-shadow: inset 3px 0 0 var(--primary-color); }
+
+.ops-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.ops-badge-running   { background: #D1FAE5; color: #047857; }
+.ops-badge-stalled   { background: #FEE2E2; color: #B91C1C; }
+.ops-badge-held      { background: #E0E7FF; color: #3730A3; }
+.ops-badge-unknown   { background: #FEF3C7; color: #B45309; }
+.ops-badge-unmanaged { background: var(--gray-100); color: var(--gray-500); }
+.ops-badge-pending   { background: #FEF3C7; color: #B45309; }
+.ops-badge-blocked   { background: var(--gray-100); color: var(--gray-700); }
+
+/* --- control buttons --- */
+.ops-control {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.ops-control-btn {
+    padding: 4px 8px;
+    border: 1px solid var(--gray-300);
+    border-radius: var(--border-radius);
+    background: white;
+    color: var(--gray-600);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.ops-control-btn:hover { background: var(--gray-100); }
+
+/* The selected state is the *desired* value, which may not be what the
+   loop has read yet -- the 反映待ち badge in the 状態 column is what says
+   so. Marking it here as well would claim the setting had taken. */
+.ops-control-btn.is-selected {
+    border-color: var(--primary-color);
+    background: var(--primary-color);
+    color: white;
+}
+.ops-control-btn-hold.is-selected {
+    border-color: var(--danger-color);
+    background: var(--danger-color);
+}
+
+.ops-trust { margin-top: 16px; font-size: 12px; }

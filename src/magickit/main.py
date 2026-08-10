@@ -34,6 +34,7 @@ from magickit.utils.logging import configure_logging, get_logger
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import close_client as close_chatroom_ui_client
 from magickit.web import dashboard_router as chatroom_dashboard_router
+from magickit.web import ops_router
 from magickit.web import router as chatroom_ui_router
 from magickit.web import writes_router as chatroom_writes_router
 
@@ -198,6 +199,13 @@ def create_app() -> FastAPI:
     # Chatroom panel for the dashboard.
     app.include_router(chatroom_dashboard_router)
 
+    # 稼働状況 (ops) view. Claims "/dashboard" itself -- it answers the
+    # question a human opens the dashboard to ask ("is anything running?"),
+    # which the queue view below cannot: that one reports Magickit's own
+    # SQLite task table, not the autonomous loop. The queue view keeps its
+    # panels and moves to /dashboard/system.
+    app.include_router(ops_router)
+
     # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
     # Starlette matches routes in insertion order, and this router claims the
     # two Conclair assets (conclair.css / conclair.js) that would otherwise
@@ -218,14 +226,20 @@ def create_app() -> FastAPI:
     app.include_router(ws_router)
 
     # Dashboard HTML routes
-    @app.get("/dashboard", response_class=HTMLResponse)
+    #
+    # `/dashboard/system`, not `/dashboard`: this page reports Magickit's
+    # own queue, locks and events. That is a useful view of the service,
+    # but it is not the autonomous loop, and it held the URL a human
+    # reaches for when asking whether anything is running. `web/ops.py`
+    # answers that and now owns `/dashboard`.
+    @app.get("/dashboard/system", response_class=HTMLResponse)
     async def dashboard_page(request: Request) -> HTMLResponse:
-        """Render dashboard page."""
+        """Render the Magickit-internals dashboard page."""
         if templates is None:
             return HTMLResponse("<h1>Templates not configured</h1>", status_code=500)
         return templates.TemplateResponse(
             "dashboard.html",
-            {"request": request, "active_page": "dashboard"},
+            {"request": request, "active_page": "system"},
         )
 
     @app.get("/dashboard/projects", response_class=HTMLResponse)
