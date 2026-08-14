@@ -17,6 +17,13 @@ from fastmcp import FastMCP
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
+from magickit.mcp.pr_gate_ledger import (
+    LedgerVerdict,
+    fetch_ledger_verdict,
+    format_ledger_close_note,
+    is_pr_gate_ledger_thread,
+    parse_pr_ref,
+)
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -313,15 +320,26 @@ async def _enforce_close_policies(
     naysayer_override_reason: str,
     owner_override_reason: str,
 ) -> dict[str, Any]:
-    """Apply the naysayer gate AND the human owner-override for a close/decide.
+    """Apply the naysayer gate AND the ownership policies for a close/decide.
 
-    Two independent policies on the same close path:
-    - naysayer gate (#9): a gated thread needs a fresh approving review or a
-      human gate-override. Unchanged semantics.
-    - owner-override (ADR-2026-06-04-19 D-5): a human may force-close a
-      non-owned thread. Magickit is the decision point — it sets the Conclair
-      ``owner_override`` flag only for human identities. Ownership bypass is
-      independent of the gate (the gate still runs first).
+    Three independent policies on the same close path, in this order:
+
+    1. **naysayer gate (#9)** — a gated thread needs a fresh approving review
+       or a human gate-override. Unchanged semantics. It runs *first* so that
+       neither ownership bypass below can double as a gate bypass.
+    2. **human owner-override (ADR-2026-06-04-19 D-5)** — a human may
+       force-close a non-owned thread. Magickit is the decision point; Conclair
+       honours the flag without deciding who may set it.
+    3. **PR-gate ledger carve-out (T-pr-gate-ledger-debt, msg-1001 §2)** — a
+       non-human ``closeable_roles`` identity may close a *driver-opened
+       PR-review thread* when GitHub proves the PR merged with an APPROVED
+       review at the merged head. See :mod:`magickit.mcp.pr_gate_ledger` for
+       why the artifact — not the relayed critique text — is the evidence.
+
+    (2) and (3) are the same mechanism (set ``owner_override``) reached by two
+    different proofs: "you are the human" and "the state is provable". (3) is
+    scoped so narrowly that it cannot widen (2): it requires the driver's own
+    owner *and* tag, and it refuses on any uncertainty.
 
     Returns ``{"action": "block", "envelope": {...}}`` or
     ``{"action": "proceed", "content": str, "owner_override": bool,
@@ -334,8 +352,11 @@ async def _enforce_close_policies(
     # (Conclair only records a bypass when author != owner).
     owner_override = is_human
 
-    # The thread is needed to run the gate and/or resolve a human force-close.
-    if _settings is None or not (gate_enabled or is_human):
+    # The thread is needed to run the gate, to resolve a human force-close, and
+    # to recognise a PR-gate ledger thread — which is every non-trivial case,
+    # so the read is now unconditional (it used to be skipped for a non-human
+    # author on a deployment with the gate off).
+    if _settings is None:
         return {
             "action": "proceed", "content": content,
             "owner_override": owner_override, "owner_override_reason": None,
@@ -343,8 +364,16 @@ async def _enforce_close_policies(
 
     view = await adapter.get_thread(project=project, thread_id=thread_id, mode="full")
     if "error_type" in view:
-        # fail-closed: a gated/forced close must prove its preconditions.
-        return {"action": "block", "envelope": view}
+        if gate_enabled or is_human:
+            # fail-closed: a gated/forced close must prove its preconditions.
+            return {"action": "block", "envelope": view}
+        # Legacy path (gate off, non-human): an unreadable thread was never a
+        # block here — Conclair's own owner check answers the call. Preserved
+        # verbatim so adding the ledger read changes no pre-existing outcome.
+        return {
+            "action": "proceed", "content": content,
+            "owner_override": owner_override, "owner_override_reason": None,
+        }
     thread = view.get("thread") or {}
     messages = view.get("messages") or []
     gate_tag = _settings.naysayer_gate_tag
@@ -386,6 +415,39 @@ async def _enforce_close_policies(
                 }
             forwarded_reason = reason or None
             content = content + _format_owner_override_note(author, thread_owner, reason)
+
+    # 3) PR-gate ledger carve-out (T-pr-gate-ledger-debt msg-1001 §2). Only for
+    #    a non-human closing someone else's thread — the human already has (2),
+    #    and the owner never needed a bypass at all.
+    if not is_human and author != thread.get("owner") and is_pr_gate_ledger_thread(thread):
+        pr = parse_pr_ref(str(thread.get("title") or ""))
+        verdict = (
+            await fetch_ledger_verdict(pr)
+            if pr is not None
+            else LedgerVerdict(
+                False,
+                "this PR-review thread's title carries no parseable "
+                "owner/repo#number, so the PR it records cannot be checked.",
+            )
+        )
+        if not verdict.closable:
+            return {
+                "action": "block",
+                "envelope": _gate_error(
+                    "PrGateLedgerNotClosableError",
+                    f"this PR-gate ledger thread is not mechanically closable: "
+                    f"{verdict.reason} Filing it anyway is a judgement call, which "
+                    f"is a human's to make (close it as the human identity with "
+                    f"owner_override_reason).",
+                    thread_owner=thread.get("owner"),
+                    author=author,
+                    pr=verdict.pr_slug,
+                    merged_head=verdict.merged_head,
+                ),
+            }
+        owner_override = True
+        forwarded_reason = verdict.reason
+        content = content + format_ledger_close_note(verdict, author)
 
     return {
         "action": "proceed", "content": content,
@@ -868,6 +930,11 @@ def _check_can_close(*, author: str, lookup: _IdentityLookup) -> dict[str, Any] 
       ``chatroom_close_thread`` / ``closes_thread`` at all, and the
       ``orchestrator``-owned PR-review threads it opens are closed by ``human``
       under the Tier-C owner-override (e.g. T-pr-review-24 / msg-202).
+      **Updated (T-pr-gate-ledger-debt):** those PR-review threads are now also
+      closable by a ``closeable_roles`` identity when GitHub proves the PR
+      merged with an APPROVED review at the merged head. That makes this stage
+      load-bearing for a second population — it is the gate the ledger carve-out
+      is layered on top of, not a stage the carve-out skips.
     - allowed_roles ∩ CLOSEABLE_ROLES = ∅ -> ``RoleNotAllowedToClose``.
 
     The human never reaches here: ``_check_close_permitted`` exempts it (I-8)
@@ -1241,6 +1308,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         wants to record a summary post. Only the original owner may
         call this; non-owner attempts return ChatroomPermissionError.
 
+        Two bypasses of that ownership rule exist, both decided here rather
+        than in Conclair: a human's Tier-C force-close
+        (``owner_override_reason`` below), and the PR-gate ledger carve-out —
+        a driver-opened PR-review thread whose PR GitHub reports as merged
+        **with an APPROVED review at the merged head** may be filed by any
+        ``closeable_roles`` identity (T-pr-gate-ledger-debt msg-1001 §2; see
+        :mod:`magickit.mcp.pr_gate_ledger`). A PR-review thread that fails
+        that proof returns ``PrGateLedgerNotClosableError`` and stays open
+        for a human — which is the point of it.
+
         Who may close (two independent stages, both before the owner check):
         1. ``role`` × ``allowed_roles`` -- as on every write path.
         2. ``closeable_roles`` -- the author's identity must be able to act
@@ -1293,7 +1370,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 human closes a thread they do not own and it is NOT gated
                 (gated force-close reuses naysayer_override_reason). Recorded
                 in the decide msg + Conclair audit event. Has no effect for
-                non-human authors (they remain owner-only).
+                non-human authors — their only route past ownership is the
+                PR-gate ledger carve-out, which supplies its own machine-
+                derived reason and takes no caller-provided one.
 
         Returns:
             On success: {"thread": {... status=resolved ...},
@@ -1307,7 +1386,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             naysayer gate -> NaysayerReviewRequiredError /
             NaysayerReviewStaleError / NaysayerChangesRequestedError /
             NaysayerOverrideForbiddenError, owner-override reason missing ->
-            OwnerOverrideReasonRequiredError, non-owner (non-human) -> 403,
+            OwnerOverrideReasonRequiredError, PR-review thread without a
+            provable APPROVE at its merged head ->
+            PrGateLedgerNotClosableError, non-owner (non-human) -> 403,
             already resolved -> 409, etc.): error_type envelope.
         """
         # close_thread emits a decide msg internally; same mandatory

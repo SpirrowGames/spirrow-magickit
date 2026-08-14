@@ -398,7 +398,18 @@ async def test_post_message_non_closing_decide_not_gated(settings: Settings) -> 
 
 @pytest.mark.asyncio
 async def test_gate_disabled_skips_enforcement(settings: Settings) -> None:
-    """With the gate globally disabled, gated threads close with no read."""
+    """With the gate globally disabled, a gated thread closes unenforced.
+
+    The thread IS read now, which it was not before: the PR-gate ledger
+    carve-out (T-pr-gate-ledger-debt) has to see ``owner`` and ``tags`` to
+    recognise a driver-opened PR-review thread, and that recognition cannot be
+    conditional on the naysayer gate. What this test guards is the part that
+    still matters — with the gate off, nothing about the gate is *enforced*:
+    the close goes through untouched even though the thread carries the gate
+    tag and has no approving review. (The default is ``enabled=True``, so on a
+    real deployment the read happened either way; only a gate-disabled
+    deployment pays a read it did not pay before.)
+    """
     settings.naysayer_gate_enabled = False
     tools = _capture_tools(settings)
     adapter = _adapter_with_thread(
@@ -410,4 +421,8 @@ async def test_gate_disabled_skips_enforcement(settings: Settings) -> None:
             author="Bohr", embodiment="terminal_coding_agent",
         )
     adapter.close_thread.assert_awaited_once()
-    adapter.get_thread.assert_not_awaited()
+    # Unenforced, not merely unblocked: no override note was appended and no
+    # ownership bypass was claimed.
+    kwargs = adapter.close_thread.await_args.kwargs
+    assert kwargs["summary_content"] == "done"
+    assert kwargs["owner_override"] is False
