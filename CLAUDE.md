@@ -291,6 +291,52 @@ UI 経路: `chatroom_proxy` が `POST /ui/projects/{p}/control` を**唯一の P
 無い — role も msg も持たず、tailnet が信頼境界だから)。これが無いと :8443 経由でウィジェットは
 描画されるがボタンが 405 になる。
 
+## deploy 実行 (`deploy/`, `mcp/tools/deploy.py`)
+
+merge はどこからでもできるが、live にできるのは systemd と alembic 履歴のあるこのホストだけ。
+その渡し場。詳細は [`docs/deploy-runner.md`](docs/deploy-runner.md)。
+
+- **手順は持たない、対象は持つ**。repo ごとの deploy の形は Claude Code エージェントが現物を
+  読んで決める。magickit が持つのは allowlist (`deploy/registry.py`)・ref・承認・記録の 4 つ
+- **ref は `origin/main` 固定**。`deploy_request` に ref 引数が**無い**（検証ではなく不在）。
+  人間は承認時に理由付きで override できる
+- **承認は認証済みインスタンスにしか無い**。`deploy_approve` は `MAGICKIT_AUTH_DISABLED=1` の
+  tailnet 面には**登録されない** ∴ ループは自分の deploy を承認できない。無認証面から届く能力は
+  「要求を 1 行書く」まで
+- **MCP サーバ自身は deploy を実行できない**（`NoNewPrivileges` で sudo 不可、repo は read-only。
+  実測）。`systemd-run --user` で runner を出し、runner が `sudo systemd-run --system` で
+  sandbox 付きのエージェント unit を出す。**`--user` では sandbox 指定が黙って無視される**ので
+  エージェントは `--system`
+- **restart と health は runner がやる**。エージェントの仕事から特権を外すためで、その結果
+  エージェント unit に `NoNewPrivileges=true` を掛けられる
+- **migration だけ硬い**: backup を無条件に先に取る / `HEAD == origin/main` でなければ gate を
+  閉じる / ref override は migration を自動解禁しない / **revision を前後で読んで検出**する
+  (deny 規則は列挙にすぎず境界ではない)
+- **migration を走らせるのはエージェントだけではない**。conclair の unit は
+  `ExecStartPre=alembic upgrade head` を持つ ∴ **再起動そのものが gate を素通りする**。だから
+  gate が閉じているときは**未適用 migration を持つ commit を deploy しない**(`alembic current`
+  vs `heads`)。エージェントへの deny だけでは塞げない穴
+- **対象は conclair / lexora / cognilens / prismind の 4 つ**。rag-server と ue-investigator も
+  当ホストで動くが **git working tree ではない**(実測)ので対象外
+- **`spirrow-magickit` 自身は意図的な carve-out**。「runner が restart で死ぬ」は**誤り**だった
+  (runner は user transient unit で system サービスの停止を生き残る、実測)。残る理由は
+  **失敗を報告する tool 自身が落ちる**こと ∴ magickit だけ「調査にホスト到達が要る」状態になる
+- **rollback は承認付きの `deploy_rollback`**。呼び出し側は commit ではなく**過去の deploy** を
+  名指しし、sha は magickit の記録から読む。migration を当てた deploy の rollback は拒否
+- **health check は本文を読まない**。cognilens/prismind に平の health は無く SSE mount が答える ∴
+  `httpx.get` だと健全なサービスで必ずタイムアウトする(実測)。`httpx.stream` でステータス行のみ
+- 閲覧用に **`/dashboard/deploys`**(読み取り専用・承認ボタン無し)
+- **cognilens は 2 面 + symlink 方式に移行済み**(2026-08-16)。`services/spirrow/spirrow-cognilens`
+  自体が symlink ∴ **unit は無改修**。runner は待機面で pin→backup→agent→**切り替え**→restart の順に
+  なり、切り替え前は誰もサーブしていない ∴ 失敗しても live は無傷(自動 rollback が要らない理由)。
+  他の対象は in-place のままで、1 つずつ移せる。**待機面で `source venv/bin/activate` すると
+  live 面の venv が有効になる**罠あり(焼き込みパスが安定 symlink 側)
+- **git は ignore されたファイルを黙って上書きする**(実測)。commit が「ここでは ignore されている
+  パス」を追跡し始めると fast-forward merge が警告なしにホストのコピーを置き換え、しかも ignore
+  されたファイルは dirty 判定に出ない。**lexora/cognilens/prismind は systemd が実行する
+  `start.sh` を ignore している** ∴ pin は blob hash で検出して拒否する
+  (`pin.would_silently_overwrite`)。内容同一なら通す
+
 ## 稼働状況ページ (`web/ops.py`)
 
 `/dashboard` = **稼働状況**。「自律ループが今回っているのか、止まっているのか、何を待っているのか」に
@@ -444,5 +490,7 @@ Phase 2 以降として掲げていたもの: マルチプロジェクト対応�
 ## 参照ドキュメント
 
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — MCP ツールの引数・使用例・レスポンス形
+- [`docs/deploy-runner.md`](docs/deploy-runner.md) — deploy 実行の設計・権限の実測値・運用手順
+- [`docs/deploy-hardening.md`](docs/deploy-hardening.md) — deploy エージェントの専用ユーザ分離（**未適用**の手順書）
 - `docs/DESIGN.md` — 詳細設計
 - `docs/PROJECT_WORKFLOW_GUIDE.md` — プロジェクト運用ガイド

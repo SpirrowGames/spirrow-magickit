@@ -15,6 +15,7 @@ from magickit.config import get_settings
 # Import tool modules (will be registered via decorators)
 from magickit.mcp.tools import (
     chatroom,
+    deploy,
     document,
     document_maintenance,
     execution,
@@ -38,13 +39,25 @@ from magickit.utils.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 
+def auth_disabled() -> bool:
+    """Is this the unauthenticated instance?
+
+    One reading of the environment, used by two callers: the auth
+    provider, and the decision about whether this instance may approve
+    deploys. They have to agree -- an instance that skipped OAuth but
+    still registered `deploy_approve` would put a service restart behind
+    an open door -- so the question is asked in one place.
+    """
+    return os.environ.get("MAGICKIT_AUTH_DISABLED") == "1"
+
+
 def _build_auth_provider():
     """Build the FastMCP auth provider.
 
     Returns None when MAGICKIT_AUTH_DISABLED=1 so the server can boot before
     GCP OAuth credentials are provisioned.
     """
-    if os.environ.get("MAGICKIT_AUTH_DISABLED") == "1":
+    if auth_disabled():
         logger.warning("Auth disabled via MAGICKIT_AUTH_DISABLED=1")
         return None
 
@@ -142,6 +155,12 @@ rather than calling individual services separately.""",
     chatroom.register_tools(mcp, settings)
     loop_control.register_tools(mcp, settings)
 
+    # R-3: filing a deploy request is available everywhere; approving one
+    # -- which is what actually restarts a service and applies migrations
+    # -- is registered only where the caller had to authenticate. On the
+    # tailnet instance the approval tool simply does not exist.
+    deploy.register_tools(mcp, settings, allow_approval=not auth_disabled())
+
     # Expose github-mcp via passthrough dispatcher (no-op unless PAT set)
     _install_github(mcp)
 
@@ -173,7 +192,7 @@ def main() -> None:
         host=host,
         port=port,
         transport=transport_mode,
-        auth_disabled=os.environ.get("MAGICKIT_AUTH_DISABLED") == "1",
+        auth_disabled=auth_disabled(),
     )
 
     if transport_mode == "http":

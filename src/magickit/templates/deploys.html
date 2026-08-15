@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Deploys - Magickit{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Deploys</h1>
+    <p class="subtitle">
+        何が、どの commit で live になったか。
+        <span class="muted">
+            読み取り専用 — このページは tailnet 上で無認証なので、承認はここからはできません
+            （承認は認証済みの MCP から）。
+        </span>
+    </p>
+</div>
+
+<section class="card">
+    <h2>デプロイ可能な対象</h2>
+    <p class="muted">この集合だけが対象。追加は magickit への PR。</p>
+    <ul class="target-list">
+        {% for target in targets %}
+        <li>
+            <code>{{ target.name }}</code>
+            <span class="muted">
+                {{ target.services | join(", ") }}
+                {% if target.health_url %} · health: {{ target.health_url }}{% endif %}
+                {% if target.has_backup %} · backup あり{% endif %}
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+
+<section class="card">
+    <h2>直近の要求</h2>
+    {% if not requests %}
+    <p class="muted">まだ 1 件も要求されていません。</p>
+    {% else %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>いつ</th>
+                <th>対象</th>
+                <th>状態</th>
+                <th>要求</th>
+                <th>承認</th>
+                <th>deployed sha</th>
+                <th>サービス</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in requests %}
+            <tr>
+                <td class="nowrap">{{ row.created_at }}</td>
+                <td><code>{{ row.target }}</code></td>
+                <td><span class="status status-{{ row.status_class }}">{{ row.status }}</span></td>
+                <td>
+                    {{ row.requested_by }}
+                    {% if row.is_rollback %}<span class="tag">rollback</span>{% endif %}
+                    {% if row.override_ref %}<span class="tag tag-warn">override</span>{% endif %}
+                </td>
+                <td>{{ row.approved_by or "—" }}</td>
+                <td class="nowrap"><code>{{ row.deployed_sha or "—" }}</code></td>
+                <td>{{ row.service_state or "—" }}</td>
+            </tr>
+            {% if row.error %}
+            <tr class="detail-row">
+                <td colspan="7" class="error-detail">{{ row.error }}</td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h2>監査ログ</h2>
+    <p class="muted">
+        append-only。<code>data/deploy/audit.jsonl</code> の末尾 {{ events | length }} 件。
+    </p>
+    {% if not events %}
+    <p class="muted">まだ何も記録されていません。</p>
+    {% else %}
+    <table class="data-table">
+        <thead>
+            <tr><th>いつ</th><th>できごと</th><th>対象</th><th>誰</th><th>詳細</th></tr>
+        </thead>
+        <tbody>
+            {% for event in events %}
+            <tr>
+                <td class="nowrap">{{ event.at }}</td>
+                <td><code>{{ event.event }}</code></td>
+                <td>{{ event.target or "—" }}</td>
+                <td>{{ event.actor or event.approved_by or "—" }}</td>
+                <td class="muted">{{ event.detail }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</section>
+{% endblock %}

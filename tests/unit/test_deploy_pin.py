@@ -1,0 +1,272 @@
+"""Pinning the working tree, against real git repositories.
+
+These build actual repos in ``tmp_path`` rather than mocking
+``subprocess``. A mocked git proves the code calls the commands the
+author expected; the thing worth proving is that after this runs, the
+tree is on the commit that was approved and on nothing else -- which
+only git can answer.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from magickit.deploy import pin as pin_mod
+from magickit.deploy.pin import PinRefusedError
+
+
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    )
+    return proc.stdout.strip()
+
+
+def _commit(repo: Path, name: str, body: str = "x") -> str:
+    (repo / name).write_text(body)
+    _git(repo, "add", name)
+    _git(repo, "commit", "-m", f"add {name}")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def remote_and_clone(tmp_path) -> tuple[Path, Path]:
+    """An upstream with two commits on main, and a clone on the first."""
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "-q", "-b", "main")
+    _git(upstream, "config", "user.email", "t@example.com")
+    _git(upstream, "config", "user.name", "t")
+    first = _commit(upstream, "one.txt")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(upstream), str(clone)], check=True, capture_output=True
+    )
+    _git(clone, "config", "user.email", "t@example.com")
+    _git(clone, "config", "user.name", "t")
+
+    second = _commit(upstream, "two.txt")
+    assert first != second
+    return upstream, clone
+
+
+# ── the happy path ───────────────────────────────────────────────
+
+
+def test_pin_fast_forwards_the_local_branch_to_origin_main(remote_and_clone):
+    upstream, clone = remote_and_clone
+    wanted = _git(upstream, "rev-parse", "HEAD")
+
+    result = pin_mod.pin(clone, "origin/main")
+
+    assert result.sha == wanted
+    assert _git(clone, "rev-parse", "HEAD") == wanted
+    assert result.changed is True
+    # Production stays on a branch: the next person to log in sees what
+    # they expect, not a detached HEAD.
+    assert result.detached is False
+    assert _git(clone, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert (clone / "two.txt").exists()
+
+
+def test_pinning_an_already_current_tree_is_a_no_op_that_still_reports_the_sha(
+    remote_and_clone,
+):
+    _, clone = remote_and_clone
+    first = pin_mod.pin(clone, "origin/main")
+    again = pin_mod.pin(clone, "origin/main")
+
+    assert again.sha == first.sha
+    assert again.changed is False
+
+
+def test_an_override_ref_is_checked_out_detached(remote_and_clone):
+    upstream, clone = remote_and_clone
+    _git(upstream, "checkout", "-q", "-b", "feat/x")
+    override_sha = _commit(upstream, "three.txt")
+
+    result = pin_mod.pin(clone, "origin/feat/x")
+
+    assert result.sha == override_sha
+    assert result.detached is True
+    assert _git(clone, "rev-parse", "HEAD") == override_sha
+    # An override is an exceptional state and should look like one.
+    assert _git(clone, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+
+
+# ── the refusals, all before anything is restarted ───────────────
+
+
+def test_a_dirty_production_tree_is_refused_not_stashed(remote_and_clone):
+    _, clone = remote_and_clone
+    (clone / "one.txt").write_text("someone was editing this")
+    before = _git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(PinRefusedError, match="local modifications"):
+        pin_mod.pin(clone, "origin/main")
+
+    # Nothing moved, and their edit is still there.
+    assert _git(clone, "rev-parse", "HEAD") == before
+    assert (clone / "one.txt").read_text() == "someone was editing this"
+
+
+def test_an_unknown_ref_is_refused(remote_and_clone):
+    _, clone = remote_and_clone
+    with pytest.raises(PinRefusedError, match="cannot resolve"):
+        pin_mod.pin(clone, "origin/no-such-branch")
+
+
+def test_a_non_fast_forward_is_refused_rather_than_resolved(remote_and_clone):
+    """Local commits on main mean someone deployed by hand, or a deploy
+    died halfway. Merging that automatically during a deploy is exactly
+    the wrong moment to be clever."""
+    _, clone = remote_and_clone
+    _commit(clone, "local-only.txt")
+    before = _git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(PinRefusedError):
+        pin_mod.pin(clone, "origin/main")
+
+    assert _git(clone, "rev-parse", "HEAD") == before
+
+
+def test_a_commit_that_would_silently_replace_an_ignored_file_is_refused(remote_and_clone):
+    """The accident this exists for, reproduced.
+
+    git treats ignored files as expendable: if a commit starts tracking
+    a path that exists here as ignored, a fast-forward merge overwrites
+    the host's copy with no warning and exit 0 -- and an ignored file
+    never made the tree look dirty, so nothing else catches it.
+
+    Not hypothetical: lexora, cognilens and prismind all ignore the
+    `start.sh` that systemd executes.
+    """
+    upstream, clone = remote_and_clone
+    (upstream / ".gitignore").write_text("start.sh\n")
+    _git(upstream, "add", ".gitignore")
+    _git(upstream, "commit", "-m", "ignore start.sh")
+
+    # The ignore rule reaches the host the way it really would.
+    pin_mod.pin(clone, "origin/main")
+    # ...and then the host gets its own copy, ignored, host-specific.
+    (clone / "start.sh").write_text("#!/bin/bash\ncd /home/sgadmin/services/spirrow/x\n")
+    assert pin_mod.is_clean(clone), "an ignored file must not make the tree look dirty"
+
+    # Upstream starts tracking it, with different contents.
+    (upstream / ".gitignore").write_text("")
+    (upstream / "start.sh").write_text("#!/bin/bash\necho from-the-repo\n")
+    _git(upstream, "add", "-A")
+    _git(upstream, "commit", "-m", "track start.sh")
+
+    with pytest.raises(PinRefusedError, match="without a word"):
+        pin_mod.pin(clone, "origin/main")
+
+    # The host's copy is untouched and nothing moved.
+    assert "spirrow/x" in (clone / "start.sh").read_text()
+
+
+def test_an_identical_ignored_file_is_not_treated_as_a_clobber(remote_and_clone):
+    """Nothing would be lost, so nothing is refused."""
+    upstream, clone = remote_and_clone
+    contents = "#!/bin/bash\necho same\n"
+
+    (upstream / ".gitignore").write_text("start.sh\n")
+    _git(upstream, "add", ".gitignore")
+    _git(upstream, "commit", "-m", "ignore")
+    pin_mod.pin(clone, "origin/main")
+    (clone / "start.sh").write_text(contents)
+
+    (upstream / ".gitignore").write_text("")
+    (upstream / "start.sh").write_text(contents)
+    _git(upstream, "add", "-A")
+    _git(upstream, "commit", "-m", "track")
+
+    result = pin_mod.pin(clone, "origin/main")
+
+    assert result.sha == _git(upstream, "rev-parse", "HEAD")
+
+
+def test_an_ordinary_new_file_is_not_a_clobber(remote_and_clone):
+    """Only files that already exist here count."""
+    upstream, clone = remote_and_clone
+    _commit(upstream, "brand-new.txt")
+
+    pin_mod.pin(clone, "origin/main")
+
+    assert (clone / "brand-new.txt").exists()
+
+
+def test_a_non_repository_is_refused(tmp_path):
+    with pytest.raises(PinRefusedError, match="not a git working tree"):
+        pin_mod.pin(tmp_path, "origin/main")
+
+
+def test_a_hung_git_becomes_a_refusal_not_an_escaping_exception(remote_and_clone, monkeypatch):
+    """A `TimeoutExpired` reaching the runner would kill it mid-deploy and
+    leave the request `running` with no process behind it -- the one
+    state this design claims cannot exist."""
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git fetch", timeout=120)
+
+    monkeypatch.setattr(pin_mod.subprocess, "run", hang)
+    _, clone = remote_and_clone
+
+    with pytest.raises(PinRefusedError, match="did not finish within"):
+        pin_mod.pin(clone, "origin/main")
+
+
+def test_a_missing_git_binary_becomes_a_refusal(remote_and_clone, monkeypatch):
+    def missing(*args, **kwargs):
+        raise OSError("No such file or directory: 'git'")
+
+    monkeypatch.setattr(pin_mod.subprocess, "run", missing)
+    _, clone = remote_and_clone
+
+    with pytest.raises(PinRefusedError, match="could not run git"):
+        pin_mod.pin(clone, "origin/main")
+
+
+# ── the R-2 gate's question ──────────────────────────────────────
+
+
+def test_matches_remote_main_is_true_only_for_the_exact_commit(remote_and_clone):
+    _, clone = remote_and_clone
+    result = pin_mod.pin(clone, "origin/main")
+
+    assert pin_mod.matches_remote_main(clone, result.sha, default_ref="origin/main") is True
+    assert (
+        pin_mod.matches_remote_main(clone, result.previous_sha, default_ref="origin/main") is False
+    )
+
+
+def test_matches_remote_main_is_false_for_an_override_commit(remote_and_clone):
+    upstream, clone = remote_and_clone
+    _git(upstream, "checkout", "-q", "-b", "feat/x")
+    _commit(upstream, "three.txt")
+
+    result = pin_mod.pin(clone, "origin/feat/x")
+
+    # This is what shuts the migration gate for an overridden ref.
+    assert pin_mod.matches_remote_main(clone, result.sha, default_ref="origin/main") is False
+
+
+def test_matches_remote_main_is_false_when_the_ref_cannot_be_resolved(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    sha = _commit(repo, "one.txt")
+
+    # No origin at all -> the gate fails closed rather than raising.
+    assert pin_mod.matches_remote_main(repo, sha, default_ref="origin/main") is False
+
+
+def test_head_sha_reads_the_tree_not_the_request(remote_and_clone):
+    _, clone = remote_and_clone
+    assert pin_mod.head_sha(clone) == _git(clone, "rev-parse", "HEAD")
