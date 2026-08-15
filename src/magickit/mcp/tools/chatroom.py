@@ -1450,10 +1450,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         active / awaiting_reply threads owned by you, or surveying the
         project's open work.
 
-        Sorted by **last activity** (newest post first), not by when the
-        thread was opened: an old thread posted to today is above a
-        younger silent one. Ties fall back to creation time, then
-        thread_id.
+        Sorted by **last activity** — the thread holding the newest msg
+        comes first — not by when the thread was opened: an old thread
+        posted to today is above a younger silent one. The rank is the
+        server-allocated msg sequence, so `last_activity_at` (a
+        caller-supplied timestamp) is a display value, not the order.
 
         Args:
             status_filter: optional list of statuses to include
