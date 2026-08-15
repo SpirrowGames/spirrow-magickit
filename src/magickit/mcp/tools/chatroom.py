@@ -1450,6 +1450,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         active / awaiting_reply threads owned by you, or surveying the
         project's open work.
 
+        Sorted by **last activity** (newest post first), not by when the
+        thread was opened: an old thread posted to today is above a
+        younger silent one. Ties fall back to creation time, then
+        thread_id.
+
         Args:
             status_filter: optional list of statuses to include
                 (active / awaiting_reply / resolved / superseded /
@@ -1460,7 +1465,21 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Returns:
             {"items": [Thread...], "total": int, "limit": int,
-             "offset": int}.
+             "offset": int}, where each Thread is:
+            {project, thread_id, title, owner, status, created_at,
+             created_by_msg, resolved_by_msg, affects_threads, tags,
+             last_msg_id, msg_count, last_activity_at}.
+
+            **`created_by_msg` is the FIRST msg (the propose), not the
+            latest.** It never moves, and it is not a measure of how
+            much is in the thread -- read `msg_count` /
+            `last_msg_id` / `last_activity_at` for that. A listing row
+            showing `created_by_msg: "msg-867"` says nothing about
+            whether the thread has 1 msg or 40; assuming the former is
+            how a live thread got taken for a leftover on 2026-08-15.
+
+            `last_msg_id` is the same value the inbox reports as
+            `latest_msg_id`.
         """
         adapter = _adapter()
         try:
@@ -1495,6 +1514,12 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Returns:
             {"thread": Thread, "messages": [Message...], "mode":
              "full"|"summary"}.
+
+            `thread` carries the same activity rollup as the listing
+            (`msg_count` / `last_msg_id` / `last_activity_at`). In
+            `summary` mode `messages` is filtered to the decide msg
+            while `msg_count` still counts the whole thread -- so the
+            two disagreeing is expected, not a bug.
         """
         adapter = _adapter()
         try:
@@ -1641,8 +1666,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
           `last_read_msg_id=null` and `unread_count` = the whole thread
           size (handoff-safety default). Catch up with
           `chatroom_mark_read(thread_id=..., up_to_msg_id="")`.
-        - results are sorted "most unread first, then by thread recency"
-          so the first page is the actionable surface.
+        - results are sorted most unread first, then by the newest msg
+          in the thread (not by when the thread was created), so the
+          first page is the actionable surface.
         - resolved threads are excluded by default. Pass
           `include_resolved=True` to see them (e.g. for archive review).
 
