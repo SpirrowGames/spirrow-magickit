@@ -332,6 +332,24 @@ API キー未設定のまま `api.openai.com` を叩いて遠端で不定期に�
 
 設定: `ops.stall_minutes` (YAML) / `MAGICKIT_OPS_STALL_MINUTES` (env)。
 
+### 静的資産は自オリジンから配る (CDN 禁止)
+
+**テンプレートの `src=` / `href=` にオリジン付き URL を書かない。** HTMX も含めて
+`static/` に vendoring する (`js/htmx.min.js` = 1.9.10)。
+`tests/unit/test_templates_no_external_assets.py` が全テンプレートを走査して拒否する。
+
+理由は「オフラインでも動く」ではなく**壊れ方が見えない**こと。この画面を読む開発 PC は
+egress allowlist 付きの proxy 越しにいて、公開 CDN (unpkg / jsdelivr) は 403 で塞がれる。
+HTML 自体はこのホストが返すので**ページは 200 で描画される** ∴ 症状は「資産が読めない」ではなく
+「全パネルが永久に `確認中...`」— `hx-get` を撃つ HTMX がそもそも居ないため。
+`/dashboard/_ops` は 37KB を返し続けており、誰も取りに来ていないだけだった (2026-08-15)。
+サーバ側のログもステータスも終始正常に見えるので、遠端からの切り分けが高くつく。
+
+**この mount は chatroom UI の分も配る。** `chatroom_proxy` が転送するのは
+`conclair.css` / `conclair.js` の 2 本だけで、それ以外の `/static/*` は Conclair に届かず
+**ここにヒットする** ∴ :8443 経由で `/ui/` を読むブラウザに `htmx.min.js` を渡すのは Magickit。
+Conclair 側にも同一版・同一 sha256 のコピーがある (直接配信の経路と、単体で検査可能にするため)。
+
 ## GitHub 連携 (`github_dispatch.py`)
 
 ローカルの github-mcp コンテナ (`127.0.0.1:8116`) を **2 ツールに集約**して中継する。
