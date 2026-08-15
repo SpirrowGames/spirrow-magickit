@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from magickit.config import Settings
-from magickit.deploy import records
+from magickit.deploy import approval, records
 from magickit.mcp.tools import deploy as deploy_tools
 
 
@@ -48,7 +48,7 @@ def state_root(tmp_path, monkeypatch):
 def launch(monkeypatch) -> MagicMock:
     """Stand in for the systemd launch, and count the calls."""
     stub = MagicMock(return_value=(True, "magickit-deploy-abc"))
-    monkeypatch.setattr(deploy_tools.launcher, "launch", stub)
+    monkeypatch.setattr(approval.launcher, "launch", stub)
     return stub
 
 
@@ -177,7 +177,7 @@ async def test_a_request_can_only_be_approved_once(human_tools, launch):
 
 async def test_a_failed_launch_is_reported_as_a_failure_not_a_start(human_tools, monkeypatch):
     monkeypatch.setattr(
-        deploy_tools.launcher, "launch", MagicMock(return_value=(False, "systemd said no"))
+        approval.launcher, "launch", MagicMock(return_value=(False, "systemd said no"))
     )
     created = await human_tools["deploy_request"](
         target="spirrow-conclair", requested_by="loop", reason="r"
@@ -207,9 +207,9 @@ async def test_the_runner_unit_is_recorded_before_the_launch(human_tools, monkey
     def spy(request_id: str):
         stored = records.DeployStore(state_root).load(request_id)
         seen["runner_unit"] = stored.runner_unit
-        return True, deploy_tools.launcher.unit_name(request_id)
+        return True, approval.launcher.unit_name(request_id)
 
-    monkeypatch.setattr(deploy_tools.launcher, "launch", spy)
+    monkeypatch.setattr(approval.launcher, "launch", spy)
 
     created = await human_tools["deploy_request"](
         target="spirrow-conclair", requested_by="loop", reason="r"

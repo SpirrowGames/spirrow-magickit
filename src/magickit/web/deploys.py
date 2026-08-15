@@ -43,6 +43,7 @@ _STATUS_CLASS = {
 #: showing in a narrow column without dumping the whole record.
 _DETAIL_KEYS = (
     "reason",
+    "via",
     "override_reason",
     "error",
     "service_state",
@@ -59,6 +60,7 @@ def _row(request: records.DeployRequest) -> dict[str, Any]:
         "status_class": _STATUS_CLASS.get(request.status, "unknown"),
         "requested_by": request.requested_by,
         "approved_by": request.approved_by,
+        "approved_via": request.approved_via,
         "is_rollback": request.is_rollback,
         "override_ref": request.override_ref,
         "deployed_sha": (result.get("deployed_sha") or "")[:12] or None,

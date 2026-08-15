@@ -64,6 +64,21 @@ def test_a_finished_deploy_shows_the_sha_and_what_is_serving(client, state_root)
     assert "Takahito" in body
 
 
+def test_the_page_says_which_door_an_approval_came_through(client, state_root):
+    """"who approved" and "how were they vouched for" are different
+    questions, and the page answers both or neither."""
+    store = records.DeployStore(state_root)
+    request = store.create(target="spirrow-conclair", requested_by="loop", reason="r")
+    request.approved_by = "Takahito"
+    request.approved_via = "host-cli"
+    store.save(request)
+
+    body = client.get("/dashboard/deploys").text
+
+    assert "Takahito" in body
+    assert "host-cli" in body
+
+
 def test_a_failed_deploy_shows_its_error(client, state_root):
     store = records.DeployStore(state_root)
     request = store.create(target="spirrow-conclair", requested_by="loop", reason="r")

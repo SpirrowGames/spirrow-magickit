@@ -326,6 +326,11 @@ merge はどこからでもできるが、live にできるのは systemd と al
 - **health check は本文を読まない**。cognilens/prismind に平の health は無く SSE mount が答える ∴
   `httpx.get` だと健全なサービスで必ずタイムアウトする(実測)。`httpx.stream` でステータス行のみ
 - 閲覧用に **`/dashboard/deploys`**(読み取り専用・承認ボタン無し)
+- **承認の扉は 2 つ**: 認証済み MCP(claude.ai 経由・`magickit.spirrowgames.dev` → :8114)と、
+  ホスト上の `python -m magickit.deploy.approval <id> --by <name>`。**検査は 1 実装を共有**し、
+  監査に `approved_via` が残る。後者が新しい権限を与えるわけではない — ホストのシェルは
+  `sgadmin`(NOPASSWD:ALL)で要求 JSON を直接書けるので、**追跡できない迂回を記録された行為に
+  変えているだけ**。ループはシェルを持たないので使えない(= ゲートが本物なのはそちら側)
 - **cognilens は 2 面 + symlink 方式に移行済み**(2026-08-16)。`services/spirrow/spirrow-cognilens`
   自体が symlink ∴ **unit は無改修**。runner は待機面で pin→backup→agent→**切り替え**→restart の順に
   なり、切り替え前は誰もサーブしていない ∴ 失敗しても live は無傷(自動 rollback が要らない理由)。

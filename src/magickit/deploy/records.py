@@ -123,6 +123,10 @@ class DeployRequest:
     approved_by: str | None = None
     approved_at: str | None = None
     approval_note: str | None = None
+    #: Which door the approval came through -- see
+    #: :mod:`magickit.deploy.approval`. "who approved" and "how were they
+    #: vouched for" are different questions and the record answers both.
+    approved_via: str | None = None
 
     override_ref: str | None = None
     override_reason: str | None = None
