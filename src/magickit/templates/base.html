@@ -5,8 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Magickit Dashboard{% endblock %}</title>
 
-    <!-- HTMX for dynamic updates -->
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <!-- HTMX for dynamic updates. Self-hosted, not from a CDN: the dashboard
+         is read from closed networks whose egress allowlist rejects unpkg,
+         and every panel on the page arrives via hx-get -- so a blocked HTMX
+         leaves the page rendered but permanently stuck on "確認中...". -->
+    <script src="/static/js/htmx.min.js"></script>
 
     <!-- Custom styles -->
     <link rel="stylesheet" href="/static/css/dashboard.css">
