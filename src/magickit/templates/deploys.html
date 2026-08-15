@@ -59,7 +59,10 @@
                     {% if row.is_rollback %}<span class="tag">rollback</span>{% endif %}
                     {% if row.override_ref %}<span class="tag tag-warn">override</span>{% endif %}
                 </td>
-                <td>{{ row.approved_by or "—" }}</td>
+                <td>
+                    {{ row.approved_by or "—" }}
+                    {% if row.approved_via %}<span class="muted">({{ row.approved_via }})</span>{% endif %}
+                </td>
                 <td class="nowrap"><code>{{ row.deployed_sha or "—" }}</code></td>
                 <td>{{ row.service_state or "—" }}</td>
             </tr>

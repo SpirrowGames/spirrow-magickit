@@ -32,8 +32,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from magickit.config import Settings
-from magickit.deploy import launcher, records, registry
-from magickit.deploy.records import STATUS_APPROVED, STATUS_PENDING
+from magickit.deploy import approval, records, registry
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -394,108 +393,13 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
             `error_type` in {"not_found", "not_pending",
             "override_reason_required", "launch_failed"}.
         """
-        store = records.get_store()
-        try:
-            request = store.load(request_id)
-        except KeyError:
-            return _error("not_found", f"no deploy request {request_id!r}")
-
-        if request.status != STATUS_PENDING:
-            return _error(
-                "not_pending",
-                f"request {request_id} is {request.status}, not {STATUS_PENDING}. "
-                "A request is approved once; file a new one to deploy again.",
-                status=request.status,
-            )
-
-        if not approved_by.strip():
-            return _error("approved_by_required", "say who is approving; it goes in the audit log")
-
-        if request.is_rollback and (override_ref or override_allows_migration):
-            return _error(
-                "override_on_rollback",
-                "a rollback already has its commit, taken from the record of the "
-                "deploy it undoes; overriding the ref or unblocking migrations on "
-                "top of that is not a rollback. File a normal deploy request "
-                "instead.",
-            )
-
-        # Asking explicitly for the default ref is not an override. Left
-        # as one, the run was pinned like a normal deploy (on the branch,
-        # not detached) while `is_default_ref` stayed false and shut the
-        # migration gate -- two halves of the system disagreeing about
-        # what kind of deploy it was.
-        override_ref = "" if override_ref.strip() == registry.DEPLOY_REF else override_ref.strip()
-
-        if override_ref and not override_reason.strip():
-            return _error(
-                "override_reason_required",
-                "a ref override has to come with a reason -- it is what makes the "
-                "override auditable rather than merely possible",
-            )
-        if override_allows_migration and not override_ref:
-            return _error(
-                "override_migration_without_override",
-                "override_allows_migration only means something alongside "
-                "override_ref; the default ref already allows migrations",
-            )
-
-        request.status = STATUS_APPROVED
-        request.approved_by = approved_by
-        request.approved_at = records.utcnow()
-        request.approval_note = note or None
-        request.override_ref = override_ref or None
-        request.override_reason = override_reason or None
-        request.override_allows_migration = bool(override_allows_migration)
-        # Written *before* the launch, because after it the runner owns
-        # this file. Saving a copy taken before the launch would race the
-        # runner's own write and drop whichever side lost -- either the
-        # unit name, or the status and start time.
-        request.runner_unit = launcher.unit_name(request.request_id)
-        store.save(request)
-        store.audit(
-            "approved",
-            request_id=request.request_id,
-            target=request.target,
-            actor=approved_by,
-            note=note or None,
-            ref=request.ref,
-            override_ref=request.override_ref,
-            override_reason=request.override_reason,
-            override_allows_migration=request.override_allows_migration,
-            rollback_of=request.rollback_of,
-            rollback_to_sha=request.rollback_to_sha,
+        return approval.approve_request(
+            store=records.get_store(),
+            request_id=request_id,
+            approved_by=approved_by,
+            via=approval.VIA_MCP,
+            note=note,
+            override_ref=override_ref,
+            override_reason=override_reason,
+            override_allows_migration=override_allows_migration,
         )
-
-        ok, detail = launcher.launch(request.request_id)
-        if not ok:
-            # The runner never started, so nothing else is writing this
-            # file -- but re-read it anyway rather than writing back a
-            # copy from before the launch attempt.
-            request = store.load(request.request_id)
-            request.status = records.STATUS_FAILED
-            request.finished_at = records.utcnow()
-            request.result = {"ok": False, "error": detail, "service_state": "unknown"}
-            store.save(request)
-            store.audit(
-                "launch_failed",
-                request_id=request.request_id,
-                target=request.target,
-                error=detail,
-            )
-            return _error(
-                "launch_failed",
-                f"approved, but the deploy runner did not start: {detail}. "
-                "Nothing was deployed.",
-                request_id=request.request_id,
-            )
-
-        return {
-            "ok": True,
-            "request_id": request.request_id,
-            "target": request.target,
-            "status": records.STATUS_RUNNING,
-            "ref": request.ref,
-            "unit": detail,
-            "note": "the deploy is running; poll deploy_status for the result",
-        }

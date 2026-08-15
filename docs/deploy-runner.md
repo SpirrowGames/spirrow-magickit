@@ -182,6 +182,24 @@ spirrow-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl is-active spirrow-conclai
 
 「人間が承認した」＝「あなたが誰か知っている扉を通ってきた」。`approved_by` は credential ではなく記録で、認証しているのは扉の方。
 
+#### 承認の 2 つ目の扉（ホスト上のコマンド）
+
+MCP の承認 tool が守っている相手は **sg-tomtebo-01 のループ**で、あれはこのホストにシェルを持たない ∴ MCP が差し出すもの以外は何もできません。ここは本物の境界です（`:8117` に公開されている tool でコード実行できるものは無いことを確認済み — 唯一の `subprocess` は固定引数の `git config user.email`）。
+
+**ホスト上のシェルに対しては境界ではありません。** シェルは `sgadmin` で動き `NOPASSWD: ALL` を持ち、`data/deploy/requests/*.json` を直接書けます。機構を無視して `git merge && systemctl restart` することもできます。
+
+∴ 2 つ目の扉を用意しました。エンドポイントではなくコマンドです:
+
+```bash
+python -m magickit.deploy.approval <request_id> --by <name> [--note ...]
+```
+
+**新しく与えているものは何もありません。** 変わるのは「どうせ起きること」が**機構を通って起きる**点で、同じ検査が走り、同じ監査行が書かれ、**どちらの扉から来たかが記録に残ります**（`approved_via` = `mcp-authenticated` / `host-cli`）。追跡できない迂回が、記録された行為になる — ここで実際に選べる差はそれだけです。
+
+ループはこれを使えません。ssh を使えないのと同じ理由で、これはホスト上のプロセスであって MCP 面の tool ではないからです。
+
+**検査は 1 実装を共有します。** R-1 の「override には理由が要る」と R-2 の「migration は別途承認が要る」は承認時に効くもので、扉ごとに写しを持つといずれ食い違います。テストは同じ表を両方の扉に対して流します。
+
 ### Q-3 rollback — 承認付きの `deploy_rollback`。自動では動かない
 
 「deploy が失敗した」と「成功したが動作がおかしい」は別問題で、後者は機械には判定できない ∴ **自動 rollback は入れない**。前者の報告は `service_state` / `health_ok` / `deployed_sha` / `diagnosis` が担う。
