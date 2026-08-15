@@ -53,6 +53,13 @@ magickit は既にその境界に立っていて、既にループから到達�
 
 **注意した罠**: `systemd-run --user` では `ProtectHome` / `ProtectSystem` などの sandbox 指定が**黙って無視される**（Ubuntu の unprivileged userns 制限）。実測で user unit からは conclair ツリーに書けてしまった。∴ エージェントの unit は `--system` で起動している。global CLAUDE.md の「長時間プロセスは transient unit + MemoryMax」という要求は満たしているが、scope が `--user` ではない点は意図的な逸脱。
 
+### unit に渡すパスの制約（どちらも「エージェントのせい」に見える壊れ方をする）
+
+- **相対パスは不可**。`ReadWritePaths=data/deploy/runs/x` を渡すと unit は起動すらしない（実測: `Failed to start transient service unit: Invalid ReadWritePaths`）。`systemd-analyze verify` は警告だけで通すので静的検査では捕まらない。∴ `default_state_root()` は必ず絶対パスを返し、`require_absolute()` が unit を組み立てる時点で弾く
+- **`/tmp` 配下も不可**。`PrivateTmp=true` が namespace 内でそのパスを消すため、実行前に **exit 226 (EXIT_NAMESPACE)** で死ぬ。本番の対象は全て `/home/sgadmin/services/spirrow` 配下なので発火しない ∴ 致命化せず警告に留め、代わりに **exit 226 を「これはパスの問題であってエージェントの問題ではない」と名指しで報告**する
+
+どちらも放置すると「エージェントがレポートを書かなかった」という**原因から 3 層離れた症状**として現れる。
+
 ### 通しの実測（ダミー repo、本番非接触）
 
 - sandbox 付き unit で Claude Code が起動し、手順を自力で判断し、レポート JSON を書いて返すところまで確認
@@ -60,6 +67,11 @@ magickit は既にその境界に立っていて、既にループから到達�
 - 手順が矛盾する repo（CLAUDE.md 無し・排他的な lockfile 4 種・空の migration ディレクトリ）では
   **`undetermined: true` で何もせず停止**した（Q-4 の要求どおり）。指定された commit が存在しない
   ことにも気づいて報告した
+- **本番と同じ形の state root**（`MAGICKIT_DEPLOY_STATE_DIR` 未設定・相対デフォルトを絶対解決）で
+  再実行し、scratch 作成・レポート書き込み・回収まで通ることを確認。以前のスモークはここだけ
+  絶対パスを直接渡していたため、上記の相対パス欠陥を素通りさせていた
+- **診断パス**は read-only sandbox（`ReadWritePaths` から repo を外す）で実際に診断文を返し、
+  同時に repo への書き込みは拒否された（`git status` clean のまま）
 
 ## 4. 制約への対応
 
@@ -95,7 +107,8 @@ conclair の unit は `ExecStartPre=.../alembic upgrade head` を持つ ∴ **�
 **ガードレール（Claude Code の deny 規則）**
 
 - ref を動かす git（`checkout` / `merge` / `fetch` / `reset` / `push` …）— R-1 の二枚目。読み取り系 git は許可（何を deploy するのか見る必要がある）
-- `sudo` / `systemctl` / `systemd-run` — unit 側で既に不可能だが、明示的に deny すると**試みが `permission_denials` として結果 JSON に載り、監査記録に残る**
+- `sudo` / `systemd-run` / **状態を変える `systemctl` の verb のみ**（`start` / `stop` / `restart` / `enable` / `mask` / `daemon-reload` …）— unit 側で既に不可能だが、明示的に deny すると**試みが `permission_denials` として結果 JSON に載り、監査記録に残る**。
+  `systemctl status` / `show` / `is-active` などの**読み取りは許可**する。診断 brief がそれを見ろと指示しているのに全面 deny していたのは矛盾で、スモーク実行時に**エージェント自身が指摘した**（「brief は systemctl status を使えと言うが sandbox が全面拒否している」）。読むのに特権は要らず、変えるには sudo が要る
 - gate が閉じているときの alembic 各種
 
 **deny-list 方式であることは明示的に指定している**。`permissions.allow` を空にすると headless では確認相手が居ないので **Bash が全部拒否される**（実測: スモーク実行で `git ls-tree` も `printenv` も `python3 -c` も拒否され、エージェントは自分のレポートすら書けなかった）。加えて、未知の repo の手順を判断させる以上、事前に列挙できないコマンドを走らせる必要がある ∴ ツールは丸ごと allow し、危険な綴りを deny する。**deny が allow に優先する**ことは実測済み（`git checkout -b probe-branch` が拒否され、ブランチは作られなかった）。

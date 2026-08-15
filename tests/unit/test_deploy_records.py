@@ -29,6 +29,37 @@ def store(tmp_path) -> DeployStore:
     return DeployStore(tmp_path)
 
 
+# ── where state lives ────────────────────────────────────────────
+
+
+def test_the_state_root_is_absolute(monkeypatch):
+    """The bug this pins made *every* deploy fail.
+
+    The state root becomes the agent's scratch directory, which is
+    handed to systemd as `ReadWritePaths`. A relative path there is not
+    merely ignored -- measured on this host, the transient unit refuses
+    to start: `Failed to start transient service unit: Invalid
+    ReadWritePaths`. The symptom was "the agent wrote no report", three
+    layers from the cause, and every unit test missed it because they
+    all pass `tmp_path`, which is absolute.
+    """
+    monkeypatch.delenv("MAGICKIT_DEPLOY_STATE_DIR", raising=False)
+    assert records.default_state_root().is_absolute()
+
+
+def test_a_relative_override_is_still_made_absolute(monkeypatch):
+    monkeypatch.setenv("MAGICKIT_DEPLOY_STATE_DIR", "data/deploy")
+    assert records.default_state_root().is_absolute()
+
+
+def test_the_store_and_everything_under_it_is_absolute(monkeypatch):
+    monkeypatch.delenv("MAGICKIT_DEPLOY_STATE_DIR", raising=False)
+    store = records.get_store()
+
+    for path in (store.root, store.requests_dir, store.locks_dir, store.audit_path):
+        assert path.is_absolute(), path
+
+
 # ── requests ─────────────────────────────────────────────────────
 
 
@@ -182,6 +213,29 @@ def test_reaping_marks_a_stranded_running_request_interrupted(store):
     # R-7: an interrupted deploy must not read as "the old version is fine".
     assert "not recorded" in reloaded.result["error"]
     assert [e["event"] for e in store.read_audit()][-1] == "interrupted"
+
+
+def test_reaping_also_catches_a_runner_that_died_before_it_started(store):
+    """A runner that dies between systemd-run returning and its first
+    write never reaches `running`. Reaping only that status left those
+    requests in `approved` forever -- and un-retryable, because approval
+    happens once."""
+    request = store.create(target="spirrow-conclair", requested_by="loop", reason="r")
+    request.status = records.STATUS_APPROVED
+    store.save(request)
+
+    assert store.reap_interrupted("spirrow-conclair") == [request.request_id]
+    assert store.load(request.request_id).status == STATUS_INTERRUPTED
+
+
+def test_reaping_does_not_reap_the_caller_itself(store):
+    """The runner is legitimately `approved` at the moment it takes the lock."""
+    mine = store.create(target="spirrow-conclair", requested_by="loop", reason="r")
+    mine.status = records.STATUS_APPROVED
+    store.save(mine)
+
+    assert store.reap_interrupted("spirrow-conclair", excluding=mine.request_id) == []
+    assert store.load(mine.request_id).status == records.STATUS_APPROVED
 
 
 def test_reaping_leaves_finished_requests_alone(store):

@@ -219,8 +219,9 @@ def test_a_shut_gate_still_deploys_code_with_no_migrations_waiting(store, wiring
 
 
 def test_a_target_without_alembic_is_not_made_undeployable(store, wiring, monkeypatch):
+    """"no alembic here" is a real False, not an unknown."""
     monkeypatch.setattr(runner.pin_mod, "matches_remote_main", lambda *a, **k: False)
-    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: None)
+    monkeypatch.setattr(runner, "_has_alembic", lambda repo: False)
     monkeypatch.setattr(runner, "_alembic_revision", MagicMock(return_value=None))
     request = _approved(store)
 
@@ -229,11 +230,28 @@ def test_a_target_without_alembic_is_not_made_undeployable(store, wiring, monkey
     assert result.ok is True
 
 
+def test_an_unreadable_alembic_revision_fails_closed(store, wiring, monkeypatch):
+    """The venv is created by the agent's `uv sync`, which runs *after*
+    this check -- so "cannot read the revision" is the ordinary state of
+    a target being deployed for the first time, and it used to be waved
+    through as "not proven pending"."""
+    monkeypatch.setattr(runner.pin_mod, "matches_remote_main", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: None)
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert "could not be determined" in result.error
+    wiring._restart.assert_not_called()
+    # R-7: the reader is told which unit is involved.
+    assert result.services == ["spirrow-conclair.service"]
+
+
 def test_pending_is_read_from_current_versus_heads(monkeypatch, tmp_path):
-    calls = []
+    (tmp_path / "alembic.ini").write_text("[alembic]\n")
 
     def fake(repo, *args):
-        calls.append(args)
         return {("current",): "0005 (head)", ("heads",): "0006 (head)"}[args]
 
     monkeypatch.setattr(runner, "_run_alembic", fake)
@@ -242,8 +260,24 @@ def test_pending_is_read_from_current_versus_heads(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_run_alembic", lambda repo, *a: "0006 (head)")
     assert runner._alembic_pending(tmp_path) is False
 
+    # alembic is here but unreadable -> unknown, and the caller refuses.
     monkeypatch.setattr(runner, "_run_alembic", lambda repo, *a: None)
     assert runner._alembic_pending(tmp_path) is None
+
+
+def test_pending_is_false_when_the_repo_has_no_alembic_at_all(tmp_path):
+    assert runner._alembic_pending(tmp_path) is False
+
+
+def test_an_unreadable_revision_is_not_mistaken_for_a_migration(store, wiring, monkeypatch):
+    """`None -> "0006"` is the venv appearing, not a migration running."""
+    monkeypatch.setattr(runner, "_alembic_revision", MagicMock(side_effect=[None, "0006"]))
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.migration_applied is None
+    assert result.ok is True
 
 
 def test_a_migration_applied_behind_a_shut_gate_fails_the_deploy_loudly(
@@ -397,6 +431,46 @@ def test_a_tree_that_moved_under_the_deploy_is_caught_on_read_back(store, wiring
 
     assert result.ok is False
     assert "something moved it" in result.error
+
+
+# ── R-3 at the runner, and never staying "running" ───────────────
+
+
+def test_the_runner_refuses_a_request_nobody_approved(store, wiring):
+    """`python -m magickit.deploy.runner <id>` must not be an approval."""
+    request = store.create(target="spirrow-conclair", requested_by="loop", reason="r")
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert "was not approved" in result.error
+    wiring.pin_mod.pin.assert_not_called()
+    wiring._restart.assert_not_called()
+
+
+def test_an_approved_request_with_no_approver_is_refused(store, wiring):
+    request = _approved(store, approved_by="   ")
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert "was not approved" in result.error
+
+
+def test_an_unexpected_crash_becomes_a_recorded_failure(store, wiring, monkeypatch):
+    """Otherwise the request keeps `running` forever with nothing behind it."""
+    monkeypatch.setattr(
+        runner.pin_mod, "pin", MagicMock(side_effect=RuntimeError("something odd"))
+    )
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert result.status == STATUS_FAILED
+    assert "failed unexpectedly" in result.error
+    assert store.load(request.request_id).status == STATUS_FAILED
+    wiring._restart.assert_not_called()
 
 
 # ── R-9: concurrency ─────────────────────────────────────────────

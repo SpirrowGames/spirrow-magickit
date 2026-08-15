@@ -81,6 +81,72 @@ def test_the_agent_can_write_only_the_repo_and_its_own_scratch(target, tmp_path)
     assert len(writable) == 3
 
 
+def test_every_path_handed_to_systemd_is_absolute(target, tmp_path):
+    """systemd refuses the unit outright on a relative ReadWritePaths."""
+    argv = _argv(target, tmp_path)
+
+    for flag in argv:
+        for prefix in (
+            "--property=ReadWritePaths=",
+            "--working-directory=",
+            "--setenv=DEPLOY_REPORT_PATH=",
+        ):
+            if flag.startswith(prefix):
+                assert Path(flag[len(prefix) :]).is_absolute(), flag
+
+
+def test_a_path_under_tmp_is_recognised_as_hidden_by_private_tmp():
+    """Warned about, not refused: every real target lives under
+    /home/sgadmin/services/spirrow, and refusing would make the code
+    impossible to exercise from a test tree. The failure is named at the
+    other end instead -- see the exit-226 test below."""
+    from magickit.deploy.paths import hidden_by_private_tmp
+
+    assert hidden_by_private_tmp(Path("/tmp/magickit/runs/abc")) is True
+    assert hidden_by_private_tmp(Path("/var/tmp/x")) is True
+    assert hidden_by_private_tmp(Path("/home/sgadmin/services/spirrow/x")) is False
+
+
+def test_a_unit_that_never_started_is_not_reported_as_a_silent_agent(
+    target, tmp_path, monkeypatch
+):
+    class _Proc:
+        returncode = 226
+        stdout = ""
+        stderr = "Failed to set up mount namespacing"
+
+    monkeypatch.setattr(agent_mod.subprocess, "run", lambda *a, **k: _Proc())
+
+    outcome = agent_mod.run_agent(
+        target=target,
+        scratch=tmp_path / "scratch",
+        unit="magickit-deploy-agent-abc",
+        brief="hi",
+        migration_allowed=True,
+    )
+
+    assert outcome.ok is False
+    assert "path problem, not an agent problem" in outcome.error
+
+
+def test_a_relative_path_is_refused_here_rather_than_by_systemd(target, tmp_path):
+    """Fail where the mistake is, not three layers away in a deploy that
+    blames the agent for writing no report."""
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("brief")
+
+    with pytest.raises(ValueError, match="absolute"):
+        agent_mod.build_argv(
+            target=target,
+            scratch=Path("data/deploy/runs/abc"),
+            unit="magickit-deploy-agent-abc",
+            prompt_file=prompt,
+            report_path=tmp_path / "report.json",
+            migration_allowed=True,
+            read_only=False,
+        )
+
+
 def test_the_agent_is_bounded_in_memory_and_confined_to_the_repo(target, tmp_path):
     argv = _argv(target, tmp_path)
     assert f"--property=MemoryMax={agent_mod.AGENT_MEMORY_MAX}" in argv
@@ -149,7 +215,23 @@ def test_privileged_commands_are_denied_so_attempts_are_visible(target, tmp_path
     deny = _settings(_argv(target, tmp_path))["permissions"]["deny"]
 
     assert "Bash(sudo:*)" in deny
-    assert "Bash(systemctl:*)" in deny
+    for verb in ("start", "stop", "restart", "enable", "mask", "daemon-reload"):
+        assert f"Bash(systemctl {verb}:*)" in deny
+
+
+def test_reading_unit_state_is_not_denied(target, tmp_path):
+    """The diagnosis brief tells the agent to look at `systemctl status`.
+
+    A blanket `Bash(systemctl:*)` contradicted it -- caught by the agent
+    itself on a smoke run, which had to diagnose with journalctl alone
+    and said so. Reading needs no privilege; changing needs sudo, which
+    is denied and impossible anyway.
+    """
+    deny = _settings(_argv(target, tmp_path))["permissions"]["deny"]
+
+    assert "Bash(systemctl:*)" not in deny
+    for verb in ("status", "show", "is-active", "list-units", "cat"):
+        assert f"Bash(systemctl {verb}:*)" not in deny
 
 
 def test_migrations_are_denied_when_the_gate_is_shut(target, tmp_path):
@@ -161,12 +243,26 @@ def test_migrations_are_denied_when_the_gate_is_shut(target, tmp_path):
     assert "Bash(.venv/bin/alembic:*)" in shut_gate
 
 
-def test_the_diagnosis_pass_runs_in_a_mode_that_cannot_change_anything(target, tmp_path):
-    argv = _argv(target, tmp_path, read_only=True)
-    assert argv[argv.index("--permission-mode") + 1] == "plan"
+def test_the_diagnosis_pass_cannot_change_the_thing_it_is_describing(target, tmp_path):
+    """Read-only is the sandbox, not the permission mode.
 
-    argv = _argv(target, tmp_path, read_only=False)
-    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    A mode that refuses writes refuses the *report* too -- the diagnosis
+    pass's only deliverable -- so `plan` made every diagnosis come back
+    as "the agent wrote no report ... the service was NOT restarted",
+    which is false in exactly the situation a diagnosis is asked for.
+    """
+    prefix = "--property=ReadWritePaths="
+
+    diagnose = _argv(target, tmp_path, read_only=True)
+    writable = {a[len(prefix) :] for a in diagnose if a.startswith(prefix)}
+    assert str(target.repo_path) not in writable
+    # ...but it can still write its report.
+    assert str(tmp_path / "scratch") in writable
+    assert diagnose[diagnose.index("--permission-mode") + 1] == "acceptEdits"
+
+    prepare = _argv(target, tmp_path, read_only=False)
+    writable = {a[len(prefix) :] for a in prepare if a.startswith(prefix)}
+    assert str(target.repo_path) in writable
 
 
 # ── the brief ────────────────────────────────────────────────────
@@ -277,3 +373,25 @@ def test_denials_are_extracted_for_the_audit_record():
 
 def test_no_denials_when_the_cli_said_nothing_parseable():
     assert agent_mod._denials_from_cli_json("not json at all") == []
+
+
+def test_every_env_the_code_reads_is_forwarded_to_the_runner():
+    """`systemd-run --user` gives the unit the user manager's
+    environment, not the caller's, so a variable missing from the
+    passthrough list is not defaulted -- it is silently ignored wherever
+    someone set it."""
+    import inspect
+
+    from magickit.deploy import launcher
+
+    launcher_source = inspect.getsource(launcher.launch)
+    for name in (
+        "MAGICKIT_ROOT",
+        "MAGICKIT_DEPLOY_STATE_DIR",
+        "MAGICKIT_DEPLOY_AGENT_MODEL",
+        "MAGICKIT_DEPLOY_AGENT_TIMEOUT_S",
+        "MAGICKIT_DEPLOY_AGENT_MEMORY_MAX",
+        "MAGICKIT_DEPLOY_CLAUDE_BIN",
+        "MAGICKIT_DEPLOY_CLAUDE_STATE",
+    ):
+        assert name in launcher_source, f"{name} is read somewhere but never forwarded"

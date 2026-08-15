@@ -25,8 +25,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
+from magickit.deploy.paths import magickit_root
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -42,15 +42,6 @@ _USER_BUS_ENV = {
         "DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus"
     ),
 }
-
-
-def magickit_root() -> Path:
-    """The repo root, so the runner's relative ``data/deploy`` resolves."""
-    override = os.environ.get("MAGICKIT_ROOT")
-    if override:
-        return Path(override)
-    # src/magickit/deploy/launcher.py -> repo root
-    return Path(__file__).resolve().parents[3]
 
 
 def unit_name(request_id: str) -> str:
@@ -75,11 +66,19 @@ def launch(request_id: str) -> tuple[bool, str]:
         f"--working-directory={root}",
         f"--setenv=PYTHONPATH={root / 'src'}",
     ]
+    # systemd-run --user gives the unit the *user manager's* environment,
+    # not this process's, so anything the runner or the agent reads has
+    # to be forwarded by name. A variable missing from this list is not
+    # merely defaulted -- it is silently ignored wherever it was set,
+    # which is worse than not supporting it.
     for passthrough in (
+        "MAGICKIT_ROOT",
         "MAGICKIT_DEPLOY_STATE_DIR",
         "MAGICKIT_DEPLOY_AGENT_MODEL",
         "MAGICKIT_DEPLOY_AGENT_TIMEOUT_S",
+        "MAGICKIT_DEPLOY_AGENT_MEMORY_MAX",
         "MAGICKIT_DEPLOY_CLAUDE_BIN",
+        "MAGICKIT_DEPLOY_CLAUDE_STATE",
     ):
         if passthrough in os.environ:
             argv.append(f"--setenv={passthrough}={os.environ[passthrough]}")

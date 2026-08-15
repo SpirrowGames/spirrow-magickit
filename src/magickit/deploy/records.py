@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from magickit.deploy.paths import magickit_root
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -80,16 +81,23 @@ def utcnow() -> str:
 
 
 def default_state_root() -> Path:
-    """Where deploy state lives.
+    """Where deploy state lives. Always absolute.
 
     ``MAGICKIT_DEPLOY_STATE_DIR`` overrides it; otherwise ``data/deploy``
-    relative to the process's working directory, which both magickit
-    units set to the repo root.
+    under the repo root.
+
+    Absolute is not a nicety. This path is handed to ``systemd-run`` as
+    ``ReadWritePaths`` for the agent's scratch directory, and a relative
+    one makes the transient unit refuse to start -- which surfaced as
+    "the agent wrote no report" on every deploy, blaming the agent for a
+    path bug three layers up. It was also passed to the agent as
+    ``DEPLOY_REPORT_PATH``, where it would have resolved against the
+    *target repo* while the runner looked for it under its own cwd.
     """
     override = os.environ.get("MAGICKIT_DEPLOY_STATE_DIR")
     if override:
-        return Path(override)
-    return Path("data/deploy")
+        return Path(override).resolve()
+    return magickit_root() / "data" / "deploy"
 
 
 @dataclass
@@ -339,16 +347,31 @@ class DeployStore:
             finally:
                 fh.close()
 
-    def reap_interrupted(self, target: str) -> list[str]:
-        """Mark still-``running`` requests for a target as interrupted.
+    def reap_interrupted(self, target: str, *, excluding: str | None = None) -> list[str]:
+        """Mark unfinished requests for a target as interrupted.
 
         Only correct while the caller holds the target lock: the lock
         being free is precisely the evidence that no runner survives for
         those requests.
+
+        ``approved`` is reaped as well as ``running``. A runner that dies
+        between ``systemd-run`` returning and its first write -- an
+        import error, an OOM during startup -- never reaches ``running``,
+        so reaping only that status left those requests sitting in
+        ``approved`` forever, un-retryable because approval happens once.
+        Holding the lock is evidence about the target, not about a
+        status.
+
+        Args:
+            excluding: the caller's own request, which is legitimately
+                ``approved`` at this moment because the caller is the
+                runner about to execute it.
         """
         reaped = []
         for request in self.list_requests(limit=1000, target=target):
-            if request.status != STATUS_RUNNING:
+            if request.request_id == excluding:
+                continue
+            if request.status not in (STATUS_RUNNING, STATUS_APPROVED):
                 continue
             request.status = STATUS_INTERRUPTED
             request.finished_at = utcnow()

@@ -49,6 +49,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from magickit.deploy.paths import hidden_by_private_tmp, require_absolute
 from magickit.deploy.registry import DeployTarget
 from magickit.utils.logging import get_logger
 
@@ -94,11 +95,37 @@ _GIT_REF_DENIES = tuple(
 #: Restarting is the runner's step, not the agent's (and the unit makes
 #: it impossible anyway). Denying it here turns an attempt into a
 #: reported denial instead of a confusing sudo error in the transcript.
+#:
+#: Only the *mutating* systemctl verbs. A blanket ``Bash(systemctl:*)``
+#: contradicted the diagnosis brief, which tells the agent to look at
+#: ``systemctl status`` -- the agent caught this itself on a smoke run
+#: ("the brief instructs the agent to use systemctl status, but the
+#: sandbox denies Bash(systemctl:*) outright"), having to diagnose with
+#: one hand tied. Reading unit state is the whole job of that pass, and
+#: it needs no privilege; changing unit state needs sudo, which is
+#: denied here and impossible under ``NoNewPrivileges`` regardless.
 _PRIVILEGE_DENIES = (
     "Bash(sudo:*)",
-    "Bash(systemctl:*)",
     "Bash(systemd-run:*)",
     "Bash(su:*)",
+) + tuple(
+    f"Bash(systemctl {verb}:*)"
+    for verb in (
+        "start",
+        "stop",
+        "restart",
+        "reload",
+        "try-restart",
+        "kill",
+        "enable",
+        "disable",
+        "mask",
+        "unmask",
+        "isolate",
+        "edit",
+        "set-property",
+        "daemon-reload",
+    )
 )
 
 #: Only added when the migration gate is shut. Prevention here is
@@ -152,17 +179,42 @@ def _settings_json(*, migration_allowed: bool) -> str:
     return json.dumps({"permissions": {"allow": list(_ALLOWED_TOOLS), "deny": deny}})
 
 
-def _unit_properties(*, target: DeployTarget, scratch: Path) -> list[str]:
-    return [
+def _unit_properties(*, target: DeployTarget, scratch: Path, read_only: bool) -> list[str]:
+    """The sandbox. ``read_only`` drops the repo from the writable set.
+
+    The diagnosis pass has to be unable to change the thing it is
+    describing, and that cannot be expressed as a permission mode: its
+    one deliverable is a file write, so a mode that refuses writes
+    refuses the report too (measured -- ``--permission-mode plan``
+    produced a plan document and waited for an approval that never came,
+    so every diagnosis came back as "the agent wrote no report ... the
+    service was NOT restarted", which is false in exactly the case a
+    diagnosis is asked for). Read-only therefore means the filesystem:
+    it keeps its scratch directory and loses the repo.
+    """
+    writable = [scratch, CLAUDE_STATE_DIR]
+    if not read_only:
+        writable.insert(0, target.repo_path)
+
+    properties = [
         "--property=NoNewPrivileges=true",
         "--property=ProtectSystem=strict",
         "--property=ProtectHome=read-only",
-        f"--property=ReadWritePaths={target.repo_path}",
-        f"--property=ReadWritePaths={scratch}",
-        f"--property=ReadWritePaths={CLAUDE_STATE_DIR}",
+    ]
+    for path in writable:
+        absolute = require_absolute(path, what="the agent unit's ReadWritePaths")
+        if hidden_by_private_tmp(absolute):
+            logger.warning(
+                "Path is under /tmp and PrivateTmp will hide it from the agent unit; "
+                "the unit will fail namespace setup (exit 226)",
+                path=str(absolute),
+            )
+        properties.append(f"--property=ReadWritePaths={absolute}")
+    properties += [
         "--property=PrivateTmp=true",
         f"--property=MemoryMax={AGENT_MEMORY_MAX}",
     ]
+    return properties
 
 
 def build_argv(
@@ -189,9 +241,11 @@ def build_argv(
         "--gid=sgadmin",
         "--setenv=HOME=/home/sgadmin",
         "--setenv=PATH=/home/sgadmin/.local/bin:/usr/local/bin:/usr/bin:/bin",
-        f"--setenv=DEPLOY_REPORT_PATH={report_path}",
-        f"--working-directory={target.repo_path}",
-        *_unit_properties(target=target, scratch=scratch),
+        f"--setenv=DEPLOY_REPORT_PATH="
+        f"{require_absolute(report_path, what='DEPLOY_REPORT_PATH')}",
+        f"--working-directory="
+        f"{require_absolute(target.repo_path, what='the target repo path')}",
+        *_unit_properties(target=target, scratch=scratch, read_only=read_only),
         CLAUDE_BIN,
         "-p",
         # The report lives outside the repo, and Claude Code refuses to
@@ -201,11 +255,14 @@ def build_argv(
         # read as a failure.
         "--add-dir",
         str(scratch),
-        # acceptEdits, not manual: in manual mode Claude Code refuses
-        # every write (there is no one to ask), which would make the
-        # agent phase a no-op. The boundary is the unit, not the mode.
+        # acceptEdits, not manual and not plan: both refuse writes (there
+        # is nobody to ask), which would make the phase a no-op -- and
+        # the report is itself a write, so even the read-only diagnosis
+        # pass needs a mode that can write. What makes that pass
+        # read-only is its unit, which does not include the repo in
+        # ReadWritePaths. The boundary is the sandbox, not the mode.
         "--permission-mode",
-        "plan" if read_only else "acceptEdits",
+        "acceptEdits",
         # No MCP servers. The agent must not be able to reach magickit's
         # own tools -- approving or re-requesting its own deploy is the
         # obvious hazard, and it has no need for them.
@@ -427,13 +484,32 @@ def run_agent(
 
     if not report_path.exists():
         tail = (proc.stderr or stdout).strip()[-800:]
+        # Distinguish "the agent ran and said nothing" from "the unit
+        # never ran the agent at all". Both used to read as the former,
+        # which sent whoever was debugging it to the transcript for an
+        # answer that was in the unit's exit status: 226 is systemd
+        # failing to set up the namespace (a path under PrivateTmp's
+        # /tmp), not the agent misbehaving.
+        if proc.returncode == 226:
+            reason = (
+                "the agent's unit could not start: systemd failed to set up its "
+                "namespace (exit 226). This is a path problem, not an agent "
+                "problem -- check that the repo and scratch directories exist and "
+                "are not under /tmp, which PrivateTmp hides"
+            )
+        elif proc.returncode != 0:
+            reason = (
+                f"the agent's unit exited {proc.returncode} without writing a report"
+            )
+        else:
+            reason = "the agent ran but wrote no report"
         return AgentOutcome(
             ok=False,
             denials=denials,
             exit_code=proc.returncode,
             error=(
-                "the agent wrote no report. Treating the deploy as failed; the "
-                f"service was NOT restarted. Last output: {tail or '(none)'}"
+                f"{reason}. Treating the deploy as failed; the service was NOT "
+                f"restarted. Last output: {tail or '(none)'}"
             ),
         )
 
@@ -493,10 +569,14 @@ def _denials_from_cli_json(stdout: str) -> list[str]:
 
 
 def _stop_unit(unit: str) -> None:
+    """Best effort. Called from a timeout handler, so it must not raise."""
     systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
-    subprocess.run(
-        ["sudo", "-n", systemctl, "stop", f"{unit}.service"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    try:
+        subprocess.run(
+            ["sudo", "-n", systemctl, "stop", f"{unit}.service"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Could not stop the agent unit", unit=unit, error=str(exc))

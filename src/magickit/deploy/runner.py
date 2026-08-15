@@ -50,6 +50,7 @@ from magickit.deploy.records import (
     SERVICE_UP_NEW,
     SERVICE_UP_PREVIOUS,
     SERVICE_UP_UNKNOWN_VERSION,
+    STATUS_APPROVED,
     STATUS_FAILED,
     STATUS_RUNNING,
     STATUS_SUCCEEDED,
@@ -91,6 +92,24 @@ def run(request_id: str, *, store: DeployStore | None = None) -> DeployResult:
     request = store.load(request_id)
     steps = _Steps()
 
+    # R-3 held here as well as at the call site. Until now the guarantee
+    # rested entirely on `deploy_approve` being the only caller of the
+    # launcher, so `python -m magickit.deploy.runner <id>` would deploy a
+    # request nobody had approved. The invariant belongs where it is
+    # relied upon.
+    if request.status != STATUS_APPROVED or not (request.approved_by or "").strip():
+        return _fail(
+            store,
+            request,
+            steps,
+            error=(
+                f"request {request.request_id} is {request.status} and was not "
+                "approved by anyone; the runner only executes approved requests. "
+                "Nothing was changed."
+            ),
+            service_state=SERVICE_UNKNOWN,
+        )
+
     try:
         target = resolve_target(request.target)
     except TargetNotAllowedError as exc:
@@ -104,7 +123,7 @@ def run(request_id: str, *, store: DeployStore | None = None) -> DeployResult:
 
     try:
         with store.target_lock(request.target):
-            store.reap_interrupted(request.target)
+            store.reap_interrupted(request.target, excluding=request.request_id)
             request.status = STATUS_RUNNING
             request.started_at = utcnow()
             store.save(request)
@@ -123,6 +142,26 @@ def run(request_id: str, *, store: DeployStore | None = None) -> DeployResult:
             steps,
             error=f"{exc}. Nothing was changed.",
             service_state=SERVICE_UNKNOWN,
+            services=list(target.services),
+        )
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # The request has already been marked `running` by this point, so
+        # an escaping exception would leave it that way with no process
+        # behind it, and nothing would reap it until an unrelated deploy
+        # of the same target happened along. A crash has to become a
+        # recorded failure, whatever it was.
+        logger.exception("Deploy runner crashed", request_id=request.request_id)
+        return _fail(
+            store,
+            request,
+            steps,
+            error=(
+                f"the deploy runner failed unexpectedly ({type(exc).__name__}: {exc}). "
+                "Check the service directly -- the state at the moment of the crash "
+                "was not recorded."
+            ),
+            service_state=SERVICE_UNKNOWN,
+            services=list(target.services),
         )
 
 
@@ -144,6 +183,7 @@ def _run_locked(
             steps,
             error=f"could not pin {request.ref}: {exc}",
             service_state=_observe_service(target, steps, restarted=False)[0],
+            services=list(target.services),
         )
     steps.record(
         "pin",
@@ -174,30 +214,34 @@ def _run_locked(
     # needs a migration without the migration is broken anyway.
     if not migration_allowed:
         pending = _alembic_pending(repo)
-        if pending:
+        if pending is not False:
+            unknown = pending is None
             return _fail(
                 store,
                 request,
                 steps,
                 error=(
-                    "migrations are not allowed for this run "
-                    f"({gate_reason}), but this commit has migrations the database "
-                    "has not applied. The service unit runs `alembic upgrade head` "
-                    "on start, so restarting would apply them anyway -- the deploy "
-                    "stopped instead. Nothing was restarted. Approve the ref "
-                    "override with migrations explicitly, or deploy origin/main."
+                    f"migrations are not allowed for this run ({gate_reason}), and "
+                    + (
+                        "whether this commit has migrations waiting could not be "
+                        "determined (alembic is present but its revision could not "
+                        "be read -- the venv may not exist yet). Failing closed"
+                        if unknown
+                        else "this commit has migrations the database has not applied"
+                    )
+                    + ". The service unit runs `alembic upgrade head` on start, so "
+                    "restarting would apply them anyway -- the deploy stopped "
+                    "instead. Nothing was restarted. Approve the ref override with "
+                    "migrations explicitly, or deploy origin/main."
                 ),
                 service_state=_observe_service(target, steps, restarted=False)[0],
                 deployed_sha=pinned.sha,
                 previous_sha=pinned.previous_sha,
                 pinned=pinned,
                 migration_allowed=False,
+                services=list(target.services),
             )
-        steps.record(
-            "migration-pending-check",
-            True,
-            "no unapplied migrations in this commit" if pending is False else "not applicable",
-        )
+        steps.record("migration-pending-check", True, "no unapplied migrations in this commit")
 
     # ── 3. backup, before anything can touch state ───────────────
     backup_detail: str | None = None
@@ -218,6 +262,7 @@ def _run_locked(
                 deployed_sha=pinned.sha,
                 previous_sha=pinned.previous_sha,
                 pinned=pinned,
+                services=list(target.services),
             )
         ok, detail = _run_backup(script, repo)
         steps.record("backup", ok, detail)
@@ -231,6 +276,7 @@ def _run_locked(
                 deployed_sha=pinned.sha,
                 previous_sha=pinned.previous_sha,
                 pinned=pinned,
+                services=list(target.services),
             )
         backup_detail = detail
     else:
@@ -285,6 +331,7 @@ def _run_locked(
             deployed_sha=pinned.sha,
             previous_sha=pinned.previous_sha,
             pinned=pinned,
+            services=list(target.services),
             outcome=outcome,
             migration_allowed=migration_allowed,
             migration_applied=True,
@@ -309,6 +356,7 @@ def _run_locked(
             deployed_sha=pinned.sha,
             previous_sha=pinned.previous_sha,
             pinned=pinned,
+            services=list(target.services),
             outcome=outcome,
             migration_allowed=migration_allowed,
             migration_applied=migration_applied,
@@ -434,14 +482,30 @@ def _alembic_id(line: str | None) -> str | None:
     return token or None
 
 
+def _has_alembic(repo: Path) -> bool:
+    return (repo / "alembic.ini").exists()
+
+
 def _alembic_pending(repo: Path) -> bool | None:
     """Does this commit carry migrations the database has not applied?
 
-    ``None`` when the question does not apply (no alembic here, or the
-    revision could not be read) -- the caller treats that as "not
-    proven pending" rather than as a refusal, because a target without
-    migrations must not be undeployable.
+    Three answers, not two, because two conflated the case that matters:
+
+    - ``False`` -- this target has no alembic at all, or nothing is
+      waiting. Safe to deploy behind a shut gate.
+    - ``True``  -- migrations are waiting.
+    - ``None``  -- there *is* an alembic here and the revision could not
+      be read. **Unknown, and the caller fails closed.**
+
+    The old version returned ``None`` for all three and the caller read
+    it as "not proven pending". That opened the hole this check exists
+    to close: the ``.venv`` is created by the agent's ``uv sync``, which
+    runs *after* this check, so a target without one yet answered
+    "unknown" and was let through -- and then the runner's own restart
+    applied every waiting migration via ``ExecStartPre``.
     """
+    if not _has_alembic(repo):
+        return False
     current = _alembic_id(_alembic_revision(repo))
     head = _alembic_id(_run_alembic(repo, "heads"))
     if current is None or head is None:
@@ -454,6 +518,12 @@ def _migration_applied(before: str | None, after: str | None, outcome) -> bool |
         # No alembic here at all; fall back to what the agent said,
         # which for a repo without migrations should be false or null.
         return outcome.migration_applied
+    if before is None or after is None:
+        # One side unreadable. Comparing them would call "unreadable ->
+        # 0006" a migration and abort a healthy deploy with a false
+        # containment failure, which is exactly what happened when the
+        # venv was created during the run.
+        return None
     return before != after
 
 
@@ -517,8 +587,6 @@ def _observe_service(
     this host the tree *is* production, so templates and other files
     read at request time have already changed while Python has not.
     """
-    active = all(_is_active(unit) for unit in target.services)
-
     health_ok: bool | None = None
     health_detail = "target declares no health endpoint"
     if target.health_url:
@@ -526,6 +594,12 @@ def _observe_service(
             target.health_url,
             grace_s=target.health_grace_s if restarted else 0.0,
         )
+
+    # Read `is-active` *after* the health poll, not before it. A unit
+    # with Restart=on-failure is `activating` for the first moments after
+    # `systemctl restart` returns, so sampling first and polling second
+    # produced results that said `down` and `ok: true` at once.
+    active = all(_is_active(unit) for unit in target.services)
 
     if not active:
         state = SERVICE_DOWN
@@ -628,6 +702,7 @@ def _fail(
     outcome=None,
     migration_allowed: bool = False,
     migration_applied: bool | None = None,
+    services: list[str] | None = None,
 ) -> DeployResult:
     result = DeployResult(
         request_id=request.request_id,
@@ -642,7 +717,10 @@ def _fail(
         migration_allowed=migration_allowed,
         migration_applied=migration_applied,
         service_state=service_state,
-        services=[],
+        # R-7's 2am reader is told the service is down; they need the
+        # unit name to act on, and an empty list was the one field that
+        # withheld it.
+        services=services or [],
         health_ok=health_ok,
         health_detail=health_detail,
         steps=steps.as_dicts(),

@@ -139,6 +139,32 @@ def test_a_non_repository_is_refused(tmp_path):
         pin_mod.pin(tmp_path, "origin/main")
 
 
+def test_a_hung_git_becomes_a_refusal_not_an_escaping_exception(remote_and_clone, monkeypatch):
+    """A `TimeoutExpired` reaching the runner would kill it mid-deploy and
+    leave the request `running` with no process behind it -- the one
+    state this design claims cannot exist."""
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git fetch", timeout=120)
+
+    monkeypatch.setattr(pin_mod.subprocess, "run", hang)
+    _, clone = remote_and_clone
+
+    with pytest.raises(PinRefusedError, match="did not finish within"):
+        pin_mod.pin(clone, "origin/main")
+
+
+def test_a_missing_git_binary_becomes_a_refusal(remote_and_clone, monkeypatch):
+    def missing(*args, **kwargs):
+        raise OSError("No such file or directory: 'git'")
+
+    monkeypatch.setattr(pin_mod.subprocess, "run", missing)
+    _, clone = remote_and_clone
+
+    with pytest.raises(PinRefusedError, match="could not run git"):
+        pin_mod.pin(clone, "origin/main")
+
+
 # ── the R-2 gate's question ──────────────────────────────────────
 
 

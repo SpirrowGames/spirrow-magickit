@@ -310,6 +310,13 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
         if not approved_by.strip():
             return _error("approved_by_required", "say who is approving; it goes in the audit log")
 
+        # Asking explicitly for the default ref is not an override. Left
+        # as one, the run was pinned like a normal deploy (on the branch,
+        # not detached) while `is_default_ref` stayed false and shut the
+        # migration gate -- two halves of the system disagreeing about
+        # what kind of deploy it was.
+        override_ref = "" if override_ref.strip() == registry.DEPLOY_REF else override_ref.strip()
+
         if override_ref and not override_reason.strip():
             return _error(
                 "override_reason_required",
@@ -330,6 +337,11 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
         request.override_ref = override_ref or None
         request.override_reason = override_reason or None
         request.override_allows_migration = bool(override_allows_migration)
+        # Written *before* the launch, because after it the runner owns
+        # this file. Saving a copy taken before the launch would race the
+        # runner's own write and drop whichever side lost -- either the
+        # unit name, or the status and start time.
+        request.runner_unit = launcher.unit_name(request.request_id)
         store.save(request)
         store.audit(
             "approved",
@@ -345,6 +357,10 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
 
         ok, detail = launcher.launch(request.request_id)
         if not ok:
+            # The runner never started, so nothing else is writing this
+            # file -- but re-read it anyway rather than writing back a
+            # copy from before the launch attempt.
+            request = store.load(request.request_id)
             request.status = records.STATUS_FAILED
             request.finished_at = records.utcnow()
             request.result = {"ok": False, "error": detail, "service_state": "unknown"}
@@ -362,8 +378,6 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
                 request_id=request.request_id,
             )
 
-        request.runner_unit = detail
-        store.save(request)
         return {
             "ok": True,
             "request_id": request.request_id,

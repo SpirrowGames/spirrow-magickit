@@ -195,7 +195,49 @@ async def test_a_failed_launch_is_reported_as_a_failure_not_a_start(human_tools,
     assert status["request"]["status"] == records.STATUS_FAILED
 
 
+async def test_the_runner_unit_is_recorded_before_the_launch(human_tools, monkeypatch, state_root):
+    """After `launch()` returns, the runner owns the request file.
+
+    Writing a copy taken *before* the launch raced the runner's own
+    write, and whichever side lost had its fields silently dropped --
+    either `runner_unit`, or `status` and `started_at`.
+    """
+    seen: dict[str, object] = {}
+
+    def spy(request_id: str):
+        stored = records.DeployStore(state_root).load(request_id)
+        seen["runner_unit"] = stored.runner_unit
+        return True, deploy_tools.launcher.unit_name(request_id)
+
+    monkeypatch.setattr(deploy_tools.launcher, "launch", spy)
+
+    created = await human_tools["deploy_request"](
+        target="spirrow-conclair", requested_by="loop", reason="r"
+    )
+    await human_tools["deploy_approve"](request_id=created["request_id"], approved_by="T")
+
+    assert seen["runner_unit"] == f"magickit-deploy-{created['request_id']}"
+
+
 # ── the human override (R-1) ─────────────────────────────────────
+
+
+async def test_asking_for_the_default_ref_explicitly_is_not_an_override(
+    human_tools, launch, state_root
+):
+    """Left as an override, such a run was pinned like a normal deploy
+    (on the branch) while its migration gate treated it as an override."""
+    created = await human_tools["deploy_request"](
+        target="spirrow-conclair", requested_by="loop", reason="r"
+    )
+    result = await human_tools["deploy_approve"](
+        request_id=created["request_id"], approved_by="T", override_ref="origin/main"
+    )
+
+    assert result["ok"] is True
+    stored = records.DeployStore(state_root).load(created["request_id"])
+    assert stored.override_ref is None
+    assert stored.is_default_ref is True
 
 
 async def test_an_override_is_recorded_with_its_reason(human_tools, launch, state_root):

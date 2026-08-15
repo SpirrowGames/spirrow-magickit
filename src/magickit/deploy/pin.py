@@ -47,13 +47,27 @@ class PinResult:
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
-    """Run one git command in ``repo`` and return its stdout, stripped."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT_S,
-    )
+    """Run one git command in ``repo`` and return its stdout, stripped.
+
+    A hung fetch or a missing git binary comes back as
+    :class:`PinRefusedError` like any other refusal. Letting
+    ``TimeoutExpired`` escape would take it past the runner's handler and
+    kill the runner mid-deploy, leaving the request ``running`` with no
+    process behind it -- the one state this design claims cannot exist.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PinRefusedError(
+            f"git {' '.join(args)} in {repo} did not finish within {GIT_TIMEOUT_S:.0f}s"
+        ) from exc
+    except OSError as exc:
+        raise PinRefusedError(f"could not run git {' '.join(args)} in {repo}: {exc}") from exc
     if check and proc.returncode != 0:
         raise PinRefusedError(
             f"git {' '.join(args)} failed in {repo} (exit {proc.returncode}): "
