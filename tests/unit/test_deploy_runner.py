@@ -433,6 +433,146 @@ def test_a_tree_that_moved_under_the_deploy_is_caught_on_read_back(store, wiring
     assert "something moved it" in result.error
 
 
+# ── two-slot targets ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def release_target(tmp_path, monkeypatch, target):
+    """A target converted to the two-slot layout, `a` live."""
+    from dataclasses import replace as _replace
+
+    from magickit.deploy import releases
+
+    root = tmp_path / "releases" / "spirrow-conclair"
+    for slot in ("a", "b"):
+        (root / slot / "scripts").mkdir(parents=True)
+        (root / slot / "scripts" / "backup.sh").write_text("#!/bin/bash\necho ok\n")
+    (root / "shared").mkdir()
+    (root / "current").symlink_to("a")
+
+    converted = _replace(target, releases_root=root)
+    monkeypatch.setattr(runner, "resolve_target", lambda name: converted)
+    monkeypatch.setattr(runner, "releases", releases)
+    return converted
+
+
+def test_a_release_deploy_prepares_the_standby_and_leaves_the_live_one_alone(
+    store, wiring, release_target, monkeypatch
+):
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True
+    # Pinned into `b`, not into what is serving.
+    assert wiring.pin_mod.pin.call_args[0][0] == release_target.releases_root / "b"
+    # ...and the agent was pointed there too, so its sandbox cannot
+    # write to the live release.
+    agent_target = wiring.agent_mod.run_agent.call_args.kwargs["target"]
+    assert agent_target.repo_path == release_target.releases_root / "b"
+
+
+def test_the_switch_happens_after_the_agent_and_before_the_restart(
+    store, wiring, release_target
+):
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    names = [s["name"] for s in result.steps]
+    assert names.index("agent-prepare") < names.index("switch") < names.index("restart")
+    assert (release_target.releases_root / "current").resolve().name == "b"
+
+
+def test_a_failure_before_the_switch_leaves_the_live_release_serving(
+    store, wiring, release_target, monkeypatch
+):
+    """The reason this layout needs no automatic rollback: everything
+    that can refuse happens in a directory nothing is serving."""
+    monkeypatch.setattr(
+        runner.agent_mod,
+        "run_agent",
+        MagicMock(return_value=AgentOutcome(ok=False, error="uv sync failed")),
+    )
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert (release_target.releases_root / "current").resolve().name == "a"
+    assert "switch" not in [s["name"] for s in result.steps]
+    wiring._restart.assert_not_called()
+
+
+def test_the_backup_is_taken_with_the_live_release_not_the_new_one(
+    store, wiring, release_target, monkeypatch
+):
+    """Taking the safety net with the unverified code is backwards."""
+    seen = {}
+    monkeypatch.setattr(
+        runner,
+        "_run_backup",
+        lambda script, repo: (seen.setdefault("script", script), (True, "ok"))[1],
+    )
+    request = _approved(store)
+
+    runner.run(request.request_id, store=store)
+
+    assert seen["script"] == release_target.releases_root / "a" / "scripts" / "backup.sh"
+
+
+def test_a_broken_layout_stops_the_deploy_rather_than_guessing(
+    store, wiring, release_target
+):
+    (release_target.releases_root / "current").unlink()
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert "layout is not usable" in result.error
+    wiring.pin_mod.pin.assert_not_called()
+    wiring._restart.assert_not_called()
+
+
+def test_a_rollback_onto_an_already_correct_slot_skips_preparation(
+    store, wiring, release_target, monkeypatch
+):
+    """That directory was serving this exact code, venv and all."""
+    old = "d" * 40
+    monkeypatch.setattr(
+        runner.pin_mod,
+        "pin",
+        MagicMock(
+            return_value=PinResult(ref=old, sha=old, previous_sha=old, detached=True)
+        ),
+    )
+    monkeypatch.setattr(runner, "_safe_head", lambda repo: old)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: False)
+    monkeypatch.setattr(runner, "_alembic_revision", MagicMock(return_value="0006"))
+    request = _approved(store, rollback_of="abc123", rollback_to_sha=old)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True
+    wiring.agent_mod.run_agent.assert_not_called()
+    assert "skipped preparation" in result.agent_summary
+    assert (release_target.releases_root / "current").resolve().name == "b"
+
+
+def test_an_in_place_target_still_works_the_old_way(store, wiring, target):
+    """Targets are converted one at a time; the unconverted ones must
+    keep deploying exactly as before."""
+    assert target.releases_root is None
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True
+    assert wiring.pin_mod.pin.call_args[0][0] == target.repo_path
+    assert "switch" not in [s["name"] for s in result.steps]
+
+
 # ── health, on endpoints whose body never ends ───────────────────
 
 

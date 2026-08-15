@@ -112,6 +112,29 @@ conclair の unit は `ExecStartPre=.../alembic upgrade head` を持つ ∴ **�
 
 （`alembic` が無い対象、revision が読めない対象は「pending が証明されていない」として扱い、deploy 不能にはしない。）
 
+## 4.5 切り替え式デプロイ（2 面 + symlink）
+
+cognilens だけが移行済み（2026-08-16）。残りは従来どおり in-place で、**対象ごとに 1 つずつ**移せます。
+
+```
+services/spirrow/
+  spirrow-cognilens -> releases/spirrow-cognilens/current   ← systemd はこの名前しか知らない
+  releases/spirrow-cognilens/{a,b,shared}
+```
+
+**systemd unit は 1 行も変えていません。** 現行パス自体を symlink にしたので、`WorkingDirectory` も `ExecStart` もそのまま解決します。全 unit の書き換えがこの移行で一番の事故源だったので、それを丸ごと回避しました。
+
+**解く問題はロールバックの速さではありません。** in-place で `git merge` すると、テンプレや静的ファイルだけ先に新しくなり、動いている Python は古いまま——その混合を配り続けます。symlink を張り替えると、**動いているプロセスは自分が掴んだ inode を離さない**ので一貫した旧版を出し続け、新プロセスだけが新しい面から起動します。実測でも、張り替え直後・再起動前の health は 200 のままでした。
+
+runner の順序が変わります: **待機面で pin → backup → agent → 検証 → 切り替え → restart**。切り替えより前は「誰もサーブしていないディレクトリ」の中の出来事 ∴ **どこで拒否されても live は無傷で、戻すものが無い** — これが「自動 rollback 無し（Q-3）」を崩さずに済む理由です。
+
+- **backup は live 面のスクリプトで取ります。** 安全網を、これから検証する側のコードで取るのは順序が逆
+- **rollback は待機面が既に目的 sha なら agent を丸ごと省略**します。その面は直前まで同じコードをサーブしていた ∴ venv ごと準備済み
+- **面は 2 つ。** 3 手前は DB スキーマから見て既に無効で、増やしても安全性は増えません
+- **DB は共有 ∴ migration は切り戻せません。** ここはロードバランサーでも同じで、R-2 は 1 mm も楽になりません
+
+**エージェントに警告している罠**: venv に焼き込まれた絶対パスは**安定 symlink 側**（`…/spirrow-cognilens/venv`）なので、待機面で `source venv/bin/activate` すると **live 面の venv が有効になります**。待機面の検証には絶対パスを使う必要があり、brief で明示しています。
+
 ## 5. R-5: 何を許可し、何を許可しなかったか
 
 **本当の境界（カーネル）**

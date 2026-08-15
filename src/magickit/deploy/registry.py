@@ -109,6 +109,21 @@ class DeployTarget:
     health_url: str | None
     backup_script: Path | None = None
     health_grace_s: float = 120.0
+    #: Set when this target uses two release directories and a symlink
+    #: (see :mod:`magickit.deploy.releases`). ``repo_path`` stays the
+    #: path systemd names either way -- for a release target it is the
+    #: stable symlink -- so nothing about the units changes. What
+    #: changes is where the deploy *works*: the standby slot, while the
+    #: live one keeps serving.
+    #:
+    #: ``None`` means the older in-place behaviour: pin the live tree
+    #: and restart. Both are supported on purpose, so targets can be
+    #: converted one at a time rather than in one move.
+    releases_root: Path | None = None
+
+    @property
+    def uses_releases(self) -> bool:
+        return self.releases_root is not None
 
 
 _TARGETS: dict[str, DeployTarget] = {
@@ -160,6 +175,11 @@ _TARGETS: dict[str, DeployTarget] = {
         # -- reading the body of an SSE endpoint never returns.
         health_url="http://127.0.0.1:8111/sse",
         health_grace_s=120.0,
+        # First target converted to the two-slot layout (2026-08-16).
+        # Picked as the pilot because it holds no state at all and its
+        # only shared file is the gitignored start.sh, so a mistake here
+        # could not lose anything.
+        releases_root=SERVICES_ROOT / "releases" / "spirrow-cognilens",
     ),
     "spirrow-prismind": DeployTarget(
         name="spirrow-prismind",

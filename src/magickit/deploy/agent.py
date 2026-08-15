@@ -312,6 +312,7 @@ WHAT YOU MUST NOT DO:
 MIGRATIONS: {migration_clause}
 
 BACKUP: {backup_clause}
+{release_clause}
 
 BEFORE YOU FINISH, PROVE THE CODE AT LEAST LOADS. magickit restarts the
 service after you return, and a restart is the expensive way to discover
@@ -402,6 +403,27 @@ someone will act on this at 2am.
 """
 
 
+RELEASE_CLAUSE = """
+YOU ARE NOT IN THE DIRECTORY THAT IS SERVING. This target keeps two
+release directories and a symlink; you are working in the standby one,
+and magickit points the symlink here after you report success. That is
+deliberate -- nothing you do can disturb what is currently running.
+
+It also has one sharp edge, so read this before you run anything:
+
+  {stable} is the *stable* path, and it currently resolves to the OTHER
+  directory -- the one that is live.
+
+So anything that goes through that path reaches the running release, not
+yours. In particular this repo's venv has that path baked into it
+(VIRTUAL_ENV, script shebangs), which means `source venv/bin/activate`
+here activates the LIVE release's venv, and a service started that way
+would be the old code wearing your directory's name. Use absolute paths
+under {work} when you need this release's interpreter or tools, and do
+not trust anything that resolves through {stable}.
+"""
+
+
 def render_prepare_brief(
     *,
     target: DeployTarget,
@@ -411,6 +433,7 @@ def render_prepare_brief(
     migration_allowed: bool,
     migration_block_reason: str,
     backup_path: str | None,
+    stable_path: str | None = None,
 ) -> str:
     if migration_allowed:
         migration_clause = MIGRATION_ALLOWED_CLAUSE.format(default_ref=default_ref)
@@ -429,6 +452,10 @@ def render_prepare_brief(
             "Treat anything irreversible with corresponding care."
         )
 
+    release_clause = ""
+    if stable_path and str(target.repo_path) != stable_path:
+        release_clause = RELEASE_CLAUSE.format(stable=stable_path, work=target.repo_path)
+
     return PREPARE_BRIEF.format(
         name=target.name,
         repo=target.repo_path,
@@ -436,6 +463,7 @@ def render_prepare_brief(
         ref=ref,
         migration_clause=migration_clause,
         backup_clause=backup_clause,
+        release_clause=release_clause,
     )
 
 

@@ -326,6 +326,11 @@ merge はどこからでもできるが、live にできるのは systemd と al
 - **health check は本文を読まない**。cognilens/prismind に平の health は無く SSE mount が答える ∴
   `httpx.get` だと健全なサービスで必ずタイムアウトする(実測)。`httpx.stream` でステータス行のみ
 - 閲覧用に **`/dashboard/deploys`**(読み取り専用・承認ボタン無し)
+- **cognilens は 2 面 + symlink 方式に移行済み**(2026-08-16)。`services/spirrow/spirrow-cognilens`
+  自体が symlink ∴ **unit は無改修**。runner は待機面で pin→backup→agent→**切り替え**→restart の順に
+  なり、切り替え前は誰もサーブしていない ∴ 失敗しても live は無傷(自動 rollback が要らない理由)。
+  他の対象は in-place のままで、1 つずつ移せる。**待機面で `source venv/bin/activate` すると
+  live 面の venv が有効になる**罠あり(焼き込みパスが安定 symlink 側)
 - **git は ignore されたファイルを黙って上書きする**(実測)。commit が「ここでは ignore されている
   パス」を追跡し始めると fast-forward merge が警告なしにホストのコピーを置き換え、しかも ignore
   されたファイルは dirty 判定に出ない。**lexora/cognilens/prismind は systemd が実行する

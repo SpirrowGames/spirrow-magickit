@@ -14,15 +14,25 @@ before anything that changes state:
 
 1. lock the target (R-9), and mark any deploy left ``running`` by a
    dead runner as ``interrupted``
-2. pin the tree to the approved commit -- refuses on a dirty tree, an
+2. pick the directory to work in -- the *standby* slot for a two-slot
+   target (:mod:`magickit.deploy.releases`), the live tree otherwise
+3. pin it to the approved commit -- refuses on a dirty tree, an
    unresolvable ref, or a non-fast-forward, all before any write
-3. read the current migration revision, so a later one can be compared
-4. back up (R-2), unconditionally, before the agent exists
-5. re-check the migration gate against ``origin/main`` and run the agent
+4. read the current migration revision, so a later one can be compared
+5. back up (R-2), unconditionally, before the agent exists, using the
+   *live* release's script rather than the one being deployed
+6. re-check the migration gate against ``origin/main`` and run the agent
    with migrations allowed or denied accordingly
-6. restart -- the runner's step, never the agent's
-7. check health, read back the sha from git, and if it is bad, hand the
-   wreckage to a read-only agent for a diagnosis
+7. switch the symlink -- for a two-slot target, this is the moment the
+   deploy becomes real, and it is the last thing before the restart
+8. restart -- the runner's step, never the agent's
+9. check health, read back the sha through the path systemd uses, and if
+   it is bad, hand the wreckage to a read-only agent for a diagnosis
+
+Step 7 is why this design needs no automatic rollback to be safe: for a
+two-slot target every step before it happens in a directory nothing is
+serving, so a refusal anywhere above leaves the live release untouched
+and there is nothing to undo.
 
 Steps 6 and 7 are the runner's rather than the agent's for two reasons.
 The unit name is already magickit's (R-4 puts it in the registry), so
@@ -37,13 +47,14 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 
 from magickit.deploy import agent as agent_mod
 from magickit.deploy import pin as pin_mod
-from magickit.deploy import records
+from magickit.deploy import records, releases
 from magickit.deploy.records import (
     SERVICE_DOWN,
     SERVICE_UNKNOWN,
@@ -174,7 +185,37 @@ def _run_locked(
     target: DeployTarget,
     steps: _Steps,
 ) -> DeployResult:
-    repo = target.repo_path
+    # ── 0. where does this deploy do its work? ───────────────────
+    #
+    # For a two-slot target that is the *standby* directory, while the
+    # live one keeps serving untouched; the deploy becomes real at the
+    # symlink switch, after the agent has had its say. For an in-place
+    # target it is the live tree, as before, and the switch step is a
+    # no-op. Everything between here and the restart is written against
+    # `work` so the two cases do not fork.
+    slots = None
+    if target.uses_releases:
+        try:
+            slots = releases.resolve(target.releases_root)
+        except releases.ReleaseLayoutError as exc:
+            return _fail(
+                store,
+                request,
+                steps,
+                error=(
+                    f"{target.name} is configured for release directories but the "
+                    f"layout is not usable: {exc}. Refusing to guess which directory "
+                    "is live. Nothing was changed."
+                ),
+                service_state=_observe_service(target, steps, restarted=False)[0],
+                services=list(target.services),
+            )
+        steps.record(
+            "release-slots", True, f"current={slots.current}, preparing={slots.standby}"
+        )
+
+    work = slots.standby_path if slots else target.repo_path
+    repo = work
 
     # ── 1. pin (nothing is restarted if this refuses) ────────────
     try:
@@ -253,7 +294,12 @@ def _run_locked(
     # ── 3. backup, before anything can touch state ───────────────
     backup_detail: str | None = None
     if target.backup_script is not None:
-        script = repo / target.backup_script
+        # Deliberately the *live* slot's script, not the one being
+        # deployed. The backup is the safety net for the code that is
+        # about to run; taking it with that same unverified code is
+        # backwards.
+        backup_home = slots.current_path if slots else target.repo_path
+        script = backup_home / target.backup_script
         if not script.exists():
             return _fail(
                 store,
@@ -271,7 +317,7 @@ def _run_locked(
                 pinned=pinned,
                 services=list(target.services),
             )
-        ok, detail = _run_backup(script, repo)
+        ok, detail = _run_backup(script, backup_home)
         steps.record("backup", ok, detail)
         if not ok:
             return _fail(
@@ -291,22 +337,41 @@ def _run_locked(
 
     # ── 4. the agent prepares the code ───────────────────────────
     scratch = store.root / "runs" / request.request_id
+    # The agent is pointed at the directory being prepared. For a
+    # release target that is the standby, so its sandbox cannot write to
+    # what is currently serving -- the confinement and the layout agree.
+    work_target = replace(target, repo_path=work)
     brief = agent_mod.render_prepare_brief(
-        target=target,
+        target=work_target,
         sha=pinned.sha,
         ref=pinned.ref,
         default_ref=DEPLOY_REF,
         migration_allowed=migration_allowed,
         migration_block_reason=gate_reason,
         backup_path=backup_detail,
+        stable_path=str(target.repo_path) if slots else None,
     )
-    outcome = agent_mod.run_agent(
-        target=target,
-        scratch=scratch,
-        unit=f"magickit-deploy-agent-{request.request_id}",
-        brief=brief,
-        migration_allowed=migration_allowed,
-    )
+    # A rollback onto a slot that is already at that commit needs no
+    # preparation: that directory was serving this exact code until the
+    # deploy being undone replaced it, venv and all. Running the agent
+    # again would cost minutes and could only change something.
+    if request.is_rollback and not pinned.changed:
+        outcome = agent_mod.AgentOutcome(
+            ok=True,
+            summary=(
+                f"skipped preparation: {work.name} is already at {pinned.sha[:12]}, "
+                "which it was serving until the deploy being undone replaced it"
+            ),
+        )
+    else:
+        outcome = agent_mod.run_agent(
+            target=work_target,
+            scratch=scratch,
+            unit=f"magickit-deploy-agent-{request.request_id}",
+            brief=brief,
+            migration_allowed=migration_allowed,
+        )
+
     steps.record(
         "agent-prepare",
         outcome.ok,
@@ -369,13 +434,47 @@ def _run_locked(
             migration_applied=migration_applied,
         )
 
+    # ── 5b. switch (only now does the deploy become real) ────────
+    #
+    # Last, and after the agent has reported success. Everything before
+    # this point happened in a directory nothing was serving, so a
+    # refusal anywhere above leaves the live release exactly as it was
+    # and there is nothing to undo -- which is why this layout needs no
+    # automatic rollback to be safe.
+    if slots:
+        try:
+            releases.switch(slots.root, slots.standby)
+        except (releases.ReleaseLayoutError, OSError) as exc:
+            return _fail(
+                store,
+                request,
+                steps,
+                error=(
+                    f"the release was prepared but the switch to {slots.standby} "
+                    f"failed: {exc}. The service was NOT restarted and is still "
+                    f"serving {slots.current}."
+                ),
+                service_state=_observe_service(target, steps, restarted=False)[0],
+                deployed_sha=_safe_head(target.repo_path),
+                previous_sha=pinned.previous_sha,
+                pinned=pinned,
+                outcome=outcome,
+                migration_allowed=migration_allowed,
+                migration_applied=migration_applied,
+                services=list(target.services),
+            )
+        steps.record("switch", True, f"{slots.current} -> {slots.standby}")
+
     # ── 6. restart (the runner's step) ───────────────────────────
     restart_ok, restart_detail = _restart(target)
     steps.record("restart", restart_ok, restart_detail)
 
     # ── 7. verify ────────────────────────────────────────────────
     state, health_ok, health_detail = _observe_service(target, steps, restarted=restart_ok)
-    deployed_sha = _safe_head(repo)
+    # Read through the path systemd uses, not through the slot we
+    # prepared: for a release target that verifies the switch took
+    # effect as well as the pin.
+    deployed_sha = _safe_head(target.repo_path)
 
     ok = restart_ok and (health_ok is not False) and deployed_sha == pinned.sha
     diagnosis = ""
