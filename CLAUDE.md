@@ -326,6 +326,11 @@ merge はどこからでもできるが、live にできるのは systemd と al
 - **health check は本文を読まない**。cognilens/prismind に平の health は無く SSE mount が答える ∴
   `httpx.get` だと健全なサービスで必ずタイムアウトする(実測)。`httpx.stream` でステータス行のみ
 - 閲覧用に **`/dashboard/deploys`**(読み取り専用・承認ボタン無し)
+- **git は ignore されたファイルを黙って上書きする**(実測)。commit が「ここでは ignore されている
+  パス」を追跡し始めると fast-forward merge が警告なしにホストのコピーを置き換え、しかも ignore
+  されたファイルは dirty 判定に出ない。**lexora/cognilens/prismind は systemd が実行する
+  `start.sh` を ignore している** ∴ pin は blob hash で検出して拒否する
+  (`pin.would_silently_overwrite`)。内容同一なら通す
 
 ## 稼働状況ページ (`web/ops.py`)
 

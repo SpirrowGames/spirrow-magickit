@@ -120,10 +120,24 @@ _TARGETS: dict[str, DeployTarget] = {
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=120.0,
     ),
-    # The three below hold no state of their own: no alembic, no backup
-    # script (checked -- neither `alembic.ini` nor `scripts/backup.sh`
-    # exists in any of them). So a bad deploy of these is undone by
-    # putting `main` back, which is the case R-1 was sized for.
+    # The three below run no migrations and declare no backup script --
+    # checked, neither `alembic.ini` nor `scripts/backup.sh` exists in
+    # any of them -- so a bad deploy is undone by putting `main` back,
+    # which is the case R-1 was sized for.
+    #
+    # They are not *stateless*, and an earlier version of this comment
+    # said they were. lexora keeps `data/costs.db` (live, ~1MB) and
+    # prismind keeps `credentials.json`, `token.json` and two caches.
+    # None of it is touched by a deploy -- all of it is gitignored, so
+    # pinning leaves it alone -- but "nothing here would be lost" is a
+    # different claim from "nothing here exists", and only the first one
+    # is true. Note also that none of that state is backed up by
+    # anything; that is a gap, not a design.
+    #
+    # All three also ignore the `start.sh` that systemd executes, so the
+    # deployed sha does not describe how the service actually starts.
+    # See `pin.would_silently_overwrite` for the accident that follows
+    # from trying to fix that carelessly.
     "spirrow-lexora": DeployTarget(
         name="spirrow-lexora",
         repo_path=SERVICES_ROOT / "spirrow-lexora",

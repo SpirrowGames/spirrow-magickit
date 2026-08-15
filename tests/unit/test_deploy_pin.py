@@ -134,6 +134,72 @@ def test_a_non_fast_forward_is_refused_rather_than_resolved(remote_and_clone):
     assert _git(clone, "rev-parse", "HEAD") == before
 
 
+def test_a_commit_that_would_silently_replace_an_ignored_file_is_refused(remote_and_clone):
+    """The accident this exists for, reproduced.
+
+    git treats ignored files as expendable: if a commit starts tracking
+    a path that exists here as ignored, a fast-forward merge overwrites
+    the host's copy with no warning and exit 0 -- and an ignored file
+    never made the tree look dirty, so nothing else catches it.
+
+    Not hypothetical: lexora, cognilens and prismind all ignore the
+    `start.sh` that systemd executes.
+    """
+    upstream, clone = remote_and_clone
+    (upstream / ".gitignore").write_text("start.sh\n")
+    _git(upstream, "add", ".gitignore")
+    _git(upstream, "commit", "-m", "ignore start.sh")
+
+    # The ignore rule reaches the host the way it really would.
+    pin_mod.pin(clone, "origin/main")
+    # ...and then the host gets its own copy, ignored, host-specific.
+    (clone / "start.sh").write_text("#!/bin/bash\ncd /home/sgadmin/services/spirrow/x\n")
+    assert pin_mod.is_clean(clone), "an ignored file must not make the tree look dirty"
+
+    # Upstream starts tracking it, with different contents.
+    (upstream / ".gitignore").write_text("")
+    (upstream / "start.sh").write_text("#!/bin/bash\necho from-the-repo\n")
+    _git(upstream, "add", "-A")
+    _git(upstream, "commit", "-m", "track start.sh")
+
+    with pytest.raises(PinRefusedError, match="without a word"):
+        pin_mod.pin(clone, "origin/main")
+
+    # The host's copy is untouched and nothing moved.
+    assert "spirrow/x" in (clone / "start.sh").read_text()
+
+
+def test_an_identical_ignored_file_is_not_treated_as_a_clobber(remote_and_clone):
+    """Nothing would be lost, so nothing is refused."""
+    upstream, clone = remote_and_clone
+    contents = "#!/bin/bash\necho same\n"
+
+    (upstream / ".gitignore").write_text("start.sh\n")
+    _git(upstream, "add", ".gitignore")
+    _git(upstream, "commit", "-m", "ignore")
+    pin_mod.pin(clone, "origin/main")
+    (clone / "start.sh").write_text(contents)
+
+    (upstream / ".gitignore").write_text("")
+    (upstream / "start.sh").write_text(contents)
+    _git(upstream, "add", "-A")
+    _git(upstream, "commit", "-m", "track")
+
+    result = pin_mod.pin(clone, "origin/main")
+
+    assert result.sha == _git(upstream, "rev-parse", "HEAD")
+
+
+def test_an_ordinary_new_file_is_not_a_clobber(remote_and_clone):
+    """Only files that already exist here count."""
+    upstream, clone = remote_and_clone
+    _commit(upstream, "brand-new.txt")
+
+    pin_mod.pin(clone, "origin/main")
+
+    assert (clone / "brand-new.txt").exists()
+
+
 def test_a_non_repository_is_refused(tmp_path):
     with pytest.raises(PinRefusedError, match="not a git working tree"):
         pin_mod.pin(tmp_path, "origin/main")

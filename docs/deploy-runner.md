@@ -60,6 +60,16 @@ magickit は既にその境界に立っていて、既にループから到達�
 
 どちらも放置すると「エージェントがレポートを書かなかった」という**原因から 3 層離れた症状**として現れる。
 
+### git は ignore されたファイルを黙って上書きする
+
+commit が「ここでは ignore されているパス」を**追跡し始める**と、fast-forward merge はホスト側のコピーを**警告なし・exit 0 で置き換えます**（実測）。ignore されたファイルは「作業ツリーが汚れている」判定にも出ないので、pin のクリーンチェックも素通りします。
+
+これは仮定の話ではありません。**lexora / cognilens / prismind は systemd が実行する `start.sh` 自体を ignore しています** ∴ 誰かがそれを upstream に commit した瞬間、次の deploy が**動いているサービスの起動方法を黙って書き換え**、結果は成功と報告されます。
+
+∴ pin は、そうなるファイルを blob hash で検出して**拒否**します（内容が同一なら失われるものが無いので通す）。実リポジトリ 4 件で誤検知が無いことは確認済み。
+
+なお `start.sh` を git 管理下に移すのは**やりません**。上の事故を招くうえ、release 方式では `shared/` に置けば済み、lexora の絶対パス直書き (`cd /…/spirrow-lexora`) は**そのパスが symlink になるのでそのまま正しく動く**からです。ただし「動いているものが git で完全には説明できない」状態は残ります（`deployed_sha` は起動条件を含まない）。
+
 ### health check は本文を読んではいけない
 
 cognilens と prismind に平の health エンドポイントは無く（`/health` `/healthz` `/api/health` `/` すべて 404、実測）、答えるのは MCP の SSE mount。**SSE の本文は終わらない** ∴ `httpx.get` は健全なサービス相手に必ずタイムアウトする（実測: 両方とも 8s で ReadTimeout、`httpx.stream` なら 0.0s で 200）。runner は**ステータス行だけを見る**。

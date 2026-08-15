@@ -90,6 +90,59 @@ def is_clean(repo: Path) -> bool:
     return git(repo, "status", "--porcelain") == ""
 
 
+def would_silently_overwrite(repo: Path, sha: str) -> list[str]:
+    """Files the pin would replace without anyone being told.
+
+    git treats an ignored file as expendable. If a commit starts
+    *tracking* a path that exists on the host as ignored, a fast-forward
+    merge overwrites the host's copy -- measured, and it is silent: no
+    warning, no conflict, exit 0, and the file never showed up as a
+    dirty tree because ignored files do not.
+
+    That is not hypothetical here. Three of the five deployable repos
+    ignore their own ``start.sh``, which is the file systemd executes.
+    Committing one of those upstream would, on the next deploy, replace
+    the entrypoint of a running service while the result reported
+    success.
+
+    Compared by blob hash rather than by content, so this is exact and
+    works for binary files. A path whose incoming blob is identical to
+    what is already on disk is not reported: nothing would be lost.
+    """
+    try:
+        changed = git(repo, "diff", "--name-only", f"HEAD..{sha}").splitlines()
+    except PinRefusedError:
+        return []
+
+    at_risk = []
+    for path in (p.strip() for p in changed if p.strip()):
+        on_disk = repo / path
+        if not on_disk.is_file():
+            continue
+        if _is_tracked(repo, path):
+            # Tracked files follow the normal merge rules, which do warn.
+            continue
+        try:
+            incoming = git(repo, "rev-parse", f"{sha}:{path}")
+            local = git(repo, "hash-object", str(on_disk))
+        except PinRefusedError:
+            at_risk.append(path)
+            continue
+        if incoming != local:
+            at_risk.append(path)
+    return at_risk
+
+
+def _is_tracked(repo: Path, path: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--error-unmatch", "--", path],
+        capture_output=True,
+        text=True,
+        timeout=GIT_TIMEOUT_S,
+    )
+    return proc.returncode == 0
+
+
 def _local_branch_tracking(repo: Path, remote_ref: str) -> str | None:
     """The local branch whose upstream is ``remote_ref``, if any."""
     listing = git(repo, "for-each-ref", "--format=%(refname:short) %(upstream:short)", "refs/heads")
@@ -135,6 +188,18 @@ def pin(repo: Path, ref: str, *, default_ref: str = DEPLOY_REF, fetch: bool = Tr
         sha = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
     except PinRefusedError as exc:
         raise PinRefusedError(f"cannot resolve {ref!r} in {repo}: {exc}") from exc
+
+    clobbered = would_silently_overwrite(repo, sha)
+    if clobbered:
+        raise PinRefusedError(
+            "this commit starts tracking files that already exist here as ignored, "
+            "with different contents, and git would replace them without a word:\n  "
+            + "\n  ".join(clobbered)
+            + "\nNothing was changed. Three of these repos ignore the start.sh that "
+            "systemd executes, so this is how a deploy would quietly change the way "
+            "a service starts. Resolve it by hand -- keep the host's copy, or delete "
+            "it and let the commit's version land -- then deploy again."
+        )
 
     detached = False
     # Only the *default* ref lands on a branch. An override that happens

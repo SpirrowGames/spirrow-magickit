@@ -313,6 +313,26 @@ MIGRATIONS: {migration_clause}
 
 BACKUP: {backup_clause}
 
+BEFORE YOU FINISH, PROVE THE CODE AT LEAST LOADS. magickit restarts the
+service after you return, and a restart is the expensive way to discover
+an import error or a missing dependency. Work out what a cheap,
+side-effect-free check is for *this* repo -- usually importing the
+module the service entry point names, or whatever the repo itself
+suggests -- and run it. Record it as a step.
+
+Two rules about that check, and they matter more than the check itself:
+
+- **It must not touch production state.** Do not start the real service.
+  Do not run migrations to "see if they work". Be aware that some
+  services in this platform apply migrations from inside the application
+  at startup, so merely booting them writes to the live database -- if
+  that is true here, booting is not a test, it is the deploy happening
+  early and unsupervised.
+- **If you cannot check it without side effects, do not check it.** Say
+  so in the report and let the restart be the test. An honest "I could
+  not verify this safely" is a fine outcome; a verification that quietly
+  changed something is not.
+
 IF YOU CANNOT DETERMINE THE PROCEDURE: stop. Do not guess, do not try a
 plausible-looking command to see what happens, and do not do "the usual
 thing". Write the report with "undetermined": true and say exactly what
