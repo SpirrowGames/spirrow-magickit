@@ -63,6 +63,20 @@ def test_self_deploy_refusal_is_a_kind_of_target_not_allowed():
     assert issubclass(registry.SelfDeployRefusedError, registry.TargetNotAllowedError)
 
 
+def test_the_refusal_does_not_claim_a_technical_impossibility():
+    """It was first justified as "the restart would kill the runner". That
+    was measured to be false -- the runner is a user transient unit and
+    outlives the system service that launched it -- so the message says
+    the real reason: a failed self-deploy takes down the tools that
+    report what happened."""
+    with pytest.raises(registry.SelfDeployRefusedError) as exc:
+        registry.resolve_target("spirrow-magickit")
+
+    message = str(exc.value)
+    assert "deploy_status" in message
+    assert "kill" not in message
+
+
 # ── the rest of the allowlist ────────────────────────────────────
 
 
@@ -92,6 +106,40 @@ def test_conclair_is_deployable_and_carries_what_the_runner_needs():
     assert target.health_url == "http://127.0.0.1:8115/health"
     # R-2: the backup has to exist before a migration can be allowed.
     assert target.backup_script == Path("scripts/backup.sh")
+
+
+def test_the_other_spirrow_services_on_this_host_are_deployable():
+    """Every GitHub-managed spirrow product running here, except magickit.
+
+    Verified against the host rather than assumed: each of these has a
+    `SpirrowGames/...` origin and a running unit. `rag-server` and
+    `ue-investigator` also run here and are deliberately absent -- both
+    were checked and are not git working trees at all, so there is no
+    `origin/main` to deploy.
+    """
+    assert set(registry.target_names()) == {
+        "spirrow-conclair",
+        "spirrow-lexora",
+        "spirrow-cognilens",
+        "spirrow-prismind",
+    }
+
+
+def test_the_stateless_targets_declare_no_backup_because_they_have_none():
+    """Checked on the host: none of the three has `scripts/backup.sh` or
+    `alembic.ini`. Declaring a backup script that is not there would make
+    them undeployable, since a missing declared script is a refusal."""
+    for name in ("spirrow-lexora", "spirrow-cognilens", "spirrow-prismind"):
+        assert registry.resolve_target(name).backup_script is None
+
+
+def test_the_mcp_transport_targets_point_at_the_endpoint_that_answers():
+    """Probed: /health, /healthz, /api/health and / are all 404 on these
+    two; the SSE mount is what responds."""
+    assert registry.resolve_target("spirrow-cognilens").health_url.endswith(":8111/sse")
+    assert registry.resolve_target("spirrow-prismind").health_url.endswith(":8112/sse")
+    # lexora does have a plain one, from its own uvicorn bind.
+    assert registry.resolve_target("spirrow-lexora").health_url.endswith(":8110/health")
 
 
 def test_every_target_declares_a_health_check_or_says_it_has_none():

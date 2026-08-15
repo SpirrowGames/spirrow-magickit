@@ -433,6 +433,87 @@ def test_a_tree_that_moved_under_the_deploy_is_caught_on_read_back(store, wiring
     assert "something moved it" in result.error
 
 
+# ── health, on endpoints whose body never ends ───────────────────
+
+
+def test_health_reads_the_status_line_and_not_the_body(monkeypatch):
+    """Two targets answer on an MCP SSE mount. A plain GET reads the body
+    and never returns -- measured: cognilens and prismind both time out
+    while perfectly healthy, which would have declared a working service
+    dead and failed the deploy."""
+
+    def forbidden_get(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("health must not read the response body")
+
+    class _Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(runner.httpx, "get", forbidden_get)
+    monkeypatch.setattr(runner.httpx, "stream", lambda *a, **k: _Response())
+
+    ok, detail = runner._poll_health("http://127.0.0.1:8111/sse", grace_s=0.0)
+
+    assert ok is True
+    assert "200" in detail
+
+
+def test_a_slow_health_endpoint_is_given_time(monkeypatch):
+    """lexora's /health is documented to stall for 20-30s; a 10s
+    per-attempt timeout would turn slow into failed."""
+    assert runner.HEALTH_REQUEST_TIMEOUT_S >= 30.0
+
+
+# ── rollback ─────────────────────────────────────────────────────
+
+
+def test_a_rollback_pins_the_recorded_commit_and_never_migrates(store, wiring, monkeypatch):
+    old = "d" * 40
+    monkeypatch.setattr(
+        runner.pin_mod,
+        "pin",
+        MagicMock(
+            return_value=PinResult(ref=old, sha=old, previous_sha=NEW_SHA, detached=True)
+        ),
+    )
+    monkeypatch.setattr(runner, "_safe_head", lambda repo: old)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: False)
+    monkeypatch.setattr(runner, "_alembic_revision", MagicMock(return_value="0006"))
+    request = _approved(store, rollback_of="abc123", rollback_to_sha=old)
+
+    result = runner.run(request.request_id, store=store)
+
+    # The ref that was pinned came from the record, not from the caller.
+    assert runner.pin_mod.pin.call_args[0][1] == old
+    assert result.ok is True
+    assert result.deployed_sha == old
+    assert result.migration_allowed is False
+
+    gate = [s for s in result.steps if s["name"] == "migration-gate"][0]
+    assert "rollback" in gate["detail"]
+
+
+def test_a_rollback_stops_when_the_database_is_ahead_of_the_old_code(
+    store, wiring, monkeypatch
+):
+    """Rolling code back past a migration that has been applied is not a
+    rollback, it is a second incident."""
+    old = "d" * 40
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: True)
+    request = _approved(store, rollback_of="abc123", rollback_to_sha=old)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert "does not match the database's revision" in result.error
+    wiring._restart.assert_not_called()
+
+
 # ── R-3 at the runner, and never staying "running" ───────────────
 
 

@@ -47,20 +47,31 @@ class TargetNotAllowedError(Exception):
 
 
 class SelfDeployRefusedError(TargetNotAllowedError):
-    """magickit cannot deploy itself in v1.
+    """magickit does not deploy itself. An operational choice, not a limit.
 
-    The runner is launched *from* the MCP server process. Restarting
-    magickit mid-deploy would kill the process that holds the lock and
-    writes the audit record, leaving the request stuck in ``running``
-    with nobody left to finish it -- the one outcome R-7 forbids, since
-    it is indistinguishable from a deploy still in flight.
+    This was first written down as a technical impossibility -- "the
+    runner is launched from the MCP server, so restarting magickit would
+    kill the process holding the lock". That reasoning was wrong, and
+    saying so matters more than quietly keeping the same rule: the
+    runner is a *user* transient unit under
+    ``user@1000.service/app.slice``, not a child of the MCP server's
+    system unit. Measured: stopping the launching system service leaves
+    the runner running. A self-deploy would in fact complete and record
+    its result.
 
-    Doing this properly needs a mechanism that outlives the restart: a
-    detached unit that takes the request id, performs the deploy, and
-    reports afterwards, with the MCP server as a reader rather than the
-    parent. That is a separate design, not an allowlist entry, which is
-    why this is a distinct branch in :func:`resolve_target` and not an
-    absence from the table.
+    It stays refused for a different, smaller reason. When magickit
+    deploys magickit and the deploy goes wrong, the tool that reports
+    what went wrong is the thing that is down: ``deploy_status`` and
+    ``deploy_history`` both answer from the MCP server being restarted.
+    The record survives on disk, but reading it means reaching the host
+    -- which is the exact dependency this whole feature exists to
+    remove. Every other target keeps its reporting path intact when its
+    deploy fails; magickit is the one that cannot.
+
+    So: a deliberate carve-out, checked before the table so that adding
+    an entry cannot switch it on by accident. Lifting it needs a
+    reporting path that does not depend on the service being deployed --
+    not an allowlist edit.
     """
 
 
@@ -109,6 +120,43 @@ _TARGETS: dict[str, DeployTarget] = {
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=120.0,
     ),
+    # The three below hold no state of their own: no alembic, no backup
+    # script (checked -- neither `alembic.ini` nor `scripts/backup.sh`
+    # exists in any of them). So a bad deploy of these is undone by
+    # putting `main` back, which is the case R-1 was sized for.
+    "spirrow-lexora": DeployTarget(
+        name="spirrow-lexora",
+        repo_path=SERVICES_ROOT / "spirrow-lexora",
+        services=("spirrow-lexora.service",),
+        # Plain HTTP health, from the unit's own uvicorn bind
+        # (`--host 0.0.0.0 --port 8110`). Known to stall for 20-30s on
+        # occasion, which is what the long grace and the per-attempt
+        # timeout in the runner are sized for.
+        health_url="http://127.0.0.1:8110/health",
+        health_grace_s=180.0,
+    ),
+    "spirrow-cognilens": DeployTarget(
+        name="spirrow-cognilens",
+        repo_path=SERVICES_ROOT / "spirrow-cognilens",
+        services=("spirrow-cognilens.service",),
+        # No plain health endpoint: /health, /healthz, /api/health and /
+        # are all 404 (probed). What answers is the MCP SSE mount, so
+        # liveness is "the transport is up", which is what a restart
+        # verification needs. The runner reads only the response headers
+        # -- reading the body of an SSE endpoint never returns.
+        health_url="http://127.0.0.1:8111/sse",
+        health_grace_s=120.0,
+    ),
+    "spirrow-prismind": DeployTarget(
+        name="spirrow-prismind",
+        repo_path=SERVICES_ROOT / "spirrow-prismind",
+        services=("spirrow-prismind.service",),
+        # Same shape as cognilens; this one is an `mcp-proxy` in front of
+        # the server, so /mcp answers 400 to a bare GET and /sse is the
+        # honest liveness signal.
+        health_url="http://127.0.0.1:8112/sse",
+        health_grace_s=120.0,
+    ),
 }
 
 
@@ -141,10 +189,12 @@ def resolve_target(
 
     if name == SELF_TARGET:
         raise SelfDeployRefusedError(
-            "spirrow-magickit cannot deploy itself: the runner is launched from "
-            "the MCP server, so the restart would kill the process holding the "
-            "lock and writing the result. This needs a detached mechanism, not "
-            "an allowlist entry."
+            "spirrow-magickit does not deploy itself. The deploy would complete -- "
+            "the runner outlives the restart -- but the tools that report what "
+            "happened (deploy_status, deploy_history) are served by the process "
+            "being restarted, so a failed self-deploy is the one case where "
+            "reading the result means reaching the host. Lifting this needs a "
+            "reporting path independent of magickit, not an allowlist entry."
         )
 
     if "/" in name or name.startswith(".") or name != name.strip():

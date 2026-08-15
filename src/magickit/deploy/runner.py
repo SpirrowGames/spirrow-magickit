@@ -68,6 +68,9 @@ logger = get_logger(__name__)
 BACKUP_TIMEOUT_S = 900.0
 RESTART_TIMEOUT_S = 300.0
 HEALTH_POLL_INTERVAL_S = 2.0
+#: One attempt. lexora's /health is known to take 20-30s sometimes, and
+#: a timeout shorter than that turns a slow service into a failed deploy.
+HEALTH_REQUEST_TIMEOUT_S = 40.0
 
 
 class _Steps:
@@ -227,7 +230,11 @@ def _run_locked(
                         "determined (alembic is present but its revision could not "
                         "be read -- the venv may not exist yet). Failing closed"
                         if unknown
-                        else "this commit has migrations the database has not applied"
+                        # Deliberately not "migrations are waiting": the
+                        # revisions differing is all that is known, and
+                        # on a rollback it is the database that is ahead.
+                        else "this commit's migration head does not match the "
+                        "database's revision"
                     )
                     + ". The service unit runs `alembic upgrade head` on start, so "
                     "restarting would apply them anyway -- the deploy stopped "
@@ -431,6 +438,11 @@ def _migration_gate(repo: Path, request: DeployRequest, sha: str) -> tuple[bool,
         return False, (
             f"the tree is on {sha[:12]}, which is not what {DEPLOY_REF} points at"
         )
+    if request.is_rollback:
+        return False, (
+            f"this is a rollback to {request.rollback_to_sha[:12]}; going back to "
+            "older code never means writing to the database"
+        )
     if not request.is_default_ref and not request.override_allows_migration:
         return False, (
             f"ref override to {request.override_ref!r} was approved, but migrations "
@@ -624,14 +636,27 @@ def _observe_service(
 
 
 def _poll_health(url: str, *, grace_s: float) -> tuple[bool, str]:
+    """Ask for the status line and nothing else.
+
+    ``httpx.get`` reads the body, and two of the targets answer on an
+    MCP SSE mount whose body never ends -- measured: a plain GET against
+    cognilens and prismind times out every time while the service is
+    perfectly healthy, so the deploy would have declared a working
+    service dead. Streaming and looking only at the status code works
+    for both kinds of endpoint.
+
+    The per-attempt timeout is generous because lexora's /health is
+    documented to stall for 20-30s; a tighter one would turn a slow
+    answer into a failed deploy.
+    """
     deadline = time.monotonic() + max(grace_s, 0.0)
     last = ""
     while True:
         try:
-            response = httpx.get(url, timeout=10.0)
-            if response.status_code < 400:
-                return True, f"{url} -> {response.status_code}"
-            last = f"{url} -> {response.status_code}"
+            with httpx.stream("GET", url, timeout=HEALTH_REQUEST_TIMEOUT_S) as response:
+                if response.status_code < 400:
+                    return True, f"{url} -> {response.status_code}"
+                last = f"{url} -> {response.status_code}"
         except httpx.HTTPError as exc:
             last = f"{url} -> {type(exc).__name__}: {exc}"
         if time.monotonic() >= deadline:

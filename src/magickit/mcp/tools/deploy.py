@@ -161,6 +161,107 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
         }
 
     @mcp.tool()
+    async def deploy_rollback(request_id: str, requested_by: str, reason: str) -> dict[str, Any]:
+        """Ask to undo a past deploy. Does NOT roll anything back yet.
+
+        USE THIS WHEN: a deploy landed, the service came up, and what it
+        is doing turns out to be wrong. That is a different situation
+        from a deploy that failed -- a failed deploy already left the
+        previous version running.
+
+        Like `deploy_request`, this files a record and stops; a human
+        approves it with `deploy_approve`, and only then does anything
+        move. It then runs through the same lock, backup, agent, restart
+        and health check as any other deploy.
+
+        You name a *past deploy*, not a commit. The commit to go back to
+        is read out of magickit's record of that deploy (its
+        `previous_sha`), so this is not a way to deploy a ref the request
+        path is otherwise not allowed to name.
+
+        REFUSED when the deploy being undone applied a migration. Code
+        goes back by putting the old commit in again; a schema does not,
+        and code that predates a migration meeting a database that has
+        it is not a rollback, it is a second incident. Recovery there is
+        a human decision made against the snapshot taken before that
+        deploy -- see docs/deploy-runner.md.
+
+        Args:
+            request_id: the deploy to undo, from `deploy_history`.
+            requested_by: who is asking. A record, not a credential.
+            reason: what is wrong with what is running now. The
+                approving human reads this first.
+
+        Returns:
+            {"ok": true, "request_id": <the NEW request>, "target",
+             "rollback_of", "rollback_to_sha", "status":
+             "pending_approval"}
+            On refusal: {"ok": false, "error_type", "message"} with
+            `error_type` in {"not_found", "not_rollbackable",
+            "migration_applied"}.
+        """
+        store = records.get_store()
+        try:
+            original = store.load(request_id)
+        except KeyError:
+            return _error("not_found", f"no deploy request {request_id!r}")
+
+        if not requested_by.strip() or not reason.strip():
+            return _error(
+                "reason_required",
+                "say who is asking and what is wrong with what is running now",
+            )
+
+        result = original.result or {}
+        previous_sha = result.get("previous_sha")
+        if not previous_sha:
+            return _error(
+                "not_rollbackable",
+                f"deploy {request_id} has no recorded previous_sha, so there is "
+                "nothing to go back to. This is normal for a deploy that failed "
+                "before it pinned anything -- in that case nothing was changed.",
+                status=original.status,
+            )
+
+        if result.get("migration_applied"):
+            return _error(
+                "migration_applied",
+                f"deploy {request_id} applied a migration, so it cannot be undone "
+                "by redeploying the old commit: the database would be ahead of the "
+                "code. Recovery is a human decision against the snapshot taken "
+                "before that deploy. See docs/deploy-runner.md.",
+                deployed_sha=result.get("deployed_sha"),
+                previous_sha=previous_sha,
+            )
+
+        request = store.create(
+            target=original.target,
+            requested_by=requested_by,
+            reason=reason,
+            rollback_of=request_id,
+            rollback_to_sha=previous_sha,
+        )
+        logger.info(
+            "Rollback requested",
+            request_id=request.request_id,
+            rollback_of=request_id,
+            target=original.target,
+        )
+        return {
+            "ok": True,
+            "request_id": request.request_id,
+            "target": original.target,
+            "status": request.status,
+            "rollback_of": request_id,
+            "rollback_to_sha": previous_sha,
+            "note": (
+                "filed only. A human must approve this before anything is rolled "
+                "back. The tree will be checked out detached at that commit, and "
+                "migrations stay blocked for the run."
+            ),
+        }
+
+    @mcp.tool()
     async def deploy_status(request_id: str) -> dict[str, Any]:
         """Read a deploy request and, once it has run, its full result.
 
@@ -310,6 +411,15 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
         if not approved_by.strip():
             return _error("approved_by_required", "say who is approving; it goes in the audit log")
 
+        if request.is_rollback and (override_ref or override_allows_migration):
+            return _error(
+                "override_on_rollback",
+                "a rollback already has its commit, taken from the record of the "
+                "deploy it undoes; overriding the ref or unblocking migrations on "
+                "top of that is not a rollback. File a normal deploy request "
+                "instead.",
+            )
+
         # Asking explicitly for the default ref is not an override. Left
         # as one, the run was pinned like a normal deploy (on the branch,
         # not detached) while `is_default_ref` stayed false and shut the
@@ -353,6 +463,8 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
             override_ref=request.override_ref,
             override_reason=request.override_reason,
             override_allows_migration=request.override_allows_migration,
+            rollback_of=request.rollback_of,
+            rollback_to_sha=request.rollback_to_sha,
         )
 
         ok, detail = launcher.launch(request.request_id)

@@ -288,6 +288,103 @@ async def test_unlocking_migrations_requires_an_override_to_unlock(human_tools, 
     launch.assert_not_called()
 
 
+# ── rollback ─────────────────────────────────────────────────────
+
+
+async def _finished_deploy(tools, state_root, launch, **result_fields):
+    created = await tools["deploy_request"](
+        target="spirrow-conclair", requested_by="loop", reason="r"
+    )
+    store = records.DeployStore(state_root)
+    request = store.load(created["request_id"])
+    request.status = records.STATUS_SUCCEEDED
+    request.result = {
+        "ok": True,
+        "deployed_sha": "a" * 40,
+        "previous_sha": "b" * 40,
+        "migration_applied": False,
+        **result_fields,
+    }
+    store.save(request)
+    return request
+
+
+async def test_a_rollback_names_a_past_deploy_not_a_commit(loop_tools, state_root, launch):
+    """R-1 again: the sha comes out of magickit's own record."""
+    original = await _finished_deploy(loop_tools, state_root, launch)
+
+    params = set(__import__("inspect").signature(loop_tools["deploy_rollback"]).parameters)
+    assert params == {"request_id", "requested_by", "reason"}
+
+    result = await loop_tools["deploy_rollback"](
+        request_id=original.request_id, requested_by="loop", reason="listing order is wrong"
+    )
+
+    assert result["ok"] is True
+    assert result["rollback_to_sha"] == "b" * 40
+    assert result["status"] == records.STATUS_PENDING
+    # Filed only -- a human still has to approve it.
+    launch.assert_not_called()
+
+
+async def test_a_rollback_is_refused_when_the_deploy_applied_a_migration(
+    loop_tools, state_root, launch
+):
+    original = await _finished_deploy(loop_tools, state_root, launch, migration_applied=True)
+
+    result = await loop_tools["deploy_rollback"](
+        request_id=original.request_id, requested_by="loop", reason="wrong"
+    )
+
+    assert result["ok"] is False
+    assert result["error_type"] == "migration_applied"
+    assert "database would be ahead of the code" in result["message"]
+
+
+async def test_a_deploy_that_changed_nothing_has_nothing_to_roll_back(
+    loop_tools, state_root, launch
+):
+    created = await loop_tools["deploy_request"](
+        target="spirrow-conclair", requested_by="loop", reason="r"
+    )
+    store = records.DeployStore(state_root)
+    request = store.load(created["request_id"])
+    request.status = records.STATUS_FAILED
+    request.result = {"ok": False, "error": "could not pin"}
+    store.save(request)
+
+    result = await loop_tools["deploy_rollback"](
+        request_id=created["request_id"], requested_by="loop", reason="undo"
+    )
+
+    assert result["error_type"] == "not_rollbackable"
+    assert "nothing was changed" in result["message"]
+
+
+async def test_a_rollback_cannot_be_approved_with_an_override(
+    human_tools, state_root, launch
+):
+    original = await _finished_deploy(human_tools, state_root, launch)
+    rollback = await human_tools["deploy_rollback"](
+        request_id=original.request_id, requested_by="loop", reason="wrong"
+    )
+
+    result = await human_tools["deploy_approve"](
+        request_id=rollback["request_id"],
+        approved_by="T",
+        override_ref="fix/x",
+        override_reason="because",
+    )
+
+    assert result["error_type"] == "override_on_rollback"
+    launch.assert_not_called()
+
+
+async def test_the_rollback_is_available_to_the_loop_and_still_needs_approval(loop_tools):
+    assert "deploy_rollback" in loop_tools
+    assert "deploy_approve" not in loop_tools
+
+
 # ── reading back (R-6, R-8) ──────────────────────────────────────
 
 

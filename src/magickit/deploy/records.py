@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from magickit.deploy.paths import magickit_root
+from magickit.deploy.registry import DEPLOY_REF
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -125,6 +126,14 @@ class DeployRequest:
 
     override_ref: str | None = None
     override_reason: str | None = None
+
+    #: Set when this request undoes an earlier one. The caller names a
+    #: *past deploy*, never a commit: the sha is then read out of
+    #: magickit's own record of that deploy, so a rollback cannot be
+    #: used to smuggle in a ref the request path is not allowed to name
+    #: (R-1). ``rollback_to_sha`` is that record's ``previous_sha``.
+    rollback_of: str | None = None
+    rollback_to_sha: str | None = None
     #: R-2. A ref override alone does not unlock migrations; the
     #: approver has to say so separately, because the thing that does
     #: not come back from a bad deploy is state, not code.
@@ -146,13 +155,17 @@ class DeployRequest:
     @property
     def ref(self) -> str:
         """The ref this request will pin. The constant unless overridden."""
-        from magickit.deploy.registry import DEPLOY_REF
-
+        if self.rollback_to_sha:
+            return self.rollback_to_sha
         return self.override_ref or DEPLOY_REF
 
     @property
     def is_default_ref(self) -> bool:
-        return self.override_ref is None
+        return self.override_ref is None and self.rollback_to_sha is None
+
+    @property
+    def is_rollback(self) -> bool:
+        return self.rollback_of is not None
 
 
 @dataclass
@@ -229,7 +242,15 @@ class DeployStore:
 
     # ── requests ─────────────────────────────────────────────────
 
-    def create(self, *, target: str, requested_by: str, reason: str) -> DeployRequest:
+    def create(
+        self,
+        *,
+        target: str,
+        requested_by: str,
+        reason: str,
+        rollback_of: str | None = None,
+        rollback_to_sha: str | None = None,
+    ) -> DeployRequest:
         self._ensure()
         request = DeployRequest(
             request_id=uuid.uuid4().hex[:12],
@@ -237,14 +258,18 @@ class DeployStore:
             requested_by=requested_by,
             reason=reason,
             created_at=utcnow(),
+            rollback_of=rollback_of,
+            rollback_to_sha=rollback_to_sha,
         )
         self.save(request)
         self.audit(
-            "requested",
+            "rollback_requested" if rollback_of else "requested",
             request_id=request.request_id,
             target=target,
             actor=requested_by,
             reason=reason,
+            rollback_of=rollback_of,
+            rollback_to_sha=rollback_to_sha,
         )
         return request
 

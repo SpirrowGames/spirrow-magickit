@@ -119,6 +119,17 @@ def test_deploy_request_takes_no_var_kwargs(loop_tools):
     assert inspect.Parameter.VAR_POSITIONAL not in kinds
 
 
+def test_the_rollback_path_cannot_carry_a_ref_either(loop_tools):
+    """Rollback is the second way code other than `origin/main` goes
+    live, so it gets the same treatment: the caller names a past deploy
+    and the commit is read out of magickit's record of it.
+    """
+    params = set(inspect.signature(loop_tools["deploy_rollback"]).parameters)
+
+    assert not params & FORBIDDEN_REF_PARAMS
+    assert params == {"request_id", "requested_by", "reason"}
+
+
 def test_the_ref_is_a_module_constant_not_an_argument():
     """One constant, per R-1's "1 行で済むから"."""
     assert registry.DEPLOY_REF == "origin/main"

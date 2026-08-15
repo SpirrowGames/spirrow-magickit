@@ -316,8 +316,16 @@ merge はどこからでもできるが、live にできるのは systemd と al
   `ExecStartPre=alembic upgrade head` を持つ ∴ **再起動そのものが gate を素通りする**。だから
   gate が閉じているときは**未適用 migration を持つ commit を deploy しない**(`alembic current`
   vs `heads`)。エージェントへの deny だけでは塞げない穴
-- **`spirrow-magickit` 自身は対象外**。自分を再起動すると lock と結果を書くプロセスごと死ぬ。
-  allowlist に足しても解禁されない別分岐で拒否
+- **対象は conclair / lexora / cognilens / prismind の 4 つ**。rag-server と ue-investigator も
+  当ホストで動くが **git working tree ではない**(実測)ので対象外
+- **`spirrow-magickit` 自身は意図的な carve-out**。「runner が restart で死ぬ」は**誤り**だった
+  (runner は user transient unit で system サービスの停止を生き残る、実測)。残る理由は
+  **失敗を報告する tool 自身が落ちる**こと ∴ magickit だけ「調査にホスト到達が要る」状態になる
+- **rollback は承認付きの `deploy_rollback`**。呼び出し側は commit ではなく**過去の deploy** を
+  名指しし、sha は magickit の記録から読む。migration を当てた deploy の rollback は拒否
+- **health check は本文を読まない**。cognilens/prismind に平の health は無く SSE mount が答える ∴
+  `httpx.get` だと健全なサービスで必ずタイムアウトする(実測)。`httpx.stream` でステータス行のみ
+- 閲覧用に **`/dashboard/deploys`**(読み取り専用・承認ボタン無し)
 
 ## 稼働状況ページ (`web/ops.py`)
 
@@ -473,5 +481,6 @@ Phase 2 以降として掲げていたもの: マルチプロジェクト対応�
 
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — MCP ツールの引数・使用例・レスポンス形
 - [`docs/deploy-runner.md`](docs/deploy-runner.md) — deploy 実行の設計・権限の実測値・運用手順
+- [`docs/deploy-hardening.md`](docs/deploy-hardening.md) — deploy エージェントの専用ユーザ分離（**未適用**の手順書）
 - `docs/DESIGN.md` — 詳細設計
 - `docs/PROJECT_WORKFLOW_GUIDE.md` — プロジェクト運用ガイド

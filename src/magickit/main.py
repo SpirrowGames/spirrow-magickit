@@ -34,7 +34,7 @@ from magickit.utils.logging import configure_logging, get_logger
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import close_client as close_chatroom_ui_client
 from magickit.web import dashboard_router as chatroom_dashboard_router
-from magickit.web import ops_router
+from magickit.web import deploys_router, ops_router
 from magickit.web import router as chatroom_ui_router
 from magickit.web import writes_router as chatroom_writes_router
 
@@ -205,6 +205,7 @@ def create_app() -> FastAPI:
     # SQLite task table, not the autonomous loop. The queue view keeps its
     # panels and moves to /dashboard/system.
     app.include_router(ops_router)
+    app.include_router(deploys_router)
 
     # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
     # Starlette matches routes in insertion order, and this router claims the

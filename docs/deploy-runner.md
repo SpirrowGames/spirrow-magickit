@@ -60,6 +60,12 @@ magickit は既にその境界に立っていて、既にループから到達�
 
 どちらも放置すると「エージェントがレポートを書かなかった」という**原因から 3 層離れた症状**として現れる。
 
+### health check は本文を読んではいけない
+
+cognilens と prismind に平の health エンドポイントは無く（`/health` `/healthz` `/api/health` `/` すべて 404、実測）、答えるのは MCP の SSE mount。**SSE の本文は終わらない** ∴ `httpx.get` は健全なサービス相手に必ずタイムアウトする（実測: 両方とも 8s で ReadTimeout、`httpx.stream` なら 0.0s で 200）。runner は**ステータス行だけを見る**。
+
+lexora の `/health` は 20〜30s 詰まることがある ∴ 1 回あたりのタイムアウトは 40s。短くすると「遅い」が「失敗」になる。
+
 ### 通しの実測（ダミー repo、本番非接触）
 
 - sandbox 付き unit で Claude Code が起動し、手順を自力で判断し、レポート JSON を書いて返すところまで確認
@@ -82,6 +88,7 @@ magickit は既にその境界に立っていて、既にループから到達�
 | **R-3** 人間の承認なしに実行不可 | `deploy_request`（記録するだけ）と `deploy_approve`（実行を起こす）を別 tool にし、**approve は認証済みインスタンスにしか登録しない**。ループ側の tool 一覧に存在しない |
 | **R-4** 対象は allowlist | `registry._TARGETS`。Python に置いたのは、これが境界だから — 変更は PR を通る。`spirrow-magickit` は**別の分岐で先に拒否**（表に足しても解禁されない） |
 | **R-5** 道具を絞る | §5 |
+| **rollback** | 承認付き `deploy_rollback`。呼び出し側は **commit ではなく「取り消したい過去の deploy」を名指し**し、sha は magickit の記録から読む ∴ R-1 の抜け道にならない。migration を当てた deploy は拒否 |
 | **R-6** 構造化された結果 | `DeployResult`。`deployed_sha` は deploy 後に **git から読み直す**（エージェントの自己申告ではない）∴「deploy された sha == merge された sha」の機械照合が意味を持つ |
 | **R-7** 失敗は大きな声で | `service_state` が `running_new` / `running_previous` / `running_unknown_version` / `down` / `unknown` を区別する。「deploy が失敗した」と「何も動いていない」は別の語 |
 | **R-8** 監査ログ | `data/deploy/audit.jsonl` に append-only。`deploy_history` tool で**リモートから読める** ∴ 失敗調査に ssh が要らない |
@@ -142,14 +149,15 @@ spirrow-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl is-active spirrow-conclai
 
 「人間が承認した」＝「あなたが誰か知っている扉を通ってきた」。`approved_by` は credential ではなく記録で、認証しているのは扉の方。
 
-### Q-3 rollback — v1 は自動 rollback なし。何が動いているかを断定的に返すことに集中
+### Q-3 rollback — 承認付きの `deploy_rollback`。自動では動かない
 
-「deploy が失敗した」と「成功したが動作がおかしい」は別問題で、後者は機械には判定できない。v1 は前者を正確に報告することに徹する（`service_state` / `health_ok` / `deployed_sha` / `diagnosis`）。
+「deploy が失敗した」と「成功したが動作がおかしい」は別問題で、後者は機械には判定できない ∴ **自動 rollback は入れない**。前者の報告は `service_state` / `health_ok` / `deployed_sha` / `diagnosis` が担う。
 
-戻すのは人間の判断で、**次の deploy 要求として出す**（`main` を戻して merge → 通常の deploy）。migration を当てた後の自動巻き戻しは downgrade の質に依存し、そこを自動化するのは R-2 の趣旨に反する。
+後者のための専用経路が `deploy_rollback`。deploy と同じ **要求 → 人間の承認 → 実行**を通り、同じ lock・backup・health check を通る。
 
-**手順（コードのみの場合）**: 問題のある commit を revert して `main` に入れ、通常の deploy 要求を出す。数分で戻る。
-**手順（migration を含む場合）**: 自動では戻らない。`data/deploy/audit.jsonl` で当該 deploy の `previous_sha` と時刻を確認し、conclair の `backups/` にある **その deploy の直前に取られた snapshot** から判断する。復元はその間に書かれたデータを捨てるので、最後の手段。
+**呼び出し側は commit を名指ししない。** 「取り消したい過去の deploy」を名指しし、戻る先の sha は magickit がその deploy の記録 (`previous_sha`) から読む ∴ rollback は R-1 の抜け道にならない。ツリーはその sha に detached で checkout され、migration gate はその run の間ずっと閉じている。
+
+**migration を当てた deploy の rollback は拒否する。** コードは古い commit を入れ直せば戻るが、スキーマは戻らない。migration より前のコードが、それを適用済みの DB に出会うのは rollback ではなく 2 件目の事故。その場合の復旧は人間の判断で、`data/deploy/audit.jsonl` の当該 deploy の時刻と、conclair の `backups/` にある**その deploy の直前の snapshot** を突き合わせる。復元はその間に書かれたデータを捨てるので最後の手段。
 
 ### Q-4 手順を判断できなかった場合 — 止まって報告
 
@@ -161,7 +169,7 @@ brief に明示してある: 推測するな、それらしいコマンドを試
 
 ```
 # ループ側（無認証 tailnet 面）
-deploy_targets()
+deploy_targets()   # spirrow-conclair / lexora / cognilens / prismind
 deploy_request(target="spirrow-conclair", requested_by="mindwire-conductor",
                reason="conclair#10 が merge 済みだが thread listing は旧順序のまま")
   → {"request_id": "…", "status": "pending_approval"}
@@ -174,11 +182,15 @@ deploy_approve(request_id="…", approved_by="Takahito")
 # どちらからでも
 deploy_status(request_id="…")        # 数分後、結果
 deploy_history(limit=50)             # 監査ログ
+
+# 出したが動きがおかしい → 取り消しを要求（これも承認が要る）
+deploy_rollback(request_id="…", requested_by="…", reason="…")
 ```
+
+閲覧だけなら `/dashboard/deploys`（tailnet の magickit web）。**読み取り専用**で、承認ボタンは無い — 無認証面からサービス再起動に届かせないため。
 
 ## 8. まだやっていないこと
 
-- **magickit 自身の deploy** — 実行中のプロセスが自分を再起動することになる。runner は MCP サーバから起動されるので、restart は lock を持ち結果を書いているプロセスごと殺し、request が `running` のまま誰も終わらせられなくなる。R-7 が禁じている「進行中と区別できない」状態そのもの。やるなら restart を跨いで生き残る detach した機構（request id だけ受け取って走り、後から報告する unit）が要る。allowlist の項目ではない
-- **専用ユーザによる隔離**（§5）
-- **rollback の自動化**（§6 Q-3）
-- **web ダッシュボードでの表示** — 監査は MCP tool から読めるので R-8 は満たすが、`/dashboard` に出すと一覧性が上がる
+- **magickit 自身の deploy** — 意図的な carve-out として残す。**当初ここに書いていた理由（「runner が restart で死ぬ」）は実測で誤り**だった: runner は `user@1000.service/app.slice` の user transient unit で、起動元の system サービスを止めても生き残る（実測）。実際には deploy は完走し結果も記録される。
+  残る理由はもっと小さい: **失敗したときに何が起きたかを報告する tool 自身が落ちている**。`deploy_status` も `deploy_history` も再起動される MCP サーバが答えるので、magickit だけは「失敗の調査にホストへの到達が要る」— この機能が消そうとしている依存そのものになる。解くには magickit に依存しない報告経路が要る（allowlist の項目ではない）
+- **専用ユーザによる隔離** — 手順と成果物は [`docs/deploy-hardening.md`](deploy-hardening.md) に用意済み。**未適用**。本当の障害物は sudoers ではなく Claude の認証で、`~sgadmin/.claude/.credentials.json` は別ユーザから読めない ∴ API キーか専用ユーザでの対話ログインのどちらかが要る（2026-08-16 時点では現状維持を選択）
