@@ -291,6 +291,30 @@ UI 経路: `chatroom_proxy` が `POST /ui/projects/{p}/control` を**唯一の P
 無い — role も msg も持たず、tailnet が信頼境界だから)。これが無いと :8443 経由でウィジェットは
 描画されるがボタンが 405 になる。
 
+## deploy 実行 (`deploy/`, `mcp/tools/deploy.py`)
+
+merge はどこからでもできるが、live にできるのは systemd と alembic 履歴のあるこのホストだけ。
+その渡し場。詳細は [`docs/deploy-runner.md`](docs/deploy-runner.md)。
+
+- **手順は持たない、対象は持つ**。repo ごとの deploy の形は Claude Code エージェントが現物を
+  読んで決める。magickit が持つのは allowlist (`deploy/registry.py`)・ref・承認・記録の 4 つ
+- **ref は `origin/main` 固定**。`deploy_request` に ref 引数が**無い**（検証ではなく不在）。
+  人間は承認時に理由付きで override できる
+- **承認は認証済みインスタンスにしか無い**。`deploy_approve` は `MAGICKIT_AUTH_DISABLED=1` の
+  tailnet 面には**登録されない** ∴ ループは自分の deploy を承認できない。無認証面から届く能力は
+  「要求を 1 行書く」まで
+- **MCP サーバ自身は deploy を実行できない**（`NoNewPrivileges` で sudo 不可、repo は read-only。
+  実測）。`systemd-run --user` で runner を出し、runner が `sudo systemd-run --system` で
+  sandbox 付きのエージェント unit を出す。**`--user` では sandbox 指定が黙って無視される**ので
+  エージェントは `--system`
+- **restart と health は runner がやる**。エージェントの仕事から特権を外すためで、その結果
+  エージェント unit に `NoNewPrivileges=true` を掛けられる
+- **migration だけ硬い**: backup を無条件に先に取る / `HEAD == origin/main` でなければ gate を
+  閉じる / ref override は migration を自動解禁しない / **revision を前後で読んで検出**する
+  (deny 規則は列挙にすぎず境界ではない)
+- **`spirrow-magickit` 自身は対象外**。自分を再起動すると lock と結果を書くプロセスごと死ぬ。
+  allowlist に足しても解禁されない別分岐で拒否
+
 ## 稼働状況ページ (`web/ops.py`)
 
 `/dashboard` = **稼働状況**。「自律ループが今回っているのか、止まっているのか、何を待っているのか」に
@@ -444,5 +468,6 @@ Phase 2 以降として掲げていたもの: マルチプロジェクト対応�
 ## 参照ドキュメント
 
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — MCP ツールの引数・使用例・レスポンス形
+- [`docs/deploy-runner.md`](docs/deploy-runner.md) — deploy 実行の設計・権限の実測値・運用手順
 - `docs/DESIGN.md` — 詳細設計
 - `docs/PROJECT_WORKFLOW_GUIDE.md` — プロジェクト運用ガイド

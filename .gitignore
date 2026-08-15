@@ -50,6 +50,12 @@ htmlcov/
 # Runtime data (FastMCP OAuth client storage etc.)
 data/oauth-storage*/
 
+# Deploy requests, the audit trail, agent scratch. This is operational
+# state of *this host*, not of the repository -- and audit.jsonl is the
+# record of what was actually deployed, which must not be rewritten by
+# a checkout.
+data/deploy/
+
 # Environment
 .env
 .env.local
