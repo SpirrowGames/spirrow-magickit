@@ -60,7 +60,7 @@ def test_json_stats_api_keeps_its_path():
 def test_dashboard_template_points_at_a_route_that_exists():
     """A rename that misses the template leaves the panel loading forever,
     and a 404 in a polled HTMX target is silent on the page."""
-    source = (TEMPLATES / "dashboard.html").read_text()
+    source = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
 
     assert 'hx-get="/dashboard/_stats"' in source
 
@@ -82,7 +82,7 @@ def _htmx_targets():
     literal, and the route table is keyed on the declared path.
     """
     for template in sorted(TEMPLATES.rglob("*.html")):
-        source = template.read_text()
+        source = template.read_text(encoding="utf-8")
         for verb, url in re.findall(r'hx-(get|post)="([^"]+)"', source):
             path = url.split("?", 1)[0]
             if "{{" in path or "{%" in path:
@@ -133,7 +133,7 @@ def test_every_scripted_htmx_target_has_a_route_under_it():
 
     dangling = []
     for template in sorted(TEMPLATES.rglob("*.html")):
-        source = template.read_text()
+        source = template.read_text(encoding="utf-8")
         for method, prefix in re.findall(
             r"""htmx\.ajax\(\s*['"](\w+)['"]\s*,\s*['"]([^'"]+)['"]""", source
         ):

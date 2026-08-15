@@ -136,7 +136,12 @@ class Settings(BaseSettings):
         if not config_path.exists():
             return cls()
 
-        with open(config_path) as f:
+        # encoding is explicit because open()'s default is locale-dependent, and
+        # the config carries non-ASCII. CI never sees this (ubuntu defaults to
+        # UTF-8) but any host whose locale says otherwise -- a Windows-JP box
+        # (cp932), or a minimal Linux container with LC_ALL=C (ASCII) -- raises
+        # UnicodeDecodeError here before a single setting is read.
+        with open(config_path, encoding="utf-8") as f:
             yaml_config = yaml.safe_load(f) or {}
 
         # Flatten the nested YAML structure
