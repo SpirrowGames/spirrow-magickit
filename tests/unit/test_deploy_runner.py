@@ -182,11 +182,81 @@ def test_an_overridden_ref_with_explicit_migration_approval_still_needs_to_be_ma
     assert result.migration_allowed is False
 
 
+def test_a_shut_gate_refuses_code_that_has_migrations_waiting(store, wiring, monkeypatch):
+    """The restart is the other thing that runs alembic.
+
+    conclair's unit carries `ExecStartPre=alembic upgrade head`, so a
+    gate that only denied the *agent* would be walked through by systemd
+    at restart. The deploy has to stop before that.
+    """
+    monkeypatch.setattr(runner.pin_mod, "matches_remote_main", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: True)
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is False
+    assert "runs `alembic upgrade head` on start" in result.error
+    # Stopped before anything: no backup, no agent, no restart.
+    wiring._run_backup.assert_not_called()
+    wiring.agent_mod.run_agent.assert_not_called()
+    wiring._restart.assert_not_called()
+
+
+def test_a_shut_gate_still_deploys_code_with_no_migrations_waiting(store, wiring, monkeypatch):
+    """A code-only change to a non-main ref is exactly what an override
+    is for; it must not be collateral damage of the rule above."""
+    monkeypatch.setattr(runner.pin_mod, "matches_remote_main", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: False)
+    monkeypatch.setattr(runner, "_alembic_revision", MagicMock(return_value="0006"))
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True
+    assert result.migration_allowed is False
+    wiring._restart.assert_called_once()
+
+
+def test_a_target_without_alembic_is_not_made_undeployable(store, wiring, monkeypatch):
+    monkeypatch.setattr(runner.pin_mod, "matches_remote_main", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: None)
+    monkeypatch.setattr(runner, "_alembic_revision", MagicMock(return_value=None))
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True
+
+
+def test_pending_is_read_from_current_versus_heads(monkeypatch, tmp_path):
+    calls = []
+
+    def fake(repo, *args):
+        calls.append(args)
+        return {("current",): "0005 (head)", ("heads",): "0006 (head)"}[args]
+
+    monkeypatch.setattr(runner, "_run_alembic", fake)
+    assert runner._alembic_pending(tmp_path) is True
+
+    monkeypatch.setattr(runner, "_run_alembic", lambda repo, *a: "0006 (head)")
+    assert runner._alembic_pending(tmp_path) is False
+
+    monkeypatch.setattr(runner, "_run_alembic", lambda repo, *a: None)
+    assert runner._alembic_pending(tmp_path) is None
+
+
 def test_a_migration_applied_behind_a_shut_gate_fails_the_deploy_loudly(
     store, wiring, monkeypatch
 ):
-    """Detection, because prevention by deny-list is best-effort."""
+    """Detection, because prevention by deny-list is best-effort.
+
+    Nothing was pending when the deploy started -- so the pre-flight
+    refusal above does not fire -- and the revision moved anyway. That
+    is the case only an after-the-fact read can catch.
+    """
     monkeypatch.setattr(runner.pin_mod, "matches_remote_main", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_alembic_pending", lambda repo: False)
     monkeypatch.setattr(runner, "_alembic_revision", MagicMock(side_effect=["0005", "0006"]))
     request = _approved(store)
 

@@ -161,6 +161,44 @@ def _run_locked(
         ("allowed: " if migration_allowed else "blocked: ") + gate_reason,
     )
 
+    # ── 2b. a shut gate must also bind the restart ───────────────
+    #
+    # Denying alembic to the agent is not sufficient, because the agent
+    # is not the only thing that runs it. conclair's unit carries
+    # `ExecStartPre=.../alembic upgrade head`, so *restarting the
+    # service* applies whatever migrations are in the tree -- systemd
+    # would walk straight through a gate that only constrained the
+    # agent. So when the gate is shut, the deploy refuses code that has
+    # migrations waiting, before anything is backed up, prepared or
+    # restarted. That is also the honest position: shipping code that
+    # needs a migration without the migration is broken anyway.
+    if not migration_allowed:
+        pending = _alembic_pending(repo)
+        if pending:
+            return _fail(
+                store,
+                request,
+                steps,
+                error=(
+                    "migrations are not allowed for this run "
+                    f"({gate_reason}), but this commit has migrations the database "
+                    "has not applied. The service unit runs `alembic upgrade head` "
+                    "on start, so restarting would apply them anyway -- the deploy "
+                    "stopped instead. Nothing was restarted. Approve the ref "
+                    "override with migrations explicitly, or deploy origin/main."
+                ),
+                service_state=_observe_service(target, steps, restarted=False)[0],
+                deployed_sha=pinned.sha,
+                previous_sha=pinned.previous_sha,
+                pinned=pinned,
+                migration_allowed=False,
+            )
+        steps.record(
+            "migration-pending-check",
+            True,
+            "no unapplied migrations in this commit" if pending is False else "not applicable",
+        )
+
     # ── 3. backup, before anything can touch state ───────────────
     backup_detail: str | None = None
     if target.backup_script is not None:
@@ -353,6 +391,30 @@ def _migration_gate(repo: Path, request: DeployRequest, sha: str) -> tuple[bool,
     return True, f"the tree is exactly {DEPLOY_REF}"
 
 
+def _run_alembic(repo: Path, *args: str) -> str | None:
+    """Run a read-only alembic command, or ``None`` if not applicable."""
+    if not (repo / "alembic.ini").exists():
+        return None
+    alembic = repo / ".venv" / "bin" / "alembic"
+    if not alembic.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [str(alembic), *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Could not run alembic", repo=str(repo), args=args, error=str(exc))
+        return None
+    if proc.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else None
+
+
 def _alembic_revision(repo: Path) -> str | None:
     """The DB's current migration revision, or ``None`` if not applicable.
 
@@ -361,26 +423,30 @@ def _alembic_revision(repo: Path) -> str | None:
     the agent to have declared. That is what makes the blocked case
     enforceable rather than merely requested.
     """
-    if not (repo / "alembic.ini").exists():
+    return _run_alembic(repo, "current")
+
+
+def _alembic_id(line: str | None) -> str | None:
+    """The revision id out of an alembic line like ``0006 (head)``."""
+    if not line:
         return None
-    alembic = repo / ".venv" / "bin" / "alembic"
-    if not alembic.exists():
+    token = line.split()[0].strip()
+    return token or None
+
+
+def _alembic_pending(repo: Path) -> bool | None:
+    """Does this commit carry migrations the database has not applied?
+
+    ``None`` when the question does not apply (no alembic here, or the
+    revision could not be read) -- the caller treats that as "not
+    proven pending" rather than as a refusal, because a target without
+    migrations must not be undeployable.
+    """
+    current = _alembic_id(_alembic_revision(repo))
+    head = _alembic_id(_run_alembic(repo, "heads"))
+    if current is None or head is None:
         return None
-    try:
-        proc = subprocess.run(
-            [str(alembic), "current"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("Could not read alembic revision", repo=str(repo), error=str(exc))
-        return None
-    if proc.returncode != 0:
-        return None
-    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
-    return lines[-1] if lines else None
+    return current != head
 
 
 def _migration_applied(before: str | None, after: str | None, outcome) -> bool | None:

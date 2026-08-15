@@ -312,6 +312,10 @@ merge はどこからでもできるが、live にできるのは systemd と al
 - **migration だけ硬い**: backup を無条件に先に取る / `HEAD == origin/main` でなければ gate を
   閉じる / ref override は migration を自動解禁しない / **revision を前後で読んで検出**する
   (deny 規則は列挙にすぎず境界ではない)
+- **migration を走らせるのはエージェントだけではない**。conclair の unit は
+  `ExecStartPre=alembic upgrade head` を持つ ∴ **再起動そのものが gate を素通りする**。だから
+  gate が閉じているときは**未適用 migration を持つ commit を deploy しない**(`alembic current`
+  vs `heads`)。エージェントへの deny だけでは塞げない穴
 - **`spirrow-magickit` 自身は対象外**。自分を再起動すると lock と結果を書くプロセスごと死ぬ。
   allowlist に足しても解禁されない別分岐で拒否
 

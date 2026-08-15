@@ -66,7 +66,7 @@ magickit は既にその境界に立っていて、既にループから到達�
 | | どう満たしたか |
 |---|---|
 | **R-1** ref は `origin/main` のみ | `registry.DEPLOY_REF` という**定数 1 個**と、`deploy_request` に **ref 引数が無い**こと。検証ではなく不在。人間の override は承認側にだけあり、理由必須で監査に載る |
-| **R-2** migration は硬く | ① backup を **runner が無条件に**取る（エージェントの勤勉さに依存しない）② `HEAD == origin/main` でなければ gate を閉じる ③ ref override は migration を自動では解禁しない（`override_allows_migration` が別途必要）④ **alembic の revision を前後で読み**、gate が閉じているのに動いていたら deploy を失敗にして restart しない |
+| **R-2** migration は硬く | ① backup を **runner が無条件に**取る（エージェントの勤勉さに依存しない）② `HEAD == origin/main` でなければ gate を閉じる ③ ref override は migration を自動では解禁しない（`override_allows_migration` が別途必要）④ gate が閉じているとき、**未適用 migration を持つ commit は deploy 自体を拒否**する（下記）⑤ **alembic の revision を前後で読み**、gate が閉じているのに動いていたら deploy を失敗にして restart しない |
 | **R-3** 人間の承認なしに実行不可 | `deploy_request`（記録するだけ）と `deploy_approve`（実行を起こす）を別 tool にし、**approve は認証済みインスタンスにしか登録しない**。ループ側の tool 一覧に存在しない |
 | **R-4** 対象は allowlist | `registry._TARGETS`。Python に置いたのは、これが境界だから — 変更は PR を通る。`spirrow-magickit` は**別の分岐で先に拒否**（表に足しても解禁されない） |
 | **R-5** 道具を絞る | §5 |
@@ -74,6 +74,14 @@ magickit は既にその境界に立っていて、既にループから到達�
 | **R-7** 失敗は大きな声で | `service_state` が `running_new` / `running_previous` / `running_unknown_version` / `down` / `unknown` を区別する。「deploy が失敗した」と「何も動いていない」は別の語 |
 | **R-8** 監査ログ | `data/deploy/audit.jsonl` に append-only。`deploy_history` tool で**リモートから読める** ∴ 失敗調査に ssh が要らない |
 | **R-9** 同時実行防止 | `flock`。status フィールドではないのは、プロセスが死んでも status は「真」のままだから。中断は「ロックが空いている＝runner はもういない」を根拠に次の runner が `interrupted` に落とす。タイムアウトも polling も無い |
+
+### migration を走らせるのはエージェントだけではない
+
+conclair の unit は `ExecStartPre=.../alembic upgrade head` を持つ ∴ **サービスを再起動するだけで、ツリーにある migration が当たる**。エージェントに alembic を deny しても、systemd がその gate を素通りする。
+
+∴ gate が閉じているときは、**未適用の migration を持つ commit をそもそも deploy しない**（backup も agent も restart も始まる前に停止）。`alembic current` と `alembic heads` を比べて判定する。これは安全側であると同時に正直でもある — migration を必要とするコードを migration 無しで出すのは、どのみち壊れている。
+
+（`alembic` が無い対象、revision が読めない対象は「pending が証明されていない」として扱い、deploy 不能にはしない。）
 
 ## 5. R-5: 何を許可し、何を許可しなかったか
 
