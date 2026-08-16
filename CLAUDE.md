@@ -498,6 +498,6 @@ Phase 2 以降として掲げていたもの: マルチプロジェクト対応�
 
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — MCP ツールの引数・使用例・レスポンス形
 - [`docs/deploy-runner.md`](docs/deploy-runner.md) — deploy 実行の設計・権限の実測値・運用手順
-- [`docs/deploy-hardening.md`](docs/deploy-hardening.md) — deploy エージェントの専用ユーザ分離（**未適用**の手順書）
+- [`docs/deploy-hardening.md`](docs/deploy-hardening.md) — deploy エージェントの専用ユーザ分離。**当面やらないと決定済み(2026-08-16)**、受容した内容・受容していない例外(Claude OAuth トークンだけはどのサービスも持たない)・再判断条件を §2.5 に明記
 - `docs/DESIGN.md` — 詳細設計
 - `docs/PROJECT_WORKFLOW_GUIDE.md` — プロジェクト運用ガイド
