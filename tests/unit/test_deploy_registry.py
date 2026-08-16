@@ -125,12 +125,34 @@ def test_the_other_spirrow_services_on_this_host_are_deployable():
     }
 
 
-def test_the_stateless_targets_declare_no_backup_because_they_have_none():
-    """Checked on the host: none of the three has `scripts/backup.sh` or
-    `alembic.ini`. Declaring a backup script that is not there would make
-    them undeployable, since a missing declared script is a refusal."""
-    for name in ("spirrow-lexora", "spirrow-cognilens", "spirrow-prismind"):
-        assert registry.resolve_target(name).backup_script is None
+def test_the_targets_that_hold_state_declare_a_backup_for_it():
+    """lexora keeps costs.db, prismind keeps OAuth credentials and caches.
+
+    A deploy does not touch either -- both are gitignored -- but until
+    these scripts existed there was no copy of them anywhere, which is a
+    gap rather than a design. Declaring the script here is what makes the
+    runner take a snapshot before it pins anything.
+    """
+    for name in ("spirrow-lexora", "spirrow-prismind"):
+        assert registry.resolve_target(name).backup_script == Path("scripts/backup.sh")
+
+
+def test_cognilens_declares_none_because_it_holds_nothing():
+    """The one target where "stateless" is actually true. Declaring a
+    script that is not there would make it undeployable: the runner
+    refuses when a declared backup is missing."""
+    assert registry.resolve_target("spirrow-cognilens").backup_script is None
+
+
+def test_a_declared_backup_script_exists_on_this_host():
+    """The refusal for a missing script is deliberate, so a typo in this
+    table would take a target offline for deploys. Skipped where the repo
+    is not checked out, so CI does not depend on the host."""
+    for name in registry.target_names():
+        target = registry.resolve_target(name)
+        if target.backup_script is None or not target.repo_path.exists():
+            continue
+        assert (target.repo_path / target.backup_script).exists(), name
 
 
 def test_the_mcp_transport_targets_point_at_the_endpoint_that_answers():

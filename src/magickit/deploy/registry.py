@@ -135,19 +135,18 @@ _TARGETS: dict[str, DeployTarget] = {
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=120.0,
     ),
-    # The three below run no migrations and declare no backup script --
-    # checked, neither `alembic.ini` nor `scripts/backup.sh` exists in
-    # any of them -- so a bad deploy is undone by putting `main` back,
-    # which is the case R-1 was sized for.
+    # None of the three runs migrations, so a bad deploy of them is
+    # undone by putting `main` back -- the case R-1 was sized for.
     #
-    # They are not *stateless*, and an earlier version of this comment
-    # said they were. lexora keeps `data/costs.db` (live, ~1MB) and
-    # prismind keeps `credentials.json`, `token.json` and two caches.
-    # None of it is touched by a deploy -- all of it is gitignored, so
+    # They are not *stateless*, though, and an earlier version of this
+    # comment said they were. lexora keeps `data/costs.db` (live, ~1MB
+    # of cost records with nowhere to re-derive them from) and prismind
+    # keeps `config.toml`, `credentials.json`, `token.json` and two
+    # caches. A deploy does not touch any of it -- all gitignored, so
     # pinning leaves it alone -- but "nothing here would be lost" is a
-    # different claim from "nothing here exists", and only the first one
-    # is true. Note also that none of that state is backed up by
-    # anything; that is a gap, not a design.
+    # different claim from "nothing here exists", and only the first was
+    # ever true. Both now ship a backup script, so the second is covered
+    # too.
     #
     # All three also ignore the `start.sh` that systemd executes, so the
     # deployed sha does not describe how the service actually starts.
@@ -162,6 +161,7 @@ _TARGETS: dict[str, DeployTarget] = {
         # occasion, which is what the long grace and the per-attempt
         # timeout in the runner are sized for.
         health_url="http://127.0.0.1:8110/health",
+        backup_script=Path("scripts/backup.sh"),
         health_grace_s=180.0,
     ),
     "spirrow-cognilens": DeployTarget(
@@ -189,6 +189,7 @@ _TARGETS: dict[str, DeployTarget] = {
         # the server, so /mcp answers 400 to a bare GET and /sse is the
         # honest liveness signal.
         health_url="http://127.0.0.1:8112/sse",
+        backup_script=Path("scripts/backup.sh"),
         health_grace_s=120.0,
     ),
 }
