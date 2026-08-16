@@ -217,6 +217,19 @@ def _run_locked(
     work = slots.standby_path if slots else target.repo_path
     repo = work
 
+    # What is serving *right now*, captured before anything moves.
+    #
+    # Not the same thing as the pin's `previous_sha`, which is the HEAD
+    # of the directory being pinned. For an in-place target those
+    # coincide; for a two-slot target the pin reports what the *standby*
+    # was at, which is one release older than what is live. Reporting
+    # that as "the version this replaced" was wrong in two ways: R-7's
+    # reader was told the wrong thing, and `deploy_rollback` takes its
+    # target commit from this field, so undoing a deploy would have
+    # skipped a release and gone two back. Observed in production on the
+    # third real deploy -- 466bb28 was reported while 1605720 was live.
+    live_sha_before = _safe_head(slots.current_path) if slots else None
+
     # ── 1. pin (nothing is restarted if this refuses) ────────────
     try:
         pinned = pin_mod.pin(repo, request.ref)
@@ -232,7 +245,7 @@ def _run_locked(
     steps.record(
         "pin",
         True,
-        f"{pinned.previous_sha[:12]} -> {pinned.sha[:12]} ({pinned.ref})"
+        f"{work.name}: {pinned.previous_sha[:12]} -> {pinned.sha[:12]} ({pinned.ref})"
         + (" [detached: ref override]" if pinned.detached else ""),
     )
 
@@ -284,7 +297,7 @@ def _run_locked(
                 ),
                 service_state=_observe_service(target, steps, restarted=False)[0],
                 deployed_sha=pinned.sha,
-                previous_sha=pinned.previous_sha,
+                previous_sha=live_sha_before or pinned.previous_sha,
                 pinned=pinned,
                 migration_allowed=False,
                 services=list(target.services),
@@ -313,7 +326,7 @@ def _run_locked(
                 ),
                 service_state=_observe_service(target, steps, restarted=False)[0],
                 deployed_sha=pinned.sha,
-                previous_sha=pinned.previous_sha,
+                previous_sha=live_sha_before or pinned.previous_sha,
                 pinned=pinned,
                 services=list(target.services),
             )
@@ -327,7 +340,7 @@ def _run_locked(
                 error=f"the backup failed, so the deploy stopped before the agent ran: {detail}",
                 service_state=_observe_service(target, steps, restarted=False)[0],
                 deployed_sha=pinned.sha,
-                previous_sha=pinned.previous_sha,
+                previous_sha=live_sha_before or pinned.previous_sha,
                 pinned=pinned,
                 services=list(target.services),
             )
@@ -401,7 +414,7 @@ def _run_locked(
             ),
             service_state=_observe_service(target, steps, restarted=False)[0],
             deployed_sha=pinned.sha,
-            previous_sha=pinned.previous_sha,
+            previous_sha=live_sha_before or pinned.previous_sha,
             pinned=pinned,
             services=list(target.services),
             outcome=outcome,
@@ -426,7 +439,7 @@ def _run_locked(
             health_ok=health_ok,
             health_detail=health_detail,
             deployed_sha=pinned.sha,
-            previous_sha=pinned.previous_sha,
+            previous_sha=live_sha_before or pinned.previous_sha,
             pinned=pinned,
             services=list(target.services),
             outcome=outcome,
@@ -456,7 +469,7 @@ def _run_locked(
                 ),
                 service_state=_observe_service(target, steps, restarted=False)[0],
                 deployed_sha=_safe_head(target.repo_path),
-                previous_sha=pinned.previous_sha,
+                previous_sha=live_sha_before or pinned.previous_sha,
                 pinned=pinned,
                 outcome=outcome,
                 migration_allowed=migration_allowed,
@@ -500,7 +513,7 @@ def _run_locked(
         is_default_ref=request.is_default_ref,
         requested_sha=pinned.sha,
         deployed_sha=deployed_sha,
-        previous_sha=pinned.previous_sha,
+        previous_sha=live_sha_before or pinned.previous_sha,
         migration_allowed=migration_allowed,
         migration_applied=migration_applied,
         service_state=state,
