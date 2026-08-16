@@ -164,6 +164,28 @@ def test_the_mcp_transport_targets_point_at_the_endpoint_that_answers():
     assert registry.resolve_target("spirrow-lexora").health_url.endswith(":8110/health")
 
 
+def test_every_target_uses_the_two_slot_layout():
+    """cognilens piloted it; the other three followed once it had run
+    four deploys clean. Keeping one target in-place would leave a code
+    path exercised only by tests."""
+    for name in registry.target_names():
+        target = registry.resolve_target(name)
+        assert target.uses_releases, name
+        assert target.releases_root == registry.SERVICES_ROOT / "releases" / name
+
+
+def test_the_in_place_path_is_still_supported():
+    """The field is optional on purpose. Nothing on this host uses it
+    today, but a target added tomorrow starts in-place and converts when
+    someone has done the shared/ inventory for it."""
+    from pathlib import Path as _Path
+
+    plain = registry.DeployTarget(
+        name="x", repo_path=_Path("/tmp/x"), services=("x.service",), health_url=None
+    )
+    assert plain.uses_releases is False
+
+
 def test_every_target_declares_a_health_check_or_says_it_has_none():
     """R-7 depends on this: "did it come back up" must be answerable."""
     for name in registry.target_names():

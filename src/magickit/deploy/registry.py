@@ -134,6 +134,7 @@ _TARGETS: dict[str, DeployTarget] = {
         health_url="http://127.0.0.1:8115/health",
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=120.0,
+        releases_root=SERVICES_ROOT / "releases" / "spirrow-conclair",
     ),
     # None of the three runs migrations, so a bad deploy of them is
     # undone by putting `main` back -- the case R-1 was sized for.
@@ -163,6 +164,7 @@ _TARGETS: dict[str, DeployTarget] = {
         health_url="http://127.0.0.1:8110/health",
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=180.0,
+        releases_root=SERVICES_ROOT / "releases" / "spirrow-lexora",
     ),
     "spirrow-cognilens": DeployTarget(
         name="spirrow-cognilens",
@@ -175,10 +177,10 @@ _TARGETS: dict[str, DeployTarget] = {
         # -- reading the body of an SSE endpoint never returns.
         health_url="http://127.0.0.1:8111/sse",
         health_grace_s=120.0,
-        # First target converted to the two-slot layout (2026-08-16).
-        # Picked as the pilot because it holds no state at all and its
-        # only shared file is the gitignored start.sh, so a mistake here
-        # could not lose anything.
+        # The pilot for the two-slot layout, converted first because it
+        # holds no state at all -- its only shared file is the
+        # gitignored start.sh -- so a mistake could not lose anything.
+        # The other three followed once it had run four deploys clean.
         releases_root=SERVICES_ROOT / "releases" / "spirrow-cognilens",
     ),
     "spirrow-prismind": DeployTarget(
@@ -191,6 +193,7 @@ _TARGETS: dict[str, DeployTarget] = {
         health_url="http://127.0.0.1:8112/sse",
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=120.0,
+        releases_root=SERVICES_ROOT / "releases" / "spirrow-prismind",
     ),
 }
 
