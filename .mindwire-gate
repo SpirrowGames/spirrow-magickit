@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
 # Single source of truth for the spirrow-magickit gate.
-# Run identically by CI (.github/workflows/ci.yml) and the autonomous loop's
-# implementer (it executes `bash .mindwire-gate`), so the two can never drift.
+# CI (.github/workflows/ci.yml) runs `bash .mindwire-gate`, and so does the
+# autonomous loop's implementer, so the two cannot judge a change differently.
 # Exit 0 = green.
 set -euo pipefail
 
-# CI runs `pytest tests/unit -v` and nothing else, so that is what this gate is.
+# The gate is the unit suite, and nothing else.
 #
-# Deliberately NOT stricter than CI. ruff and mypy are configured in this repo
-# (pyproject.toml) and are evidently run by hand -- .ruff_cache / .mypy_cache
-# exist -- but ci.yml does not run either. Adding them here would block the
-# implementer on checks no PR is ever judged by, which is drift in the other
-# direction: the loop would enforce a standard the project does not. If those
-# checks should gate this repo, add them to ci.yml and to this file in the same
-# change, so the "can never drift" property above stays true.
+# Deliberately NOT stricter than what this repo already judges PRs by. ruff and
+# mypy are configured in pyproject.toml and are evidently run by hand
+# (.ruff_cache / .mypy_cache exist), but no PR here has ever been judged by
+# them. Adding them here would block the implementer on checks the project does
+# not apply to itself -- drift in the other direction. If they should gate this
+# repo, add them to this file: it is now the only place to add them, and CI
+# picks them up in the same change.
 #
-# Integration tests are excluded for the same reason CI excludes them: they need
-# live prismind / lexora / cognilens and are run against the dev cluster by hand.
+# Integration tests are excluded because they need live prismind / lexora /
+# cognilens and are run against the dev cluster by hand.
+#
 # `--extra dev` is required, not cosmetic: pytest-asyncio lives in the dev extra
 # and tests/conftest.py imports it at collection time, so without it the gate
-# dies with a ModuleNotFoundError before running a single test. CI gets the same
-# packages via `pip install -e ".[dev]"`.
+# dies with a ModuleNotFoundError before collecting a single test.
+#
+# No `-v`. CI used to pass it; pytest reports failures in full either way, and
+# the difference only showed up as 660 lines the implementer has to page through
+# on every local run. It is recorded here because it is a choice, not a leftover:
+# with one source there is nothing left for `-v` to disagree with.
 uv run --extra dev pytest tests/unit

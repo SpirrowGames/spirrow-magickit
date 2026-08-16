@@ -16,17 +16,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v3
         with:
-          python-version: ${{ matrix.python-version }}
+          version: "latest"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
-      - name: Run unit tests
-        # Integration tests require live prismind / lexora / cognilens services
-        # and are run manually against the dev cluster, not in CI.
-        run: pytest tests/unit -v
+      - name: Gate (single SOT — see .mindwire-gate)
+        # CI runs the gate script rather than restating what it does, so CI and
+        # the autonomous loop's implementer cannot judge a change differently.
+        # Adding a check means editing .mindwire-gate; there is no second place.
+        #
+        # UV_PYTHON is how the matrix reaches the `uv run` inside the script
+        # without the script needing to know a matrix is running it — the loop's
+        # implementer executes the same `bash .mindwire-gate` with UV_PYTHON
+        # unset and gets the interpreter uv resolves from `requires-python`.
+        env:
+          UV_PYTHON: ${{ matrix.python-version }}
+        run: bash .mindwire-gate
