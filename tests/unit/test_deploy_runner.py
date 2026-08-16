@@ -472,6 +472,50 @@ def test_a_release_deploy_prepares_the_standby_and_leaves_the_live_one_alone(
     assert agent_target.repo_path == release_target.releases_root / "b"
 
 
+def test_previous_sha_is_what_was_serving_not_what_the_standby_held(
+    store, wiring, release_target, monkeypatch
+):
+    """The field a rollback aims at, so getting it wrong skips a release.
+
+    The pin reports the HEAD of the directory it pinned -- the standby --
+    which for a two-slot target is one release older than what is live.
+    Reporting that as "the version this replaced" was wrong in
+    production: a deploy said previous_sha=466bb28 while 1605720 was
+    serving, and `deploy_rollback` would have gone two versions back.
+    """
+    live, standby_before, new = "1" * 40, "0" * 40, "2" * 40
+
+    monkeypatch.setattr(
+        runner.pin_mod,
+        "pin",
+        MagicMock(
+            return_value=PinResult(
+                ref="origin/main", sha=new, previous_sha=standby_before, detached=False
+            )
+        ),
+    )
+    # `_safe_head` is asked twice: the live slot before the switch, then
+    # the stable path afterwards.
+    monkeypatch.setattr(runner, "_safe_head", MagicMock(side_effect=[live, new]))
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True
+    assert result.deployed_sha == new
+    assert result.previous_sha == live, "must be the release that was serving"
+    assert result.previous_sha != standby_before
+
+
+def test_an_in_place_target_still_reports_its_own_previous_head(store, wiring, target):
+    """Where the two coincide, nothing changes."""
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.previous_sha == OLD_SHA
+
+
 def test_the_switch_happens_after_the_agent_and_before_the_restart(
     store, wiring, release_target
 ):
