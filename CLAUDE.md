@@ -331,11 +331,13 @@ merge はどこからでもできるが、live にできるのは systemd と al
   監査に `approved_via` が残る。後者が新しい権限を与えるわけではない — ホストのシェルは
   `sgadmin`(NOPASSWD:ALL)で要求 JSON を直接書けるので、**追跡できない迂回を記録された行為に
   変えているだけ**。ループはシェルを持たないので使えない(= ゲートが本物なのはそちら側)
-- **cognilens は 2 面 + symlink 方式に移行済み**(2026-08-16)。`services/spirrow/spirrow-cognilens`
+- **4 対象すべて 2 面 + symlink 方式**(2026-08-16、cognilens をパイロットに横展開)。`services/spirrow/spirrow-cognilens`
   自体が symlink ∴ **unit は無改修**。runner は待機面で pin→backup→agent→**切り替え**→restart の順に
   なり、切り替え前は誰もサーブしていない ∴ 失敗しても live は無傷(自動 rollback が要らない理由)。
-  他の対象は in-place のままで、1 つずつ移せる。**待機面で `source venv/bin/activate` すると
-  live 面の venv が有効になる**罠あり(焼き込みパスが安定 symlink 側)
+  in-place 経路もコードとしては残存(新規対象は in-place で始めて後から移せる)。罠 2 つ:
+  **待機面で `source venv/bin/activate` すると live 面の venv が有効になる**(焼き込みパスが安定
+  symlink 側)/ **`.gitignore` の末尾スラッシュはディレクトリにしか一致しない**ので `data/`
+  `backups/` を symlink 化すると ignore が外れて pin が dirty 判定で拒否する(3 repo で修正済み)
 - **git は ignore されたファイルを黙って上書きする**(実測)。commit が「ここでは ignore されている
   パス」を追跡し始めると fast-forward merge が警告なしにホストのコピーを置き換え、しかも ignore
   されたファイルは dirty 判定に出ない。**lexora/cognilens/prismind は systemd が実行する

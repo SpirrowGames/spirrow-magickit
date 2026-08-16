@@ -114,7 +114,7 @@ conclair の unit は `ExecStartPre=.../alembic upgrade head` を持つ ∴ **�
 
 ## 4.5 切り替え式デプロイ（2 面 + symlink）
 
-cognilens だけが移行済み（2026-08-16）。残りは従来どおり in-place で、**対象ごとに 1 つずつ**移せます。
+**4 対象すべて移行済み**（2026-08-16）。cognilens をパイロットとして先に通し、4 回の deploy が問題なく回ってから残り 3 つを移しました。in-place 経路はコードとしては残してあり、新しい対象は in-place で始めて `shared/` の棚卸しが済んでから移せます。
 
 ```
 services/spirrow/
