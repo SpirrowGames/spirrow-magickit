@@ -137,15 +137,24 @@ async def open_thread(
     commit_ref: Annotated[str, Form()] = "",
     role: Annotated[str, Form()] = "",
     embodiment: Annotated[str, Form()] = "",
+    next_participant: Annotated[str, Form()] = "",
 ) -> Response:
     """Open a thread from the browser, through the role gate.
 
     The gate validates ``role`` against ``owner``, who authors the propose
     msg -- the same pairing ``chatroom_open_thread`` uses.
+
+    ``next_participant`` (T-handoff-target-structured-field) is validated
+    against Prismind's identity registry just as in the MCP tool: an
+    unknown name refuses the write with ``NextParticipantUnknownError``.
     """
     gate = await chatroom_tools._check_role_allowed(author=owner, role=role)
     if gate.error is not None:
         return _error_flash(gate.error)
+
+    next_error = await chatroom_tools._check_next_participant(next_participant)
+    if next_error is not None:
+        return _error_flash(next_error)
 
     adapter = _adapter()
     try:
@@ -159,6 +168,7 @@ async def open_thread(
             commit_ref=commit_ref or None,
             embodiment=embodiment or None,
             role=gate.role,
+            next_participant=next_participant or None,
         )
     finally:
         await adapter.close()
@@ -189,6 +199,7 @@ async def post_message(
     embodiment: Annotated[str, Form()] = "",
     naysayer_override_reason: Annotated[str, Form()] = "",
     owner_override_reason: Annotated[str, Form()] = "",
+    next_participant: Annotated[str, Form()] = "",
 ) -> Response:
     """Post a message from the browser, through every gate that applies.
 
@@ -216,6 +227,14 @@ async def post_message(
     )
     if gate.error is not None:
         return _error_flash(gate.error)
+
+    # Structured handoff target check -- same rule as the MCP tool. Runs
+    # after the role gate so the two rejection classes stay distinguishable
+    # (both are fail-fast pre-write; no traffic exists in which one masks
+    # the other).
+    next_error = await chatroom_tools._check_next_participant(next_participant)
+    if next_error is not None:
+        return _error_flash(next_error)
 
     adapter = _adapter()
     try:
@@ -255,6 +274,7 @@ async def post_message(
             role=gate.role,
             owner_override=owner_override,
             owner_override_reason=resolved_override_reason,
+            next_participant=next_participant or None,
         )
     finally:
         await adapter.close()

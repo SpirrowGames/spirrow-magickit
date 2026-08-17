@@ -80,6 +80,7 @@ class ChatroomAdapter(BaseAdapter):
         timestamp: datetime | str | None = None,
         embodiment: str | None = None,
         role: str | None = None,
+        next_participant: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "thread_id": thread_id,
@@ -97,6 +98,15 @@ class ChatroomAdapter(BaseAdapter):
             body["embodiment"] = embodiment
         if role is not None:
             body["role"] = role
+        # T-handoff-target-structured-field msg-068 §4-1. Forward the
+        # structured handoff target when the caller supplied one; the meaning
+        # of the value (registered identity vs. reserved word) is decided at
+        # the enforcement layer above, this adapter is a thin wrapper.
+        # Passthrough is unconditional-on-non-None so a stale client that
+        # never learned about the field cannot force the receipt into "field
+        # accepted but never actually sent" (msg-068 §5 the role trap).
+        if next_participant is not None:
+            body["next_participant"] = next_participant
         return await self._request_json(
             "POST", f"/v1/projects/{project}/threads", json=body
         )
@@ -120,6 +130,7 @@ class ChatroomAdapter(BaseAdapter):
         role: str | None = None,
         owner_override: bool = False,
         owner_override_reason: str | None = None,
+        next_participant: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "type": type,
@@ -148,6 +159,10 @@ class ChatroomAdapter(BaseAdapter):
             body["embodiment"] = embodiment
         if role is not None:
             body["role"] = role
+        # T-handoff-target-structured-field msg-068 §4-1. See the twin
+        # comment on ``open_thread``.
+        if next_participant is not None:
+            body["next_participant"] = next_participant
         return await self._request_json(
             "POST",
             f"/v1/projects/{project}/threads/{thread_id}/messages",

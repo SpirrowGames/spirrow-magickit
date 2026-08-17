@@ -1053,6 +1053,122 @@ def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
     }
 
 
+# --- next_participant gate (T-handoff-target-structured-field) ---------
+#
+# msg-068 §4-1 and the review chain that shaped it (msg-069 / msg-070 /
+# msg-071 / msg-072 / msg-078). The structured handoff target: a supplied
+# value must resolve to a registered identity, an unresolved one is refused
+# before any write, and an omitted one is forwarded as null (backwards
+# compatibility).
+#
+# Placement is by explicit decision (msg-072 §1). Identity resolution is
+# Magickit's subject -- Prismind holds the registry, Conclair only persists
+# a nullable text column -- so validation belongs here. The consumer's
+# routing vocabulary (spirrow-mindwire's `NEXT: <token>` line, its
+# `pr-review <ref>` sentinel) is deliberately NOT known to this layer: the
+# module contains no reference to that syntax and no reserved word (msg-072
+# §2 -- "the vocabulary is not shared between owners"). ``human`` is a
+# registered identity like any other and needs no special case here; a
+# terminal "no next actor" state is represented by closing the thread, not
+# by a token this gate has to recognise (msg-072 §2 / msg-078 §3).
+#
+# Policy differs from the role gate on the one axis msg-072 §3 spells out:
+# an unregistered target is REJECTED, not passed through. The role gate
+# tolerates unregistered *authors* because refusing them would break legacy
+# traffic; there is no legacy caller here (the field is new), and a
+# tolerant rule would let a typo (`Einstien`) leak into the routing state
+# the whole feature exists to make trustworthy. The lookup-unavailable
+# path stays fail-closed but honestly: the caller can retry after omitting
+# the field, which is not the "certain-to-fail retry" that ``msg-041 Q3``
+# ruled out for the close gate -- omission is a real escape hatch here
+# because it degrades to the previous behaviour (routing falls back to the
+# consumer's body-line parser).
+#
+# The lookup itself is reused verbatim: ``_lookup_identity`` carries a
+# hard-won contract check (msg-044 §6.4 -- a truthy read of a missing
+# ``found`` field turned the close gate into a bypass), and a second
+# implementation would drift from it at exactly the field-level detail the
+# gate turns on (msg-072 §1 "not `equivalent` -- the function itself").
+
+_NEXT_PARTICIPANT_CONTRACT_URL = "T-handoff-target-structured-field msg-068 / msg-072"
+
+
+def _next_participant_unknown_error(*, name: str) -> dict[str, Any]:
+    """A supplied handoff target does not resolve to a registered identity.
+
+    Fail-fast rejection per msg-072 §3. The remedy is either to name a
+    registered identity or to register the intended actor first with
+    ``upsert_identity`` -- the latter is what closes the "``claude-code`` has
+    no record" gap msg-072 §3 called out as a precondition of this policy.
+
+    Distinct ``error_type`` from every other envelope in this module so a
+    caller can branch on it without parsing the human message. Includes an
+    ``Error`` suffix (unlike ``RoleNotAllowed``, which preserves the spec's
+    literal string): there is no msg-002-era spec literal to preserve here,
+    so the module's default naming applies.
+    """
+    return {
+        "error_type": "NextParticipantUnknownError",
+        "error": (
+            f"next_participant {name!r} is not a registered identity. "
+            "Name a registered actor, or register the intended one with "
+            "upsert_identity before handing off. Omit the field to fall "
+            "back on the consumer's body-line handoff parser."
+        ),
+        "details": {"next_participant": name},
+    }
+
+
+def _next_participant_unavailable_error(*, name: str, reason: str) -> dict[str, Any]:
+    """The registry lookup for the target could not run; refuse the write.
+
+    Fail-closed (msg-072 §3): a permissive fallback here would let a
+    Prismind outage silently disarm the very gate that exists to prevent a
+    typo from leaking downstream. Unlike the close gate's equivalent
+    envelope, the retry-with-the-field-omitted remedy is genuinely
+    available (msg-070 §3 escape hatch): omission lands the message with
+    the field null, and routing degrades to the consumer's body-line
+    parser exactly as before this feature shipped.
+    """
+    return {
+        "error_type": "NextParticipantValidationUnavailableError",
+        "error": (
+            f"cannot validate next_participant {name!r}: the identity "
+            f"lookup failed ({reason}). The target is not recorded "
+            "unvalidated; retry, or omit next_participant to fall back on "
+            "the consumer's body-line handoff parser."
+        ),
+        "details": {"next_participant": name, "reason": reason},
+    }
+
+
+async def _check_next_participant(name: str) -> dict[str, Any] | None:
+    """Resolve a supplied handoff target against the identity registry.
+
+    Returns None to signal "proceed with the write"; returns an error
+    envelope to signal "refuse before the write". An empty ``name`` is
+    caller opt-out and returns None without touching Prismind, which is
+    what keeps ordinary posts off the identity service's critical path
+    (the same shape as the role gate's opt-out branch).
+
+    Reuses ``_lookup_identity`` -- see the section comment above for why the
+    lookup is not reimplemented. Only the ``found`` / ``unavailable_reason``
+    verdicts are read here; ``allowed_roles`` is deliberately ignored
+    (msg-072 §3 "validate existence only", so the target is not required to
+    carry any particular role capability).
+    """
+    if not name:
+        return None
+    lookup = await _lookup_identity(name)
+    if lookup.unavailable_reason is not None:
+        return _next_participant_unavailable_error(
+            name=name, reason=lookup.unavailable_reason
+        )
+    if not lookup.found:
+        return _next_participant_unknown_error(name=name)
+    return None
+
+
 def configure(settings: Settings) -> None:
     """Bind the settings every gate helper in this module reads.
 
@@ -1082,6 +1198,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         commit_ref: str = "",
         embodiment: str = "",
         role: str = "",
+        next_participant: str = "",
     ) -> dict[str, Any]:
         """Open a new chatroom thread (creates the thread + propose msg).
 
@@ -1111,17 +1228,38 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 unregistered ``owner`` still opens the thread, but the
                 unvalidated role is recorded as null rather than as given.
                 Validated against ``owner``, who authors the propose msg.
+            next_participant: structured handoff target for the propose msg
+                (T-handoff-target-structured-field). Optional. When
+                supplied it must resolve to an identity Prismind knows;
+                otherwise the write is refused with
+                ``NextParticipantUnknownError`` (fail-fast) before the
+                thread is created. Only existence is checked -- roles are
+                not required of the target. Omit to fall back on the
+                consumer's body-line handoff parser.
 
         Returns:
             On success: {"thread": {...}, "msg": {...}}.
             On failure: conclair error envelope
             {"error_type": "ChatroomIntegrityError", "error": "...",
-             "details": {...}}, or "RoleNotAllowed" /
-            "RoleValidationUnavailableError" from the role gate.
+             "details": {...}}, "RoleNotAllowed" /
+            "RoleValidationUnavailableError" from the role gate, or
+            "NextParticipantUnknownError" /
+            "NextParticipantValidationUnavailableError" from the
+            next_participant gate.
         """
         gate = await _check_role_allowed(author=owner, role=role)
         if gate.error is not None:
             return gate.error
+
+        # Structured handoff target check. Runs after the role gate on
+        # purpose: both stages fail-fast before any write, so ordering is
+        # semantic rather than performance. The role gate is about ``owner``
+        # (who authors the propose msg); this one is about the *target* of
+        # the handoff, a different identity. Both can round-trip to Prismind
+        # when supplied; there is no shared lookup to reuse.
+        next_error = await _check_next_participant(next_participant)
+        if next_error is not None:
+            return next_error
 
         adapter = _adapter()
         try:
@@ -1135,6 +1273,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
                 role=gate.role,
+                next_participant=next_participant or None,
             )
         finally:
             await adapter.close()
@@ -1158,6 +1297,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         role: str = "",
         naysayer_override_reason: str = "",
         owner_override_reason: str = "",
+        next_participant: str = "",
     ) -> dict[str, Any]:
         """Post a message to an existing thread.
 
@@ -1212,11 +1352,22 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         ``CloseRoleValidationUnavailableError`` whether or not ``role`` was
         supplied -- dropping ``role`` is a remedy on a post, not on a close.
 
+        next_participant (T-handoff-target-structured-field): the identity
+        expected to take the next turn on this thread. Optional. When
+        supplied it must resolve to an identity Prismind knows; a name that
+        does not is refused with ``NextParticipantUnknownError`` and no
+        message is created. A registry outage refuses with
+        ``NextParticipantValidationUnavailableError``; the remedy is to
+        retry, or to omit the field and let the consumer fall back on its
+        body-line handoff parser. Only existence is checked -- roles are
+        not required of the target.
+
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
             On failure (embodiment missing, role not allowed, not allowed to
-            close, naysayer gate, conclair error, ...): error_type envelope.
+            close, naysayer gate, next_participant unknown / unavailable,
+            conclair error, ...): error_type envelope.
         """
         # Magickit-side enforcement (F-04: Magickit is the sole role/
         # embodiment validation point; Conclair only persists).
@@ -1243,6 +1394,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         )
         if gate.error is not None:
             return gate.error
+
+        # Structured handoff target check. Runs after the role gate so a
+        # rejected role is still reported as such (both are fail-fast
+        # pre-write; there is no traffic in which one masks the other).
+        next_error = await _check_next_participant(next_participant)
+        if next_error is not None:
+            return next_error
 
         adapter = _adapter()
         try:
@@ -1283,6 +1441,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 role=gate.role,
                 owner_override=owner_override,
                 owner_override_reason=owner_override_reason_out,
+                next_participant=next_participant or None,
             )
         finally:
             await adapter.close()
