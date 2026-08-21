@@ -145,10 +145,12 @@ async def test_open_thread_delegates(registered) -> None:
     # ADR-12: open_thread now also forwards embodiment (None when omitted).
     # P2: ...and role, likewise None when omitted (the legacy default --
     # see tests/unit/test_role_gate.py for the gate's own behavior).
+    # T-handoff-target-structured-field: ...and next_participant, None when
+    # omitted (see tests/unit/test_next_participant_gate.py for the gate).
     adapter.open_thread.assert_awaited_once_with(
         project="p", thread_id="T-1", title="t",
         owner="alice", propose_content="hi", tags=["x"], commit_ref="abc",
-        embodiment=None, role=None,
+        embodiment=None, role=None, next_participant=None,
     )
     adapter.close.assert_awaited_once()
 
