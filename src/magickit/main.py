@@ -34,7 +34,7 @@ from magickit.utils.logging import configure_logging, get_logger
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import close_client as close_chatroom_ui_client
 from magickit.web import dashboard_router as chatroom_dashboard_router
-from magickit.web import deploys_router, ops_router
+from magickit.web import decisions_router, deploys_router, ops_router
 from magickit.web import router as chatroom_ui_router
 from magickit.web import writes_router as chatroom_writes_router
 
@@ -206,6 +206,14 @@ def create_app() -> FastAPI:
     # panels and moves to /dashboard/system.
     app.include_router(ops_router)
     app.include_router(deploys_router)
+
+    # Decision-page redirect stubs. Registered alongside ops (not inside
+    # it) because the URL `/dashboard/decisions/{project}/{thread_id}` is
+    # the contract the Discord alerts point at, and 増分 2 will replace
+    # this handler's body with the real judgement page on the same URL.
+    # Keeping the module separate makes "do not fold this into ops"
+    # a structural fact instead of a comment somebody has to remember.
+    app.include_router(decisions_router)
 
     # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
     # Starlette matches routes in insertion order, and this router claims the
