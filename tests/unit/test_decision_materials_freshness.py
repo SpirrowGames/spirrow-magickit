@@ -436,3 +436,119 @@ async def test_material_store_outage_falls_to_j_absent(
 
     assert r.status_code == 200
     assert "判断材料が用意されていません" in r.text
+
+
+# --- pr-gate naysayer regression: no template indentation is visible ----
+
+
+@pytest.mark.asyncio
+async def test_container_boxes_do_not_carry_pre_wrap_directly(
+    isolated_material_store,
+):
+    """★ pr-gate naysayer regression (SpirrowGames/spirrow-magickit#32).
+
+    Applying ``white-space: pre-wrap`` to a container ``<div>`` that
+    itself holds template indentation makes that indentation appear on
+    screen — a blank line above the ``<h2>``, and 12 spaces of leading
+    indent before the composer text on mobile (spec A-15 severity).
+    Pin structurally: neither the ``.decision-question`` nor the
+    ``.decision-recommendation`` container may carry ``white-space:
+    pre-wrap`` as its own rule.
+
+    The invariant is: **``pre-wrap`` lives on a TIGHT wrapper (``.pre-wrap``
+    or ``.decision-choice-side``, whose HTML source has no template
+    indentation inside its tags), not on the container.**
+
+    Do not "fix" this by removing the assertion when a future style
+    change would trip it — the fix is to move ``pre-wrap`` off the
+    container onto the tight wrapper (see the ``.pre-wrap`` CSS block).
+    """
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD,
+        head_msg_id="msg-99",
+        signature=None,
+        question="q?",
+        options=None,
+        recommendation="A",
+        recommendation_reason="because",
+        unknowns=None,
+    )
+    adapter = _adapter_returning(_parked_thread_payload("msg-99"))
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # The two container rules must not set `white-space: pre-wrap`
+    # themselves. A false positive on this test means someone re-added
+    # it to the container — read the CSS block's comment before touching.
+    import re
+    for cls in (".decision-question", ".decision-recommendation"):
+        # Grab the rule body for the class (up to the closing brace).
+        rule = re.search(
+            rf"{re.escape(cls)}\s*\{{[^{{}}]*\}}", r.text
+        )
+        assert rule is not None, f"CSS rule for {cls} not found in response"
+        assert "pre-wrap" not in rule.group(0), (
+            f"{cls} carries `white-space: pre-wrap` directly, which will "
+            f"render template indentation as visible whitespace. Move "
+            f"pre-wrap onto a tight `.pre-wrap` inline wrapper. See "
+            f"pr-gate naysayer verdict on PR #32.\nRule was: {rule.group(0)!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_recommendation_box_has_no_leaked_template_indentation(
+    isolated_material_store,
+):
+    """★ pr-gate naysayer regression (SpirrowGames/spirrow-magickit#32).
+
+    The specific concrete leak the naysayer flagged was in the
+    ``.decision-recommendation`` block, where multiple ``{% if %}``
+    lines each contributed a newline + 10-14 spaces of indentation
+    between them. Pin that the rendered content of that box does NOT
+    contain multi-space runs that could only have come from template
+    formatting.
+
+    We assert on the *inner* content between the box's opening and
+    closing tags — the box class itself may sit inside indented
+    template code, but its interior must be clean of source
+    indentation.
+    """
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD,
+        head_msg_id="msg-99",
+        signature=None,
+        question=None,
+        options=None,
+        recommendation="A",
+        recommendation_reason="short reason",
+        unknowns=None,
+    )
+    adapter = _adapter_returning(_parked_thread_payload("msg-99"))
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+
+    import re
+    m = re.search(
+        r'<div class="decision-recommendation"[^>]*>(.*?)</div>',
+        r.text, re.DOTALL,
+    )
+    assert m is not None, "recommendation div not found"
+    inner = m.group(1)
+    # The inner is one physical line built with `{%- -%}` stripping; a
+    # newline followed by spaces would indicate template indentation
+    # leaked back in.
+    leaked = re.search(r"\n[ \t]{2,}", inner)
+    assert leaked is None, (
+        "`.decision-recommendation` inner contains a newline followed by "
+        f"multi-space indentation — template formatting leaked into the "
+        f"rendered content. This is what the pr-gate naysayer flagged on "
+        f"PR #32.\ninner repr = {inner!r}\nleaked match = {leaked.group(0)!r}"
+    )
+    # Sanity: the content we actually care about IS there.
+    assert "short reason" in inner
+    assert "A" in inner

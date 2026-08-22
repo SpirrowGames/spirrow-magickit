@@ -48,12 +48,23 @@
     padding: 0.75rem 1rem;
     margin-bottom: 1rem;
     overflow-wrap: anywhere;
-    white-space: pre-wrap;
   }
   .decision-question h2 {
     font-size: 1rem;
     margin: 0 0 0.5rem;
     color: #24292f;
+  }
+  /* ★ ``.pre-wrap`` is applied to a TIGHT inline element wrapping the
+     composer variable only -- never on a container ``<div>`` that itself
+     holds template indentation. Applying ``white-space: pre-wrap`` to a
+     container makes the template's own leading whitespace and newlines
+     visible on screen (12 spaces of unintended indentation, blank lines
+     above headings). Composer-generated prose (question / recommendation
+     reason / gain / loss) is text -- we want its ``\n`` rendered as
+     line breaks, but only the *content*, not the frame. */
+  .pre-wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .decision-error {
@@ -143,12 +154,18 @@
     font-weight: 600;
     margin-bottom: 0.35rem;
   }
+  /* .decision-choice-side wraps composer text (gain / loss) directly:
+     the span's HTML source is a single line with no template indentation
+     inside its tags, so white-space: pre-wrap here only preserves
+     newlines inside the variable value, which is the intended behavior.
+     Keep it tight. */
   .decision-choice-side {
     display: block;
     font-size: 0.9rem;
     color: #57606a;
     font-weight: 400;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
     margin-top: 0.25rem;
   }
 
@@ -160,7 +177,8 @@
     border-radius: 6px;
     margin: 1rem 0;
     overflow-wrap: anywhere;
-    white-space: pre-wrap;
+    /* NOTE: newline-preserving whitespace handling is delegated to the
+       tight inline wrapper class -- do not add it to this container. */
   }
   .decision-recommendation strong { color: #1a7f37; }
 
@@ -223,8 +241,12 @@
       と form (textarea + select + 自由記述送信) のみ.
     #}
     {% if material_state == "fresh" and material and material.question %}
+      {# The ``<span class="pre-wrap">`` is tight around the variable ONLY.
+         Do NOT move ``white-space: pre-wrap`` up to the container div
+         (see .decision-question CSS comment) -- template indentation
+         would render as visible whitespace in the pre-wrap box. #}
       <div class="decision-question">
-        <h2>何を聞かれているか</h2>{{ material.question }}
+        <h2>何を聞かれているか</h2><span class="pre-wrap">{{ material.question }}</span>
       </div>
     {% elif material_state == "stale" %}
       <div class="decision-stale-warning" role="status">
@@ -287,11 +309,17 @@
            ときだけ描画 (J-stale/absent では material=None ∴ ここも出ない
            = I-14 の担保). #}
         {% if material.recommendation or material.recommendation_reason %}
-          <div class="decision-recommendation">
-            {% if material.recommendation %}
-              <strong>推奨:</strong> {{ material.recommendation }}<br>
-            {% endif %}
-            {% if material.recommendation_reason %}{{ material.recommendation_reason }}{% endif %}
+          {# Every meaningful line is written as ONE physical line so no
+             template indentation leaks into the box. The ``{%- -%}``
+             modifiers strip whitespace around the tag itself, and the
+             composer's own text goes through ``.pre-wrap`` only. #}
+          <div class="decision-recommendation"
+            >{%- if material.recommendation -%}
+              <strong>推奨:</strong> {{ material.recommendation }}{%- if material.recommendation_reason %}<br>{% endif -%}
+            {%- endif -%}
+            {%- if material.recommendation_reason -%}
+              <span class="pre-wrap">{{ material.recommendation_reason }}</span>
+            {%- endif -%}
           </div>
         {% endif %}
 
