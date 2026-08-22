@@ -159,6 +159,17 @@
           action="/ui/projects/{{ project }}/threads/{{ thread_id }}/messages"
           class="decision-form"
           accept-charset="UTF-8">
+      {# ★ opt-in トリガ (msg-103 §2)。判断ページ由来の POST であることを、
+         人の入力に依存しない専用フィールドで宣言する。
+         value は非空 (`"1"`) でなければならない — 空 hidden `value=""` は
+         現行 FastAPI で欠落 (`None`) と等価に潰れ、F-1 の穴に戻ってしまう
+         (msg-103 §3 / §4-1 で実測済み)。ハンドラは `== "1"` の値一致で判定する。
+         この 1 行を消すと、既存 `/ui` compose form と同一の経路 (opt-in 分岐を
+         通らない = バイト単位で既存挙動) に落ちる (G-1)。
+         msg-102 の欠陥 (`_freeform` の有無で判別しようとして F-1 の穴で
+         opt-in が起動しなかった) の再発を構造で防ぐための field。
+         spec `spec/slices/S5-decision-page.md` §3.2 / §11。 #}
+      <input type="hidden" name="_decision_form" value="1">
       <input type="hidden" name="type" value="decide">
       <input type="hidden" name="author" value="human">
 
