@@ -144,6 +144,31 @@ async def test_branch_parked_to_human_returns_200_and_judgement_ui():
 
 
 @pytest.mark.asyncio
+async def test_judgement_ui_carries_decision_form_hidden_trigger():
+    """★ msg-102 の欠陥に対する構造的な pin (msg-103 §2):
+    判断ページの form は `<input type="hidden" name="_decision_form" value="1">`
+    を必ず載せる。これが opt-in の唯一のトリガであり、消すと handler の新
+    コードが 1 行も動かず、msg-102 の欠陥 (sentinel が本文に leak) が再発する。
+
+    value=`"1"` は非空でなければならない (空 hidden は Form parse で欠落と
+    等価に潰れる — spec §11.4 で実測済)。
+    """
+    adapter = _adapter_returning({
+        "thread": {"title": "T-trigger"},
+        "messages": [
+            {"author": "Bohr", "content": "please decide", "next_participant": "human"},
+        ],
+        "mode": "full",
+    })
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get("/dashboard/decisions/spirrow-magickit/T-trigger")
+
+    assert r.status_code == 200
+    # Trigger hidden must be present with the exact value the handler compares against.
+    assert 'name="_decision_form" value="1"' in r.text
+
+
+@pytest.mark.asyncio
 async def test_branch_body_fallback_next_human_returns_200_and_judgement_ui():
     """Legacy msg without a structured field, body has single-line NEXT: human."""
     adapter = _adapter_returning({

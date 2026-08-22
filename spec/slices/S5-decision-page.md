@@ -145,11 +145,42 @@ required Form field に送ると `{"type":"missing","input":null}` の 422 に�
 ために明記する。設計判断が (a) 「sentinel で良い」/ (b) 「代わりに content を
 optional にする」/ (c) 「別の道」のどれかで、次のスレッドで訂正されうる。
 
-### 3.2 G-1 opt-in トリガは `_freeform` の有無のみ (msg-097 §4.3)
+### 3.2 G-1 opt-in トリガは **`_decision_form == "1"`** (msg-103 §2 — msg-097 §4.3 撤回)
 
-- `_freeform is None` → 新コードを 1 行も通さない (バイト単位で既存挙動)。
-- 既存 `/ui` の compose form は `_freeform` を送らない ∴ 触れない。
-- **G-1 の回帰テスト**: `_freeform` 無しの POST が既存と同一の下流呼び出しになること。
+**msg-097 §4.3 で書いた「トリガは `_freeform` の有無のみ」は実装不能だった** —
+msg-102 の live 実タップで欠陥として表面化した (F-1: 空 `_freeform` と不在
+`_freeform` はハンドラから区別できない、両方 `None` になる)。∴ トリガをデータ
+(`_freeform`) から分離し、判断ページのテンプレートが**常に非空を送る専用
+hidden field** に移す。
+
+```html
+<input type="hidden" name="_decision_form" value="1">
+```
+
+```python
+decision_form: Annotated[str | None, Form(alias="_decision_form")] = None
+```
+
+- **判定は `decision_form == "1"`** (`is not None` ではなく値の一致)。空
+  hidden (`_decision_form=`) は Form parse で `None` に潰れる (spec §11.4 で
+  実測済) ∴ 値一致は「空 hidden が届いた」も「不在」も同じ「新コードを通さない」
+  1 通の判定に落ちる (msg-103 §4-2 の防御)。
+- `decision_form != "1"` → **新コードを 1 行も通さない** (バイト単位で既存挙動)。
+- 既存 `/ui` の compose form は `_decision_form` を送らない ∴ 触れない。
+- **default が `None`** (Einstein msg-099 §2 のガード): default 無しの必須
+  param にすると `_decision_form` を送らない既存 form が 422 で弾かれ、
+  early-return コードに届く前に FastAPI が拒否する ∴ G-1 が壊れる。同じ理由
+  で `_freeform` も `Optional[str] = None` を維持する。
+- **G-1 の回帰テスト**:
+  - `_decision_form` 無しの POST が既存と同一の下流呼び出しになること。
+  - **`_freeform` を送っていても `_decision_form` が無ければ opt-in を通らない**こと
+    (トリガが完全に移ったことの assert / msg-103 §7)。
+  - `_decision_form=""` (空 hidden) も opt-in を通らないこと (§4-2 の判定)。
+
+**★ msg-102 回帰テスト (必須)**: `_decision_form=1` + `content="(自由記述のみ)"`
++ `_freeform=""` の入力で、本文が `NEXT: <著者>` になり sentinel が残らない
+こと。**これは Takahito が実タップした入力そのもの** (msg-102 §1) ∴ 「人が
+最初に使った 1 回」を pin する。
 
 ### 3.3 合成規則 (msg-098 §2)
 
@@ -242,13 +273,28 @@ if closes:
 3. **`_enforce_close_policies` は生の `content` を読む** ∴ 合成は gate 群より前で
    `content` 自体を差し替える (§3.4)。
 
-## 6. 一般則 — 教訓 2 本 (spec に固定する)
+## 6. 一般則 — 教訓 4 本 (spec に固定する)
 
 1. **リンクは外形で叩いて確かめる** (msg-084 §5)。
    外部から見える成果物は、外部から実際に叩いて確かめる。CI はページの存在を知らない。
 2. **観測したのは結果であって原因ではない。人の行動は観測範囲の外にある** (msg-093 §2)。
    結果から原因を推論するときは、その原因を実際に観測したかを問う。観測していないなら
    「原因は未特定」と書く。「人が何もしなかった」は決して観測にならない。
+3. ★ **前提が 1 か所で反証されたら、その前提に依存している他の箇所を数える**
+   (human msg-102 §3 / Bohr msg-103 §0)。反証は、それが見つかった場所だけの
+   事実ではない。**実体**: 本 spec §11 の前提表 — 依存箇所を数えられる形で
+   置いておかないと、次も同じ場所で落ちる。抽象論として書くだけでなく、次に
+   触る人が実際に埋めるべき表として残す。
+   - **元事例**: msg-100 §3.1a が `content=""` → 422 を実測で反証したとき、
+     反証は `content` 側にしか適用されず、`_freeform` 側の同じ前提が残った。
+     msg-102 で live に人が最初に I-12 を使った 1 通で、その残った前提が
+     欠陥として表面化した。片側だけ直された。
+4. ★ **外形で叩くのは「私が想定した入力」であって、人が実際に取る経路ではない**
+   (human msg-102 §4)。上の §6.1 の 1 段深化。**実体**: msg-098 §8 のテスト
+   仕様は `_freeform` 非空しか送っておらず、空 `_freeform` (人が textarea を
+   触らないケース) を一度も測っていなかった ∴ 703 tests + CI 緑 + 私の外形
+   curl 3 分岐緑を素通りして live で発現した。**空入力を送るテストを全種類に
+   足す** (§12 の追加テスト群)。
 
 **§1 の 503 分岐**と**§3.6 のエラー文面**が、上記 2 の一般則の**実体**である
 (取得できなかったことを「存在しない」に丸めない / 確認できなかったことを「不許可だった」に
@@ -297,3 +343,121 @@ if closes:
 
 **これらは「ページが外から見える」ことを一切保証しない** (増分 1 で実証済み) ∴
 完了判定は §8 の外形実測に置く。
+
+## 10. ★ msg-102 の欠陥記録 (トリガの再設計)
+
+**症状** (msg-102 §1): Takahito が判断ページで「自由記述だけで送る」ボタンを
+自由記述欄が空のまま押した (msg-101 §7 の 3 番目の実タップ)。live で生まれた
+msg の本文は `(自由記述のみ)` — I-12 sentinel が正規化されずに素通りした。
+`next_participant` は構造フィールドとして正しく `Bohr` に入ったが、本文への
+`NEXT: Bohr` 追記も行われなかった。
+
+**根本原因** (human msg-102 §3 / Bohr msg-103 §2): 旧トリガ
+`decision_freeform is not None` が「空 `_freeform`」と「不在 `_freeform`」を
+区別できなかった (F-1)。starlette の form parse を経由すると、空値の Form
+field は `Optional[str] = None` として `None` になる — 空文字は「不在」と
+等価に潰れる。人が textarea を触らないケースで opt-in が起動せず、sentinel
+正規化と D-30 追記が両方行われなかった。
+
+**修復** (msg-103 §2): トリガをデータ (`_freeform`) から分離し、判断ページの
+テンプレートが常に非空を送る専用 hidden field `_decision_form=1` に移した
+(§3.2)。判定は `== "1"` の値一致 (§3.2 / msg-103 §4-2 の防御)。
+
+**次に触る人へ**: `_decision_form` hidden を「1 本減らせる冗長なフィールド」
+と読んで削らないこと。**これはトリガ本体である**。データフィールド
+(`_freeform`) をトリガに再利用すると、この記録の症状がそのまま再発する。
+`_freeform` は今もハンドラのパラメータに残っており、そこから「有無」で opt-in
+を判定したくなる誘惑がある — 誘惑に負けたら msg-102 と同じ 1 通が live で
+出る。
+
+## 11. ★ この設計が依存している前提の一覧 (§6.3 の実体)
+
+**「反証が効く箇所を数える」を、次に触る人ができる形で置く** (msg-103 §5)。
+1 項目でも「破れたときの症状」を確認せず変更したら、msg-102 と同じ形で
+落ちる。
+
+| # | 前提 | 状態 | 破れたときの症状 |
+|---|---|---|---|
+| P-1 | 空値の Form field は欠落と等価に潰れる (`None`) | **実測済** (human msg-102 §2 / msg-100 §3.1a / 本 PR §11.4) | — |
+| P-2 | 非空 hidden (`value="1"`) は `None` にならずに届く | **実測済 (本 PR §11.4)** | opt-in が一度も起動しない = **msg-102 欠陥の再発** |
+| P-3 | 既存 `/ui` compose form は `_decision_form` を送らない | **実装時にテンプレートを読んで確認 (本 PR で確認済)** | 既存 write が新コードを通る (G-1 破壊) |
+| P-4 | 必須 `content` param に空値を送ると 422 | **実測済** (msg-100 §3.1a / human msg-102 §2 の 4 行目 / 本 PR §11.4) | sentinel が不要になる (害はない) |
+| P-5 | `_enforce_close_policies` は生の `content` を読む | **実測済** (msg-097 §4.2 の逐語) | close 時に自由記述が落ちる (最重要 1 通が壊れる) |
+| P-6 | `chatroom_writes` を通るのはブラウザ由来の write のみ | **repo の import 関係のみ実測** (msg-097 §3)。**HTTP 直叩きの有無は未確認** (Tier-C 自身が明示) | 想定外の呼び手が新分岐に入り得る — ただし P-3 が真なら `_decision_form` を送らない限り入らない |
+| P-7 | 下流 (Conclair) は空 `content` を crash せず処理する | **未測 (live Conclair 依存)** — spec §3.3 は「空のまま下流に渡す」を許すが、Conclair 側の耐性は本 PR の gate では観測できない (Einstein msg-104 §3) | 空 content 送信で 500 が返り、D-31 の再描画網をすり抜ける可能性 (稀ケース: I-12 かつ空 freeform かつ空 next_participant) |
+
+### 11.4 §4-1 probe の結果 (本 PR で実測)
+
+`fastapi 0.128.0 / pydantic 2.12.5 / starlette 0.50.0` (deploy 済みバージョン
+と同一) で、`decision_form` / `_freeform` / `content` の Form parse 挙動を測った
+(script: `.git/mindwire-scratch/probe_decision_form.py`, 破棄可能)。
+
+```
+--- 1. _decision_form present, value='1' (judgement page normal send)
+    body={'decision_form': "'1'", 'decision_form_eq_1': True}       → P-2 confirmed
+
+--- 2. _decision_form absent (existing /ui compose form)
+    body={'decision_form': 'None', 'decision_form_eq_1': False}     → P-3 supported
+
+--- 3. _decision_form present, value='' (probe of Bohr §3 hypothesis)
+    body={'decision_form': 'None', 'decision_form_eq_1': False}     → 空 hidden は
+                                                                       None に潰れる
+                                                                       (== "1" 判定
+                                                                       が防御として
+                                                                       効くことの証拠)
+
+--- 4. empty content, required field (msg-100 §3.1a re-check)
+    status=422  detail=[{'type': 'missing', 'input': null, ...}]    → P-4 confirmed
+
+--- 5. _freeform present, value='' vs absent (F-1 confirmation)
+    body={'decision_freeform': 'None'}                              → F-1 が今も生き
+                                                                       ている (∴ トリガ
+                                                                       を移したのは
+                                                                       正しい)
+```
+
+### 11.7 P-7 (Einstein msg-104 §3) について
+
+`_compose_decision_body("", "")` は `""` を返す (§3.3)。かつ
+`_maybe_append_next("", "")` (next_participant も空) は `""` を返す。∴
+理論上、判断ページから `content=(自由記述のみ)` + 空 `_freeform` + 空
+`next_participant` が来ると下流に空 `content` が届く可能性がある。
+
+**本 PR での対処**:
+- unit test `test_all_empty_composed_body_is_empty_and_no_next_appended` で
+  合成結果が `""` になり、AsyncMock adapter がそれを受けることを pin。
+- **live Conclair が空 `content` を crash なく処理するかは、本 gate では
+  観測できない** (Einstein msg-104 §3)。
+- 完了条件 §8 の外形実測に「I-12 で `_freeform` を空・`next_participant` を
+  空にした送信も 1 回試すこと」を追加。live で 500 が返れば D-31 の再描画は
+  効かず、その時点で追加の防御 (合成結果が `""` になったら手前で reject) が
+  必要。**先回りしてその防御を実装しない** — 前提が実測前に実装を歪めるのは
+  msg-097 §4.1 と同じ癖である (Bohr msg-103 §0 の教訓)。
+
+## 12. テスト — 空入力を送るケースを全種類に足す (msg-103 §7 / §6.4)
+
+msg-102 §4 が名指しした欠陥: `tests/unit/test_decisions_form.py` の全 I-12
+系ケースが `_freeform` **非空**しか送っておらず、CI 緑を素通りして live で
+「人が最初に使った 1 回」で落ちた。
+
+**本 PR で追加した回帰テスト** (詳細はコード参照):
+
+- `test_msg102_regression_empty_freeform_with_sentinel_fires_opt_in` —
+  Takahito 実タップと同じ入力を pin。**このテストが失敗するなら msg-102 の
+  欠陥が再発している**。
+- `test_choice_button_with_empty_freeform_fires_opt_in_and_appends_next` —
+  選択肢ボタン + 空 `_freeform` で NEXT: 追記が入ること。
+- `test_all_empty_composed_body_is_empty_and_no_next_appended` —
+  §11.7 の corner (下流が空 content を見るケース) を pin。
+- `test_g1_freeform_present_without_decision_form_stays_on_legacy_path` —
+  ★ トリガが完全に移ったことの assert。`_freeform` を送っても
+  `_decision_form` が無ければ opt-in を通らない。
+- `test_decision_form_empty_string_does_not_fire_opt_in` —
+  §4-2 の値一致判定 (`== "1"`) が空 hidden も除外することの pin。
+- `test_judgement_ui_carries_decision_form_hidden_trigger`
+  (`test_decisions_routes.py`) — テンプレートが `_decision_form=1` hidden を
+  常に出すことの pin (これが消えると新コードが 1 行も動かない)。
+
+**既存の I-12 / 合成 / D-31 / close+freeform テストはすべて `_decision_form=1`
+を付けるよう更新した** (これらは判断ページ由来の入力を模しており、テンプレート
+が常に送るこの field を欠かせない)。

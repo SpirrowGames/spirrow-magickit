@@ -295,16 +295,40 @@ async def post_message(
     naysayer_override_reason: Annotated[str, Form()] = "",
     owner_override_reason: Annotated[str, Form()] = "",
     next_participant: Annotated[str, Form()] = "",
-    # S5 増分 2 opt-in: 判断ページから届いた POST の合成トリガ。
-    # **default `None` は Einstein msg §2 の必須ガード**: `Annotated[str, Form()]`
-    # を default 無しで足すと必須になり、`_freeform` を送らない既存 form が 422 で
-    # 弾かれる (early-return コードに届く前に FastAPI が拒否する) ∴ G-1 が壊れる。
-    # spec `spec/slices/S5-decision-page.md` §3.1。
+    # ★ S5 増分 2 の opt-in トリガ (msg-103 §2)。判断ページ由来かを、
+    # 人の入力に依存しない専用 hidden field で宣言する。
     #
-    # ワイヤ名は ``_freeform`` を維持 (spec / Bohr の凍結形どおり)。Python 側の
-    # パラメータ名は ``decision_freeform`` — Pydantic v2 が leading-underscore を
-    # field 名として拒否するため。``alias`` でワイヤ側の名前だけ ``_freeform`` に
-    # 戻す (仕様の名前を保つ + Pydantic の禁則を回避 の両立)。
+    # なぜ ``_freeform`` を再利用しないか (msg-102 の欠陥):
+    #   `_freeform` は人が入力する textarea であり、空にできる。starlette の
+    #   form parse を経由すると、空値の Form field は「不在」と等価に潰れ、
+    #   `Optional[str] = None` として `None` になる (msg-102 §2 で再現、
+    #   msg-103 §4-1 の実測でも確認)。∴ 「`_freeform` の有無」は Python
+    #   側から観測不能で、opt-in トリガとして構造的に成立しない。
+    #   → トリガをデータ (`_freeform`) から分離し、判断ページのテンプレート
+    #     が常に非空を送る専用 hidden field (``_decision_form``) に移す。
+    #
+    # なぜ default が `None` か: Einstein msg-099 §2 のガード。default 無しの
+    # 必須 param にすると `_decision_form` を送らない既存 `/ui` compose form が
+    # 422 で弾かれ (early-return コードに届く前に FastAPI が拒否する)、G-1 の
+    # 「既存挙動を変えない」が壊れる。**この理由は `_decision_form` にも同じく
+    # 効く** — msg-103 §0 が指摘した「反証が効く隣の箇所」を数えた結果、
+    # ここは `Optional = None` を維持。
+    #
+    # なぜ判定を `== "1"` にするか: msg-103 §4-2。`is not None` にすると
+    # `_decision_form=` (空 hidden) が届いたときの判定が F-1 と同じ曖昧さに
+    # 戻る。§4-1 の probe 3 行目で「空 hidden は None に潰れる」ことは実測済
+    # (spec §11.4) ∴ `== "1"` は「安全側の防御」であって現時点で必要ではない
+    # が、未来のブラウザ / proxy 挙動の変化に対して 1 通りの判定を保つ。
+    #
+    # ワイヤ名は ``_decision_form``。Python 側のパラメータ名は
+    # ``decision_form`` — Pydantic v2 が leading-underscore を field 名として
+    # 拒否するため、``alias`` でワイヤ側の名前だけ ``_decision_form`` に戻す
+    # (仕様の名前を保つ + Pydantic の禁則を回避 の両立、既存 ``_freeform``
+    # の扱いと同じ)。
+    decision_form: Annotated[str | None, Form(alias="_decision_form")] = None,
+    # 自由記述本文。**トリガの役から降ろした** (msg-103 §2)。opt-in が真の
+    # とき合成に使うデータであって、ここが `None` かどうかで opt-in を判定
+    # しない (それが msg-102 の欠陥だった)。
     decision_freeform: Annotated[str | None, Form(alias="_freeform")] = None,
 ) -> Response:
     """Post a message from the browser, through every gate that applies.
@@ -325,21 +349,39 @@ async def post_message(
     """
     # --- 判断ページ由来の opt-in 分岐 (S5 増分 2) --------------------------
     #
-    # トリガは `_freeform` の有無ただ 1 つ (spec §3.2 / msg-097 §4.3)。以下 3 点
-    # を GATE 群より前で完了させ、以降 `content` を参照するコードは合成後の値を
-    # 見る (spec §3.4 / msg-097 §4.2):
+    # トリガは ``_decision_form == "1"`` (msg-103 §2)。**human msg-102 の欠陥
+    # 修復**: 旧トリガ `decision_freeform is not None` は空 `_freeform` (人が
+    # textarea を触らない場合) を「不在」と区別できず、opt-in が起動しなかった。
+    # トリガをデータ (`_freeform`) から分離し、判断ページのテンプレートだけが
+    # 常に非空を送る専用 hidden field (`_decision_form=1`) に移した。
+    #
+    # 値一致 (`== "1"`) は防御 (msg-103 §4-2): `is not None` にすると
+    # `_decision_form=` (空 hidden) が届いたときに F-1 と同じ曖昧さに戻る。
+    # 空 hidden が `None` に潰れることは §4-1 probe で実測済 (spec §11.4)。
+    #
+    # 以下 3 点を GATE 群より前で完了させ、以降 `content` を参照するコードは
+    # 合成後の値を見る (spec §3.4 / msg-097 §4.2):
     #   1. 合成 (spec §3.3)
     #   2. D-30 の NEXT: 追記 (spec §3.5)
     #   3. エラー時に再描画するための入力保存 (spec §3.6 D-31)
-    is_decision_post = decision_freeform is not None
-    # D-31 の入力保持用 (選択肢の value を再描画に残す)。sentinel は user 視点で
-    # 「選択肢なし」を意味する ∴ 復元時も空を渡す (元のボタン value ではない)。
-    original_content = "" if content == _FREEFORM_ONLY_SENTINEL else content
-    original_freeform = decision_freeform or ""
+    is_decision_post = decision_form == "1"
+    # D-31 の入力保持用 (選択肢の value を再描画に残す)。判断ページ由来のとき
+    # だけ意味を持つ ∴ 変数の初期化も opt-in 分岐の内側に閉じる (msg-103 §3:
+    # 「正規化は opt-in 分岐の内側でのみ行う。`_decision_form` を持たない POST
+    # の content が偶然 sentinel と一致しても触らない」)。
+    original_content = ""
+    original_freeform = ""
     if is_decision_post:
+        # sentinel は user 視点で「選択肢なし」を意味する ∴ 復元時も空を渡す
+        # (元のボタン value を再描画に leak させない)。
+        original_content = "" if content == _FREEFORM_ONLY_SENTINEL else content
+        original_freeform = decision_freeform or ""
         # I-12 sentinel 正規化: 「自由記述だけで送る」ボタンは
         # ``content=(自由記述のみ)`` を送る ∴ 合成前に空文字へ戻す。純粋な
-        # ``value=""`` が現行 FastAPI で 422 に落ちる回避策 (spec §3.1)。
+        # ``value=""`` が現行 FastAPI で 422 に落ちる回避策 (spec §3.1a)。
+        # **opt-in が真のときだけ正規化する** — 既存 `/ui` compose form から
+        # 偶然この文字列が来ても手を付けない (C-2 / G-1 の「新コードを 1 行も
+        # 通さない」であって「新コードが無害に振る舞う」ではない、msg-103 §3)。
         working_content = "" if content == _FREEFORM_ONLY_SENTINEL else content
         composed = _compose_decision_body(working_content, original_freeform)
         composed = _maybe_append_next(composed, next_participant)

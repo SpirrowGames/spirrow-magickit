@@ -2,7 +2,7 @@
 
 Scope, said in advance:
 
-* These tests pin the ``_freeform`` opt-in composition inside
+* These tests pin the opt-in composition inside
   ``chatroom_writes.post_message`` -- the G-1 regression (existing POSTs
   unchanged), the compose-before-gates rule (spec §3.4), the D-30 NEXT:
   append, I-12 (send with freeform only), and D-31 (preserve inputs on
@@ -10,6 +10,13 @@ Scope, said in advance:
 * They do **not** re-cover the D-26' 4-branch GET (that belongs in
   ``test_decisions_routes.py``).
 * Nothing here asserts external arrival (A-13). See spec §8.
+
+**msg-102 の欠陥回帰**: 旧トリガ `decision_freeform is not None` は空
+`_freeform` (人が textarea を触らない場合) を判別できず、live で人が最初
+に I-12 を使った 1 通で sentinel が leak した。トリガは
+``_decision_form=1`` に移した (msg-103 §2)。**「空 `_freeform` で opt-in
+が起動すること」を pin する回帰テストを必ず含める** (spec §12)。全ての
+判断ページ由来テストは `_decision_form=1` を送る (テンプレートが常に送る)。
 """
 
 from __future__ import annotations
@@ -117,12 +124,14 @@ def test_maybe_append_next_empty_next_participant_leaves_body_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_g1_existing_post_without_freeform_reaches_conclair_unchanged():
-    """G-1 (spec §3.2): POSTs without `_freeform` do not enter the new path.
+async def test_g1_existing_post_without_decision_form_reaches_conclair_unchanged():
+    """G-1 (spec §3.2 / msg-103 §2): POSTs without `_decision_form` do not
+    enter the new path.
 
     Concretely: the adapter receives the raw ``content`` field, no
     composition happened, and the response is the existing HTMX flash
-    (not a 303).
+    (not a 303). Trigger has moved off ``_freeform`` — existing forms
+    that never send `_decision_form` are bit-identical.
     """
     adapter = AsyncMock()
     adapter.post_message = AsyncMock(
@@ -149,11 +158,12 @@ async def test_g1_existing_post_without_freeform_reaches_conclair_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_g1_form_without_freeform_field_does_not_422_on_load():
-    """Einstein §2: leading Form param must be Optional so absence doesn't 422.
+async def test_g1_form_without_decision_form_field_does_not_422_on_load():
+    """Einstein §2 / msg-103 §2: default None so absence doesn't 422.
 
-    A missing `_freeform` reaches the handler as ``None`` (not a 422), so
-    G-1's early-return branch actually runs.
+    A missing `_decision_form` reaches the handler as ``None`` (not a 422),
+    so G-1's early-return branch actually runs. Same rule for `_freeform`
+    (still ``Optional[str] = None`` for the same reason).
     """
     adapter = AsyncMock()
     adapter.post_message = AsyncMock(
@@ -166,14 +176,94 @@ async def test_g1_form_without_freeform_field_does_not_422_on_load():
         patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
         patch.object(chatroom_tools, "_adapter", return_value=adapter),
     ):
-        # No `_freeform` field at all in the POST body.
+        # No `_decision_form` field at all in the POST body.
         r = await _post(
             f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
-            {"type": "question", "author": "human", "content": "no freeform here"},
+            {"type": "question", "author": "human", "content": "no decision form here"},
         )
 
     assert r.status_code == 200  # not 422
     adapter.post_message.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_g1_freeform_present_without_decision_form_stays_on_legacy_path():
+    """★ msg-103 §7 の中核 assert (トリガが完全に移ったこと):
+    ``_freeform`` を送っていても `_decision_form` が無ければ opt-in を通らず、
+    既存挙動そのまま (合成もしない・NEXT: も足さない・303 redirect でもない)。
+
+    もし旧トリガ `decision_freeform is not None` が生きていれば、この
+    ケースは opt-in を通ってしまう (それが msg-102 の欠陥と真逆の型)。
+    ここは新トリガ (`_decision_form == "1"`) が正しく効いているかの pin。
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "mg1a", "type": "question"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "question",
+                "author": "human",
+                "content": "existing UI text",
+                # _freeform present but _decision_form absent → still legacy.
+                "_freeform": "this must not be spliced into content",
+                "next_participant": "Bohr",
+            },
+        )
+
+    assert r.status_code == 200  # not 303: opt-in did not fire
+    adapter.post_message.assert_called_once()
+    # Bit-identical downstream: no composition, no NEXT: append.
+    kwargs = adapter.post_message.call_args.kwargs
+    assert kwargs["content"] == "existing UI text"
+
+
+@pytest.mark.asyncio
+async def test_decision_form_empty_string_does_not_fire_opt_in():
+    """★ msg-103 §4-2: `_decision_form=""` (empty hidden) must be treated
+    the same as absence (F-1: empty Form field is indistinguishable from
+    missing to the handler). ``== "1"`` value-equality is the defence:
+    both "absent" and "empty" collapse to a single "not decision-post"
+    outcome.
+
+    msg-103 §4-1 line 3 probe: `_decision_form=""` empirically arrives
+    as `None` on current FastAPI (0.128 / pydantic 2.12); this test pins
+    the resulting handler behavior — legacy path, not opt-in.
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "mg1b", "type": "question"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "question",
+                "author": "human",
+                "content": "safe body",
+                "_decision_form": "",  # empty hidden — must behave as absent
+                "_freeform": "should not be spliced",
+            },
+        )
+
+    # Not 303: opt-in did not fire.
+    assert r.status_code == 200
+    kwargs = adapter.post_message.call_args.kwargs
+    assert kwargs["content"] == "safe body"  # no composition, no NEXT: append
 
 
 # --- I-12: freeform-only send (content="") -------------------------------
@@ -203,6 +293,7 @@ async def test_i12_freeform_only_content_is_composed_from_textarea():
             {
                 "type": "decide",
                 "author": "human",
+                "_decision_form": "1",  # trigger (msg-103 §2)
                 # I-12: sentinel that the template's I-12 button sends.
                 "content": "(自由記述のみ)",
                 "_freeform": "自由記述だけの決定",
@@ -242,6 +333,7 @@ async def test_choice_button_and_freeform_are_composed_with_blank_line():
             {
                 "type": "decide",
                 "author": "human",
+                "_decision_form": "1",
                 "content": "A: そのまま進める",
                 "_freeform": "理由: すでに検証済み",
                 "next_participant": "Bohr",
@@ -278,6 +370,7 @@ async def test_d30_leaves_body_unchanged_when_human_wrote_next_line():
             {
                 "type": "decide",
                 "author": "human",
+                "_decision_form": "1",
                 # I-12 sentinel (spec §3.1a) so `content=` isn't dropped as 422.
                 "content": "(自由記述のみ)",
                 "_freeform": freeform,
@@ -326,6 +419,7 @@ async def test_closing_decide_carries_freeform_into_close_policies():
             {
                 "type": "decide",
                 "author": "human",
+                "_decision_form": "1",
                 "content": "A: yes",
                 "closes_thread": THREAD,
                 "_freeform": "long human reasoning that must NOT be dropped",
@@ -382,6 +476,7 @@ async def test_d31_unknown_next_participant_preserves_inputs_and_returns_page():
             {
                 "type": "decide",
                 "author": "human",
+                "_decision_form": "1",
                 "content": "A: keep going",
                 "_freeform": "very long free text the human just typed",
                 "next_participant": "typoName",
@@ -421,6 +516,7 @@ async def test_d31_unavailable_next_participant_uses_distinct_copy():
             {
                 "type": "decide",
                 "author": "human",
+                "_decision_form": "1",
                 "content": "A: keep going",
                 "_freeform": "text",
                 "next_participant": "Bohr",
@@ -479,3 +575,133 @@ def test_is_not_found_rejects_other_error_types():
     assert not decision_page._is_not_found({"error_type": "ChatroomIntegrityError"})
     assert not decision_page._is_not_found({"error_type": "ConclairUpstreamError"})
     assert not decision_page._is_not_found({})
+
+
+# --- ★ msg-102 の欠陥回帰: 「人が最初に使った 1 回」を pin する ------------
+# msg-103 §7: 「テストが `_freeform` 非空しか送っていなかった」ことが CI 緑を
+# 通してしまった原因。空 `_freeform` を送るケースを全種類に足す (msg-103 §7)。
+
+
+@pytest.mark.asyncio
+async def test_msg102_regression_empty_freeform_with_sentinel_fires_opt_in():
+    """★ msg-102 の実タップと同じ入力 — この 1 件が「人が最初に使った 1 回」
+    そのものである。旧トリガ (`decision_freeform is not None`) だと F-1 で
+    空 `_freeform` が `None` に潰れて opt-in が起動せず、live で本文に
+    sentinel `(自由記述のみ)` が leak した。新トリガ (`_decision_form == "1"`)
+    ではテンプレートが hidden で `_decision_form=1` を常に送るため
+    opt-in が確実に起動し、sentinel は空へ正規化され、D-30 の NEXT: 追記が
+    合成後の本文に載る (msg-103 §2 / §4-1 実測)。
+
+    もしこのテストが失敗するなら、msg-102 の欠陥がそのまま再発している。
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "regression", "type": "decide"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        # Takahito が実タップしたのと同じ入力 (msg-102 §1):
+        #   - "自由記述だけで送る" ボタンを押した (content=sentinel)
+        #   - 自由記述欄には何も入力していない (_freeform="")
+        #   - _decision_form は hidden なので常に付く (template §2)
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "decide",
+                "author": "human",
+                "_decision_form": "1",  # ★ opt-in が起動する必要条件
+                "content": "(自由記述のみ)",
+                "_freeform": "",  # ★ msg-102 の欠陥入力: 空
+                "next_participant": "Bohr",
+            },
+        )
+
+    # decision-post success → 303 (opt-in が起動したことの証拠)。
+    # 旧コードでは 200 + legacy flash になっていた (opt-in が起動せず)。
+    assert r.status_code == 303
+    kwargs = adapter.post_message.call_args.kwargs
+    # 本文は "NEXT: Bohr" だけ (sentinel は空へ正規化、freeform は空、
+    # `_maybe_append_next` が empty body に append)。
+    assert kwargs["content"] == "NEXT: Bohr"
+    # sentinel が leak していないこと (msg-102 の症状の否定)。
+    assert "自由記述のみ" not in kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_choice_button_with_empty_freeform_fires_opt_in_and_appends_next():
+    """★ msg-103 §7: 選択肢ボタン + 空 `_freeform` → 本文が "A: …" +
+    NEXT: 追記。人が「自由記述に何も書かず選択肢を押す」ケースの pin。
+
+    旧トリガでは opt-in が起動せず、NEXT: 追記なしで content="A: …" が
+    そのまま Conclair に届いていた。
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "choice-empty", "type": "decide"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "decide",
+                "author": "human",
+                "_decision_form": "1",
+                "content": "A: そのまま進める",
+                "_freeform": "",  # ★ 空欄のまま選択肢だけを押した
+                "next_participant": "Einstein",
+            },
+        )
+
+    assert r.status_code == 303
+    kwargs = adapter.post_message.call_args.kwargs
+    # 選択肢テキスト + 空行 + NEXT: 追記。
+    assert kwargs["content"] == "A: そのまま進める\n\nNEXT: Einstein"
+
+
+@pytest.mark.asyncio
+async def test_all_empty_composed_body_is_empty_and_no_next_appended():
+    """spec §3.3 の corner: `content` sentinel + 空 `_freeform` + 空
+    `next_participant` → 合成本文は "" (新たな拒否を作らない)。
+
+    Einstein msg-104 §3 (P-7) が心配した経路: 空 `content` が下流に届く。
+    ここでは downstream (AsyncMock adapter) が受け入れることを confirm。
+    live Conclair が空本文で crash するかは外形で測るしかない (§P-7 実測項目、
+    spec §11.7)。
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "empty-body", "type": "decide"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "decide",
+                "author": "human",
+                "_decision_form": "1",
+                "content": "(自由記述のみ)",
+                "_freeform": "",
+                "next_participant": "",  # 追記名も空
+            },
+        )
+
+    assert r.status_code == 303
+    kwargs = adapter.post_message.call_args.kwargs
+    assert kwargs["content"] == ""  # spec §3.3: 空のまま下流に渡す
