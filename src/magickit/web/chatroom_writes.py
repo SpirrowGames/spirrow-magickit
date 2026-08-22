@@ -28,15 +28,110 @@ import html
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Form, Request, Response
+from fastapi.responses import HTMLResponse
 
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web.mojibake import first_mojibake
 from magickit.utils.logging import get_logger
 
+# 判断ページ (S5 増分 2) 由来の POST は decision-page 特化の helper に委譲する。
+# 判定 literal (`NEXT:` 相当のキーワード) はそちらの module に集約しており、この
+# enforcement-code file には持ち込まない (msg-072 §1 の vocabulary-boundary
+# 制約: adapter / MCP tool / この chatroom_writes.py に consumer 用語の literal を
+# 書かない)。judgement page は決定 UI 特化の別ファイル ∴ そこに集約するのが妥当。
+from magickit.web.decisions import (
+    _compose_decision_body,
+    _maybe_append_next,
+)
+
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["chatroom-ui"])
+
+# --- decision-page opt-in (S5 増分 2) ----------------------------------------
+#
+# 判断ページ (``web/decisions.py``) から届く POST だけを opt-in で拾い、
+# ``content`` (選択肢ボタンが運ぶ) と ``_freeform`` (常設テキスト) を 1 本の本文
+# に合成する。共有経路 (このハンドラ) を通るが、影響は ``_freeform`` を持つ
+# POST に限定する (spec `spec/slices/S5-decision-page.md` §3 / msg-098 §4)。
+#
+# **合成は gate 群より前で行い、以降 `content` を参照する全箇所が合成後の本文
+# を見る形にする** (spec §3.4 / msg-097 §4.2 の罠)。``_enforce_close_policies``
+# は生の ``content`` を読む ∴ 合成結果を ``body_content`` にだけ代入する実装は、
+# ``closes`` が真のとき自由記述を黙って捨てる (最も重要な 1 通で最も長く打った
+# 文章が落ちる)。∴ ``content`` そのものを合成後の値へ差し替える。
+
+#: I-12 sentinel: 判断ページの「自由記述だけで送る」ボタンが送る ``content`` 値。
+#: 純粋な空文字 (``value=""``) は現行 FastAPI (0.128 / pydantic 2.12) で
+#: ``content=`` が「missing」として 422 に落とされる — msg-097 §4.1 の
+#: 「空文字は str として妥当 ∴ 422 にならない」が empirical に成立しない ∴
+#: 既存 ``content`` param の signature を変えずに I-12 を成立させるための
+#: sentinel を挟む。``_compose_decision_body`` に渡す前に空文字へ正規化する。
+#: ボタンの ``value`` 属性は user が typo できず、button 由来値以外に content
+#: が入る経路は無い ∴ 衝突しない (spec §3.1a の empirical finding)。
+_FREEFORM_ONLY_SENTINEL = "(自由記述のみ)"
+
+
+def _next_participant_error_message(envelope: dict[str, Any]) -> str:
+    """D-31: 2 種のエラーを混ぜず、区別できるふりもしない (spec §3.6)。
+
+    - ``NextParticipantUnknownError`` (未登録の確定回答) →「その名前は登録されていない」
+    - ``NextParticipantValidationUnavailableError`` (Prismind 不達) →「今 identity を
+      確認できませんでした」
+    - それ以外 → envelope の error 文を素通し。区別できるふりをしない。
+    """
+    error_type = str(envelope.get("error_type", ""))
+    detail = str(envelope.get("error", "")) or "unknown error"
+    if error_type == "NextParticipantUnknownError":
+        return f"指定された名前は登録されていません。{detail}"
+    if error_type == "NextParticipantValidationUnavailableError":
+        return f"今 identity の確認ができませんでした ({detail})。"
+    # 区別できない envelope はそのまま出す (spec §3.6 の一般則)。
+    return f"{error_type}: {detail}"
+
+
+def _error_envelope_message(envelope: dict[str, Any]) -> str:
+    """一般的な error envelope を D-31 の再描画向けに 1 行にまとめる。
+
+    `_next_participant_error_message` の非 next_participant 版。gate 系エラー
+    や adapter からの envelope も判断ページに戻すときにこれを使う。
+    """
+    error_type = str(envelope.get("error_type", "Error"))
+    detail = str(envelope.get("error", "")) or "unknown error"
+    return f"{error_type}: {detail}"
+
+
+async def _render_decision_error(
+    request: Request,
+    *,
+    project: str,
+    thread_id: str,
+    content_value: str,
+    freeform_value: str,
+    next_participant_value: str,
+    error_message: str,
+) -> HTMLResponse:
+    """D-31: 判断ページを入力保持のまま再描画する。
+
+    ``decisions.py._render_decision_error_page`` を呼ぶ ∴ 実装は 1 箇所。
+    ここでは import 循環を避けるために遅延 import する。thread 文脈の復元は
+    呼び先が best-effort で行う。
+    """
+    # 遅延 import: decisions.py が chatroom_writes を import する将来の可能性
+    # に備え、モジュールロード時の相互依存を作らない。
+    from magickit.web.decisions import _render_decision_error_page
+
+    return await _render_decision_error_page(
+        request,
+        project=project,
+        thread_id=thread_id,
+        content_value=content_value,
+        freeform_value=freeform_value,
+        next_participant_value=next_participant_value,
+        error_message=error_message,
+        status_code=400,
+    )
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -200,6 +295,17 @@ async def post_message(
     naysayer_override_reason: Annotated[str, Form()] = "",
     owner_override_reason: Annotated[str, Form()] = "",
     next_participant: Annotated[str, Form()] = "",
+    # S5 増分 2 opt-in: 判断ページから届いた POST の合成トリガ。
+    # **default `None` は Einstein msg §2 の必須ガード**: `Annotated[str, Form()]`
+    # を default 無しで足すと必須になり、`_freeform` を送らない既存 form が 422 で
+    # 弾かれる (early-return コードに届く前に FastAPI が拒否する) ∴ G-1 が壊れる。
+    # spec `spec/slices/S5-decision-page.md` §3.1。
+    #
+    # ワイヤ名は ``_freeform`` を維持 (spec / Bohr の凍結形どおり)。Python 側の
+    # パラメータ名は ``decision_freeform`` — Pydantic v2 が leading-underscore を
+    # field 名として拒否するため。``alias`` でワイヤ側の名前だけ ``_freeform`` に
+    # 戻す (仕様の名前を保つ + Pydantic の禁則を回避 の両立)。
+    decision_freeform: Annotated[str | None, Form(alias="_freeform")] = None,
 ) -> Response:
     """Post a message from the browser, through every gate that applies.
 
@@ -207,11 +313,55 @@ async def post_message(
     (cheapest, no IO), then the role gate, then -- only for a ``decide``
     that closes -- the close policies and the second-stage close check.
     A ``closes_thread`` here must not be a way around the close gates.
+
+    **判断ページ由来 (`_freeform is not None`) は opt-in の合成分岐に入る**:
+    `content` (選択肢ボタンが運ぶ) と `_freeform` (常設テキスト) を 1 本の本文
+    に合成し、D-30 の `NEXT:` 追記を判定してから gate 群に渡す。合成は gate より
+    前で `content` そのものを差し替えることで、`_enforce_close_policies` が読む
+    生の `content` も合成後になる (spec §3.4 の罠回避)。
+
+    G-1 (spec §3.2): `_freeform is None` の POST は下の分岐に入らず、既存挙動を
+    バイト単位で維持する。既存 `/ui` の compose form は `_freeform` を送らない。
     """
+    # --- 判断ページ由来の opt-in 分岐 (S5 増分 2) --------------------------
+    #
+    # トリガは `_freeform` の有無ただ 1 つ (spec §3.2 / msg-097 §4.3)。以下 3 点
+    # を GATE 群より前で完了させ、以降 `content` を参照するコードは合成後の値を
+    # 見る (spec §3.4 / msg-097 §4.2):
+    #   1. 合成 (spec §3.3)
+    #   2. D-30 の NEXT: 追記 (spec §3.5)
+    #   3. エラー時に再描画するための入力保存 (spec §3.6 D-31)
+    is_decision_post = decision_freeform is not None
+    # D-31 の入力保持用 (選択肢の value を再描画に残す)。sentinel は user 視点で
+    # 「選択肢なし」を意味する ∴ 復元時も空を渡す (元のボタン value ではない)。
+    original_content = "" if content == _FREEFORM_ONLY_SENTINEL else content
+    original_freeform = decision_freeform or ""
+    if is_decision_post:
+        # I-12 sentinel 正規化: 「自由記述だけで送る」ボタンは
+        # ``content=(自由記述のみ)`` を送る ∴ 合成前に空文字へ戻す。純粋な
+        # ``value=""`` が現行 FastAPI で 422 に落ちる回避策 (spec §3.1)。
+        working_content = "" if content == _FREEFORM_ONLY_SENTINEL else content
+        composed = _compose_decision_body(working_content, original_freeform)
+        composed = _maybe_append_next(composed, next_participant)
+        # ★ content 自体を差し替える。以降のコード (embodiment / role gate /
+        # `_enforce_close_policies` の生 `content` 引数 / adapter.post_message の
+        # body_content) はすべて合成後を見る。
+        content = composed
+
     if _embodiment_missing(msg_type=type, author=author, embodiment=embodiment):
-        return _error_flash(
-            chatroom_tools._embodiment_required_error(msg_kind=type)
-        )
+        envelope = chatroom_tools._embodiment_required_error(msg_kind=type)
+        if is_decision_post:
+            # human は embodiment 免除 ∴ この分岐は通常来ないが、type が変な値
+            # だと落ちる余地はある。D-31 で入力を返す。
+            return await _render_decision_error(
+                request,
+                project=project, thread_id=thread_id,
+                content_value=original_content,
+                freeform_value=original_freeform,
+                next_participant_value=next_participant,
+                error_message=_error_envelope_message(envelope),
+            )
+        return _error_flash(envelope)
 
     # A `decide` that closes must go through the close gate, which runs both
     # role stages off a single identity lookup. Calling the stage-1 helper
@@ -226,6 +376,15 @@ async def post_message(
         else chatroom_tools._check_role_allowed(author=author, role=role)
     )
     if gate.error is not None:
+        if is_decision_post:
+            return await _render_decision_error(
+                request,
+                project=project, thread_id=thread_id,
+                content_value=original_content,
+                freeform_value=original_freeform,
+                next_participant_value=next_participant,
+                error_message=_error_envelope_message(gate.error),
+            )
         return _error_flash(gate.error)
 
     # Structured handoff target check -- same rule as the MCP tool. Runs
@@ -234,6 +393,16 @@ async def post_message(
     # the other).
     next_error = await chatroom_tools._check_next_participant(next_participant)
     if next_error is not None:
+        if is_decision_post:
+            # D-31 の本命エラー経路。文面は種別で区別する (Unknown vs Unavailable)。
+            return await _render_decision_error(
+                request,
+                project=project, thread_id=thread_id,
+                content_value=original_content,
+                freeform_value=original_freeform,
+                next_participant_value=next_participant,
+                error_message=_next_participant_error_message(next_error),
+            )
         return _error_flash(next_error)
 
     adapter = _adapter()
@@ -243,6 +412,10 @@ async def post_message(
         resolved_override_reason: str | None = None
 
         if closes:
+            # ★ ここに渡す ``body_content=content`` は既に合成後の値である
+            # (spec §3.4 の罠回避 / msg-097 §4.2): opt-in 分岐で ``content``
+            # 自体を差し替えたので、`_enforce_close_policies` が生の
+            # `content` を読んでも自由記述は保たれる。
             decision = await chatroom_tools._enforce_close_policies(
                 adapter,
                 project=project,
@@ -253,6 +426,15 @@ async def post_message(
                 owner_override_reason=owner_override_reason,
             )
             if decision["action"] == "block":
+                if is_decision_post:
+                    return await _render_decision_error(
+                        request,
+                        project=project, thread_id=thread_id,
+                        content_value=original_content,
+                        freeform_value=original_freeform,
+                        next_participant_value=next_participant,
+                        error_message=_error_envelope_message(decision["envelope"]),
+                    )
                 return _error_flash(decision["envelope"])
             body_content = decision["content"]
             owner_override = decision.get("owner_override", False)
@@ -280,7 +462,30 @@ async def post_message(
         await adapter.close()
 
     if _is_error(result):
+        if is_decision_post:
+            return await _render_decision_error(
+                request,
+                project=project, thread_id=thread_id,
+                content_value=original_content,
+                freeform_value=original_freeform,
+                next_participant_value=next_participant,
+                error_message=_error_envelope_message(result),
+            )
         return _error_flash(result)
+
+    if is_decision_post:
+        # 判断ページからの成功: HTMX ではなくプレーン form ∴ 303 で /ui の
+        # スレッドページへ着地。ブラウザは自然に GET で開く (spec §3.7)。
+        # 遅延 import: `decisions._thread_page_url` は循環回避のためここで解決。
+        from magickit.web.decisions import _thread_page_url
+
+        return Response(
+            status_code=303,
+            headers={
+                "Location": _thread_page_url(project, thread_id),
+                "Cache-Control": "no-store",
+            },
+        )
 
     msg = result.get("msg", {})
     text = f"posted {msg.get('msg_id', '?')} ({msg.get('type', type)})"
