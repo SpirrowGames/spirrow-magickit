@@ -376,12 +376,121 @@
     </div>
 
   {% elif mode == "not_waiting" %}
-    <h1>判断待ちではありません</h1>
-    <p>スレッド <code>{{ thread_id }}</code> は現在、人の判断を待っている状態ではありません
-    (最終メッセージが <code>NEXT: human</code> ではない).</p>
+    {#
+      N-1〜N-8 (msg-136 / msg-137 / Einstein Objection):
+      3 状態を、判断ページが持っているデータの範囲で根拠付きに分ける。
+
+        - not_waiting_state == "answered"     → 「この判断は回答済みです」
+                                                + 誰がいつ答えたか
+        - not_waiting_state == "advanced"     → 「その後スレッドが進んで
+                                                います」+ 現在の head
+        - not_waiting_state == "undetermined" → 「判断待ちではありません」
+                                                + reason (材料が無い / 窓が
+                                                届かない / 末尾不完全 / …)
+
+      **不変条件** (msg-137 §2): 肯定 (answered) は証拠が要る。否定
+      (advanced) は完全性が要る。どちらも満たせないものは undetermined。
+      ∴ 「回答済み」を推測で言わない — 分からない = undetermined。
+
+      **フォーム** (I-12): 3 状態すべてで残す (msg-136 §4)。
+      **Einstein Objection**: closed スレッドではフォームを描画しない
+      (Conclair が ChatroomStateError で拒否 ∴ 嘘の導線になる)。
+    #}
+    {% if not_waiting_state == "answered" %}
+      <h1>この判断は回答済みです</h1>
+      <p>スレッド <code>{{ thread_id }}</code> にはすでに判断が投稿されています.</p>
+      {# 根拠 (N-6): 断定だけを出さない — msg id / author / (時刻 if any). #}
+      <div class="decision-absent" role="status">
+        <strong>回答:</strong>
+        <code>{{ not_waiting_evidence.msg_id }}</code>
+        by <code>{{ not_waiting_evidence.author }}</code>
+        {% if not_waiting_evidence.timestamp %}
+          ({{ not_waiting_evidence.timestamp }})
+        {% endif %}
+      </div>
+    {% elif not_waiting_state == "advanced" %}
+      <h1>その後スレッドが進んでいます</h1>
+      <p>通知が指していた
+        <code>{{ not_waiting_evidence.material_head }}</code>
+        の後にメッセージがあり、スレッドは現在
+        <code>{{ not_waiting_evidence.thread_head }}</code>
+        まで進んでいます. chatroom で内容を確認してください.</p>
+    {% else %}
+      {# undetermined: 現行の見出しを維持しつつ、reason ごとの 1 行を添える
+         (msg-136 §4 の要件: なぜ判定できないかを書く). #}
+      <h1>判断待ちではありません</h1>
+      <p>スレッド <code>{{ thread_id }}</code> は現在、人の判断を待っている状態ではありません.</p>
+      <div class="decision-absent" role="status">
+        {% set r = not_waiting_evidence.reason %}
+        {% if r == "store_unavailable" %}
+          この判断の材料ストアに一時的に接続できませんでした. 回答済みかどうかは chatroom で確認してください.
+        {% elif r == "no_material" %}
+          この判断の材料が残っていません. 通知が指していた質問がすでに終わっている可能性があります.
+        {% elif r == "material_head_unreadable" %}
+          材料に紐付いた通知時点の位置情報が読めませんでした. chatroom で確認してください.
+        {% elif r == "no_messages" %}
+          スレッドが空です. chatroom で確認してください.
+        {% elif r == "head_not_in_window" %}
+          通知が指していた時点のメッセージが、いま取得できる範囲に含まれていません. 回答済みかどうかは chatroom で確認してください.
+        {% elif r == "tail_incomplete" %}
+          スレッドの末尾まで確認できませんでした. 回答済みかどうかは chatroom で確認してください.
+        {% elif r == "head_is_current" %}
+          通知が指していたメッセージは今も最新ですが、人の判断を求める形になっていません (故障により通知されたか、宛先が違います).
+        {% else %}
+          この判断の状態を確定できませんでした. chatroom で確認してください.
+        {% endif %}
+      </div>
+    {% endif %}
+
     <div class="decision-links">
       <a href="{{ thread_ui_url }}">chatroom でスレッドを開く →</a>
     </div>
+
+    {# I-12: フォームは 3 状態すべてで残す (msg-136 §4). 回答済みでも「追加で
+       書きたいこと」があるかもしれない. ただし closed スレッドでは Conclair が
+       送信を確実に拒否する ∴ 描画しない (Einstein Objection). #}
+    {% if not thread_closed %}
+      <details style="margin-top:1.5rem;">
+        <summary style="cursor:pointer;color:#57606a;">それでも書き足す (自由記述で送る)</summary>
+        <form method="post"
+              action="/ui/projects/{{ project }}/threads/{{ thread_id }}/messages"
+              class="decision-form"
+              accept-charset="UTF-8"
+              style="margin-top:0.75rem;">
+          {# opt-in トリガ (msg-103 §2) と type/author の hidden は判断 UI 側と
+             同一 (I-12 の 3 状態フォーム同型: 2 箇所で別の規則を持たない). #}
+          <input type="hidden" name="_decision_form" value="1">
+          <input type="hidden" name="type" value="decide">
+          <input type="hidden" name="author" value="human">
+
+          <label for="nw-free-textarea">自由記述</label>
+          <textarea id="nw-free-textarea" name="_freeform"
+                    placeholder="この判断について書き足す (訂正・追伸・追加の背景など).">{{ freeform_value | default("") }}</textarea>
+
+          <label for="nw-np-select">次の担当 (<code>next_participant</code>)</label>
+          <select id="nw-np-select" name="next_participant">
+            {% for name in participant_choices %}
+              <option value="{{ name }}"
+                {% if name == next_participant_value %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+
+          <div class="decision-choices">
+            {# I-12 sentinel: 自由記述だけで送るための sole submit. J-* と同じ
+               value ("(自由記述のみ)") で、handler 側で空文字に正規化される. #}
+            <button type="submit" name="content" value="(自由記述のみ)"
+                    class="decision-choice decision-choice-freeform">
+              自由記述だけで送る
+            </button>
+          </div>
+        </form>
+      </details>
+    {% else %}
+      <p style="margin-top:1.5rem;color:#57606a;">
+        このスレッドはすでにクローズされています ({{ thread_status }}).
+        追加のメッセージは投稿できません.
+      </p>
+    {% endif %}
 
   {% elif mode == "not_found" %}
     <h1>スレッドが見つかりません</h1>

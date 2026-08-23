@@ -347,6 +347,191 @@ def _classify_judgement_state(
     return "fresh"
 
 
+# ---------------------------------------------------------------------------
+# N-1〜N-8: 「判断待ちではありません」を 3 状態に割る (msg-136 / msg-137 / Einstein)
+# ---------------------------------------------------------------------------
+#
+# 発端 msg-136: 「判断しろ」と言われて開いた先に何も無い、が続くと通知経路
+# 全体が読まれなくなる ∴ 「判断待ちではありません」を 3 状態に割り、それぞれ
+# 根拠のある文言を出す (spirrow-mindwire T-human-terminal-overuse msg-882 の
+# 「常時点灯する列は読まれなくなる」原則の実体化)。
+#
+# 設計は Bohr msg-137、Einstein msg (Objection: closed thread) で closed 対応を
+# 追加。判定は純関数 1 本に閉じる (テスト可能性・追加の外部 I/O 0)。
+
+#: 判定できない reason enum. **UI 側で reason ごとに 1 行を出す** (msg-137 §5)。
+_NW_STORE_UNAVAILABLE = "store_unavailable"
+_NW_NO_MATERIAL = "no_material"
+_NW_MATERIAL_HEAD_UNREADABLE = "material_head_unreadable"
+_NW_NO_MESSAGES = "no_messages"
+_NW_HEAD_NOT_IN_WINDOW = "head_not_in_window"
+_NW_TAIL_INCOMPLETE = "tail_incomplete"
+_NW_HEAD_IS_CURRENT = "head_is_current"
+
+
+def _classify_not_waiting(
+    material: dict[str, Any] | None,
+    material_ok: bool,
+    messages: list[dict[str, Any]],
+    thread_head: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """「判断待ちではありません」の 3 状態を返す (総関数)。
+
+    Returns ``(state, evidence_or_reason)`` where ``state`` is one of:
+
+    - ``"answered"``: material の ``head_msg_id`` より後ろに human の
+      ``type == "decide"`` msg が窓内にある。``evidence`` は該当する
+      **最初の** 1 通 (msg_id / author / timestamp を UI で描画)。
+    - ``"advanced"``: head は動いたが window の末尾は権威と一致し、その
+      間に human decide は無い → 「その後スレッドが進んでいます」。
+    - ``"undetermined"``: 判定できない (材料が無い / 窓が届かない / 末尾
+      不完全 / head が最終)。**現行の「判断待ちではありません」文言を
+      出しつつ、reason ごとの 1 行を添える** (msg-137 §5)。
+
+    判定順序自体が仕様 (msg-137 §1):
+
+    1. ``material_ok`` が偽 → ``undetermined / store_unavailable``
+    2. ``material`` が無い → ``undetermined / no_material``
+    3. ``material.head_msg_id`` が非空 str でない → ``undetermined /
+       material_head_unreadable`` (schema 上到達不能だが総関数化のため置く)
+    4. ``messages`` が空 → ``undetermined / no_messages``
+    5. head が ``messages`` の ``msg_id`` に存在しない → ``undetermined /
+       head_not_in_window``
+    6. head 以降に ``author ∈ HUMAN_IDENTITY_NAMES ∧ type == "decide"`` が
+       あれば → ``answered`` (最初の 1 通)
+    7. 6 の後は否定の主張 ∴ 窓の末尾完全性を要求する。
+       ``messages[-1].msg_id != thread_head`` → ``undetermined /
+       tail_incomplete``
+    8. head の後ろに msg がある → ``advanced``
+    9. head が最終 msg (後ろが空) → ``undetermined / head_is_current``
+
+    **不変条件** (msg-137 §2 の中心規律):
+        肯定の主張には証拠が要る (6)。否定の主張には完全性が要る (7)。
+        どちらも満たせないものは全部 ``undetermined`` に落とす。
+    """
+    # (1) 材料ストアが読めなかった
+    if not material_ok:
+        return "undetermined", {"reason": _NW_STORE_UNAVAILABLE}
+    # (2) 材料が無い
+    if material is None:
+        return "undetermined", {"reason": _NW_NO_MATERIAL}
+    # (3) 材料の head_msg_id が読めない (schema 上到達不能だが暗黙 fall-through
+    # を作らない)
+    head = material.get("head_msg_id")
+    if not isinstance(head, str) or not head:
+        return "undetermined", {"reason": _NW_MATERIAL_HEAD_UNREADABLE}
+    # (4) messages が空
+    if not messages:
+        return "undetermined", {"reason": _NW_NO_MESSAGES}
+    # (5) 所属テスト: head が窓内に無い
+    # msg_id はリストの契約 (Conclair は msg_id 昇順で返す) ∴ 「順序は契約から
+    # 取り、値の意味は取らない」(msg-137 §3)。数値 parse をしない。
+    head_index: int | None = None
+    for i, msg in enumerate(messages):
+        if str(msg.get("msg_id") or "") == head:
+            head_index = i
+            break
+    if head_index is None:
+        return "undetermined", {"reason": _NW_HEAD_NOT_IN_WINDOW}
+    after = messages[head_index + 1 :]
+    # (6) 肯定側: 証拠 msg があれば末尾完全性を要求せず answered
+    for msg in after:
+        if _is_human_decide(msg):
+            return "answered", {
+                "msg_id": str(msg.get("msg_id") or ""),
+                "author": str(msg.get("author") or ""),
+                "timestamp": _msg_timestamp(msg),
+            }
+    # (7) 否定側: 末尾完全性を要求する (msg-137 §1 の 7 の位置)
+    tail = str(messages[-1].get("msg_id") or "")
+    if not thread_head or not tail or tail != thread_head:
+        return "undetermined", {"reason": _NW_TAIL_INCOMPLETE}
+    # (8) 後ろに msg がある → advanced
+    if after:
+        return "advanced", {"thread_head": thread_head, "material_head": head}
+    # (9) 後ろが空 → head が最終 = 通知が指していた msg が判断を求めていない
+    return "undetermined", {"reason": _NW_HEAD_IS_CURRENT}
+
+
+def _is_human_decide(msg: dict[str, Any]) -> bool:
+    """``author ∈ HUMAN_IDENTITY_NAMES`` かつ ``type == "decide"`` か。
+
+    msg-137 §4: **構造化 field のみ**。本文 fallback は作らない。「回答済み」
+    に対応する本文規約は存在せず、fallback は「散文から意図を推定する」形
+    になり、本スレッドが止めようとしている失敗そのもの (根拠のない断定)。
+
+    - ``author`` は ``_is_parked_to_human`` と同じく ``lower()`` で扱う (2 箇所
+      で別の規則を持たない)。
+    - ``type`` は case 完全一致。Conclair は enum ∴ 大小が変わっていたら契約
+      変更で、黙って吸収せず「回答済みでない」= 安全側に出す。
+    - **field 名は ``type``** (msg-137 実測 (d): MCP 引数名は ``msg_type``、
+      保存・返却 field は ``type``)。``msg_type`` だけの msg は検出しない。
+    """
+    author = str(msg.get("author") or "").strip().lower()
+    if author not in _HUMAN_IDENTITIES:
+        return False
+    msg_type = str(msg.get("type") or "")
+    return msg_type == "decide"
+
+
+#: msg の投稿時刻を拾う候補 field。実運用値が確定していない ∴ 見つからない
+#: 場合は None を返し UI 側で「時刻欄ごと省く」(msg-137 §5 N-6: 時刻の欠落は
+#: verdict を弱めない — 証拠 msg は手にある)。順序は Conclair の他 API で見た
+#: 頻度順 (`created_at` が listing で権威、`timestamp` は caller-supplied 表示)。
+_MSG_TIMESTAMP_FIELDS = ("created_at", "timestamp")
+
+
+def _msg_timestamp(msg: dict[str, Any]) -> str | None:
+    """Return the msg's timestamp string, or ``None`` if no known field carries it.
+
+    See ``_MSG_TIMESTAMP_FIELDS``. Returning ``None`` is the intended
+    fallback — the UI drops the timestamp column rather than writing
+    「不明」(msg-137 §5 N-6).
+    """
+    for f in _MSG_TIMESTAMP_FIELDS:
+        v = msg.get(f)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def _default_next_participant_for_not_waiting(
+    messages: list[dict[str, Any]],
+) -> str:
+    """N-7: not_waiting のフォームの ``next_participant`` 既定値。
+
+    msg-137 §5: 「いまスレッドが待っている相手」に返すのが正しい宛先で、
+    駐機が無いこの分岐で ``_parked_author`` を流用すると意味がずれる ∴
+    最終 msg の構造化 ``next_participant``、無ければ最終 msg の著者。
+    どちらも空なら空文字 (template 側で participant_choices の先頭が
+    selected される)。
+    """
+    if not messages:
+        return ""
+    last = messages[-1]
+    np = last.get("next_participant")
+    if isinstance(np, str) and np:
+        return np
+    return str(last.get("author") or "")
+
+
+def _thread_is_closed(thread_meta: dict[str, Any]) -> bool:
+    """Return True when the thread rollup marks the thread as closed.
+
+    Einstein Objection (msg after Bohr's design): closed スレッドへの新規
+    メッセージ書き込みは Conclair が ``ChatroomStateError`` で確実に拒否する
+    ∴ closed に送信可能なフォームを描画すると「嘘の導線」になる。
+
+    Conclair の状態 enum は ``active / awaiting_reply / resolved / superseded
+    / parked`` (chatroom.py L1620-1621) ∴ 「決着した」の実体は ``resolved``
+    と ``superseded``。field 名は listing の "status" (chatroom.py L1629)。
+    ここでは case 完全一致で拾う (それ以外は "active" 相当として扱う =
+    フォームを描画する = 安全側の default)。
+    """
+    status = str(thread_meta.get("status") or "")
+    return status in ("resolved", "superseded")
+
+
 def _thread_page_url(project: str, thread_id: str) -> str:
     """`/ui` 側のスレッドページ URL を組み立てる。
 
@@ -357,6 +542,34 @@ def _thread_page_url(project: str, thread_id: str) -> str:
         f"/ui/projects/{quote(project, safe='')}"
         f"/threads/{quote(thread_id, safe='')}"
     )
+
+
+async def _load_material(
+    project: str, thread_id: str
+) -> tuple[dict[str, Any] | None, bool]:
+    """材料 store の 1 read を try/except に包む共通ヘルパ (msg-137 §6)。
+
+    Returns ``(material, ok)``:
+
+    - ``ok=True, material=dict``: 材料あり
+    - ``ok=True, material=None``: 材料なし (row 不在)
+    - ``ok=False, material=None``: store が例外 (fail-to-<something>)
+
+    判断 UI 側 (``material_state``) は既存挙動を保つため ``ok`` を読まない
+    (store 例外 → J-absent のまま)。新分岐 (``_classify_not_waiting``) だけが
+    ``ok`` を読んで ``store_unavailable`` を区別する。既存の J-* テストが
+    behavior-preserving の回帰ガード。
+    """
+    try:
+        store = _get_material_store()
+        material = await store.get_material(project=project, thread_id=thread_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "decision page: material lookup raised",
+            project=project, thread_id=thread_id, error=str(e),
+        )
+        return None, False
+    return material, True
 
 
 async def _load_judgement_context(project: str, thread_id: str) -> dict[str, Any]:
@@ -476,16 +689,11 @@ async def _render_decision_error_page(
         participant_choices.insert(0, next_participant_value)
 
     # Material lookup is best-effort. A store outage falls to J-absent
-    # (safer than pretending we have material) rather than 500.
-    material: dict[str, Any] | None = None
-    try:
-        store = _get_material_store()
-        material = await store.get_material(project=project, thread_id=thread_id)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "decision error re-render: material lookup raised, treating as J-absent",
-            project=project, thread_id=thread_id, error=str(e),
-        )
+    # (safer than pretending we have material) rather than 500. ``ok`` is
+    # unused here — the judgement UI keeps the pre-N-* behavior (store outage
+    # is J-absent). msg-137 §6: the shared helper deliberately does not change
+    # observable behavior for the judgement branch.
+    material, _material_ok = await _load_material(project, thread_id)
 
     material_state = _classify_judgement_state(material, head_msg_id)
     # J-stale 描画では材料テキストを template に渡さない (I-14 / spec §4-1)。
@@ -609,6 +817,23 @@ async def decision_page(
     thread_meta = result.get("thread") or {}
 
     if not messages or not _is_parked_to_human(messages[-1]):
+        # N-*: 「判断待ちではありません」を 3 状態に割る (msg-136 / msg-137).
+        # 材料と messages を元に、answered / advanced / undetermined を判定して
+        # 根拠を添える。判定できないもの (材料が無い・窓が届かない・末尾不完全
+        # など) は全部 undetermined に落ちる — 「回答済み」を根拠なく言わない、
+        # という中心規律 (msg-137 §2 の不変条件)。
+        material, material_ok = await _load_material(project, thread_id)
+        thread_head = _head_msg_id_from_thread(thread_meta)
+        nw_state, nw_evidence = _classify_not_waiting(
+            material=material,
+            material_ok=material_ok,
+            messages=messages,
+            thread_head=thread_head,
+        )
+        # Einstein Objection: closed スレッドではフォームを描画しない
+        # (Conclair が ChatroomStateError で拒否する ∴ 送信可能な form を
+        # 出すと嘘の導線になる)。
+        thread_closed = _thread_is_closed(thread_meta)
         return templates.TemplateResponse(
             request,
             "decisions_thread.html",
@@ -618,6 +843,20 @@ async def decision_page(
                 "thread_id": thread_id,
                 "thread_ui_url": thread_ui_url,
                 "thread_title": thread_meta.get("title") or thread_id,
+                "not_waiting_state": nw_state,
+                "not_waiting_evidence": nw_evidence,
+                "thread_closed": thread_closed,
+                "thread_status": str(thread_meta.get("status") or ""),
+                # I-12: フォームは 3 状態すべてで残す (msg-136 §4)。ただし
+                # closed スレッドでは template 側で描画しない。既定は最終
+                # msg の next_participant、無ければ最終 msg の著者
+                # (msg-137 §5 N-7)。
+                "next_participant_value": _default_next_participant_for_not_waiting(
+                    messages
+                ),
+                "participant_choices": _participant_choices(
+                    messages, _default_next_participant_for_not_waiting(messages)
+                ),
             },
             status_code=200,
             headers={"Cache-Control": _NO_STORE},
@@ -631,16 +870,9 @@ async def decision_page(
     # Material lookup is best-effort. spec §3.2 fail-to-stale の一貫適用:
     # store が落ちても J-absent (「材料が無い」) に倒す。J-fresh には決して
     # 落ちない — 我々が確認できなかったことを「新しい」と言わない
-    # (msg-093 §2 一般則 / msg-109 §7)。
-    material: dict[str, Any] | None = None
-    try:
-        store = _get_material_store()
-        material = await store.get_material(project=project, thread_id=thread_id)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "decision page: material lookup raised, treating as J-absent",
-            project=project, thread_id=thread_id, error=str(e),
-        )
+    # (msg-093 §2 一般則 / msg-109 §7)。判断 UI 側は ``ok`` を読まない
+    # (既存挙動を維持) — store 例外は J-absent のまま。
+    material, _material_ok = await _load_material(project, thread_id)
 
     material_state = _classify_judgement_state(material, head_msg_id)
     # I-14 (spec §4-1): J-stale では材料テキストを template に渡さない。
@@ -893,4 +1125,18 @@ __all__ = [
     "_choice_options_from_material",
     "_get_material_store",
     "_COMPOSER_STATUS_OK",
+    # N-1〜N-8: 「判断待ちではありません」の 3 状態分類 (msg-137)
+    "_classify_not_waiting",
+    "_is_human_decide",
+    "_msg_timestamp",
+    "_load_material",
+    "_default_next_participant_for_not_waiting",
+    "_thread_is_closed",
+    "_NW_STORE_UNAVAILABLE",
+    "_NW_NO_MATERIAL",
+    "_NW_MATERIAL_HEAD_UNREADABLE",
+    "_NW_NO_MESSAGES",
+    "_NW_HEAD_NOT_IN_WINDOW",
+    "_NW_TAIL_INCOMPLETE",
+    "_NW_HEAD_IS_CURRENT",
 ]
