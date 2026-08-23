@@ -1,16 +1,28 @@
 {% extends "base.html" %}
 
 {#
-  判断 (decision) ページ本体 — S5 増分 2。
-  同一テンプレートで 4 モードを分岐する:
-    - mode = "judgement"    → 判断 UI (form; D-31 エラー再描画も同じ mode)
+  判断 (decision) ページ本体 — S5 増分 2 + S5'' 材料 (3 状態).
+
+  spec:
+    - S5-decision-page.md (4 分岐 GET / opt-in POST / D-31 再描画)
+    - S5-decision-materials.md (J-fresh / J-stale / J-absent の 3 状態)
+
+  トップレベルは D-26' の 4 mode:
+    - mode = "judgement"    → 判断 UI (further split into 3 material states)
     - mode = "not_waiting"  → 「判断待ちではありません」+ chatroom 導線
     - mode = "unavailable"  → 503 相当 (Conclair 不達 / envelope 不明)
     - mode = "not_found"    → 404 (Conclair が明示的に無いと答えた)
 
-  設計原則: form はプレーン HTML (HTMX なし)。JS 無しでも送信・エラー再描画が
-  完結する。モバイル: 縦 1 カラム / 選択肢はカード / 幅 390px で横スクロール
-  無しで送信到達。spec: spec/slices/S5-decision-page.md §2。
+  judgement mode の内側で material_state で 3 状態に分岐:
+    - "fresh"  → 材料を全部描画 + choice_options (composer 由来)
+    - "stale"  → 材料を 1 文字も描画しない (I-14) + 警告のみ
+    - "absent" → 「材料が用意されていません」+ 導線のみ
+
+  設計原則:
+    - form はプレーン HTML (HTMX なし)。JS 無しでも送信・エラー再描画が完結。
+    - モバイル: 縦 1 カラム / 選択肢はカード / 幅 390px で横スクロール無し。
+    - **`|safe` は使わない** (spec S5-decision-materials.md §4-2 / §5)。
+      autoescape に任せる。`html.unescape()` も入れない (Tier-C msg-118 §3 実測)。
 #}
 
 {% block title %}判断 — {{ thread_title or thread_id }}{% endblock %}
@@ -29,28 +41,30 @@
   }
   .decision-container * { box-sizing: border-box; }
 
-  .decision-context {
-    background: #f6f8fa;
-    border: 1px solid #d0d7de;
+  .decision-question {
+    background: #ddf4ff;
+    border: 1px solid #54aeff;
     border-radius: 6px;
     padding: 0.75rem 1rem;
     margin-bottom: 1rem;
     overflow-wrap: anywhere;
   }
-  .decision-context h2 {
+  .decision-question h2 {
     font-size: 1rem;
     margin: 0 0 0.5rem;
     color: #24292f;
   }
-  .decision-context pre {
+  /* ★ ``.pre-wrap`` is applied to a TIGHT inline element wrapping the
+     composer variable only -- never on a container ``<div>`` that itself
+     holds template indentation. Applying ``white-space: pre-wrap`` to a
+     container makes the template's own leading whitespace and newlines
+     visible on screen (12 spaces of unintended indentation, blank lines
+     above headings). Composer-generated prose (question / recommendation
+     reason / gain / loss) is text -- we want its ``\n`` rendered as
+     line breaks, but only the *content*, not the frame. */
+  .pre-wrap {
     white-space: pre-wrap;
-    word-break: break-word;
-    font-family: inherit;
-    font-size: 0.95rem;
-    margin: 0;
-    color: #57606a;
-    max-height: 12rem;
-    overflow-y: auto;
+    overflow-wrap: anywhere;
   }
 
   .decision-error {
@@ -61,6 +75,25 @@
     border-radius: 6px;
     margin-bottom: 1rem;
     overflow-wrap: anywhere;
+  }
+
+  .decision-stale-warning {
+    background: #fff8c5;
+    border: 1px solid #d4a72c;
+    color: #57430b;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    overflow-wrap: anywhere;
+  }
+
+  .decision-absent {
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    color: #57606a;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
   }
 
   .decision-form label {
@@ -106,12 +139,64 @@
     font-size: 1rem;
     color: #24292f;
     cursor: pointer;
+    overflow-wrap: anywhere;
   }
   .decision-choice:hover { background: #f6f8fa; }
   .decision-choice.decision-choice-freeform {
     background: #ddf4ff;
     border-color: #54aeff;
     font-weight: 600;
+  }
+
+  /* J-fresh の option カード。label + gain / loss を積み上げる. */
+  .decision-choice-body {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+  /* .decision-choice-side wraps composer text (gain / loss) directly:
+     the span's HTML source is a single line with no template indentation
+     inside its tags, so white-space: pre-wrap here only preserves
+     newlines inside the variable value, which is the intended behavior.
+     Keep it tight. */
+  .decision-choice-side {
+    display: block;
+    font-size: 0.9rem;
+    color: #57606a;
+    font-weight: 400;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-top: 0.25rem;
+  }
+
+  .decision-recommendation {
+    background: #dafbe1;
+    border: 1px solid #4ac26b;
+    color: #1a7f37;
+    padding: 0.6rem 0.9rem;
+    border-radius: 6px;
+    margin: 1rem 0;
+    overflow-wrap: anywhere;
+    /* NOTE: newline-preserving whitespace handling is delegated to the
+       tight inline wrapper class -- do not add it to this container. */
+  }
+  .decision-recommendation strong { color: #1a7f37; }
+
+  .decision-unknowns {
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 0.6rem 0.9rem;
+    margin-top: 0.75rem;
+  }
+  .decision-unknowns h3 {
+    font-size: 0.95rem;
+    margin: 0 0 0.35rem;
+    color: #24292f;
+  }
+  .decision-unknowns ul {
+    margin: 0;
+    padding-left: 1.2rem;
   }
 
   .decision-links {
@@ -145,33 +230,118 @@
       </div>
     {% endif %}
 
-    {% if parked_msg_content %}
-      <div class="decision-context">
-        <h2>直前のメッセージ (from <code>{{ parked_author or "?" }}</code>)</h2>
-        <pre>{{ parked_msg_content }}</pre>
+    {# --- 3 状態の material 描画 (spec S5-decision-materials.md §4) --- #}
+    {#
+      J-fresh の描画順 (spec §4.1 / msg-117 §5): question → options →
+      recommendation + reason → unknowns → 自由記述 → next_participant.
+      question は非フォーム要素 ∴ form の外に置く. それ以外は 1 つの form
+      に収める (単一 <form>, POST は 1 回).
+
+      J-stale / J-absent: 材料は 1 文字も出さない (I-14). 警告 / 案内 1 行
+      と form (textarea + select + 自由記述送信) のみ.
+    #}
+    {% if material_state == "fresh" and material and material.question %}
+      {# The ``<span class="pre-wrap">`` is tight around the variable ONLY.
+         Do NOT move ``white-space: pre-wrap`` up to the container div
+         (see .decision-question CSS comment) -- template indentation
+         would render as visible whitespace in the pre-wrap box. #}
+      <div class="decision-question">
+        <h2>何を聞かれているか</h2><span class="pre-wrap">{{ material.question }}</span>
+      </div>
+    {% elif material_state == "stale" %}
+      <div class="decision-stale-warning" role="status">
+        <strong>この判断依頼の材料は古くなっています。</strong><br>
+        材料は
+        <code>{{ material_head_msg_id or "(不明)" }}</code>
+        時点のもので、スレッドは
+        <code>{{ thread_head_msg_id or "(不明)" }}</code>
+        まで進んでいます。最新の議論は chatroom で確認してください。
+      </div>
+    {% elif material_state == "absent" %}
+      <div class="decision-absent" role="status">
+        判断材料が用意されていません。chatroom でスレッド全体を読んでから
+        判断を送ってください。
       </div>
     {% endif %}
 
-    {# 単一 <form>。action は既存の /ui エンドポイント (POST 先を新設しない)。
-       msg-098 §2 / msg-097 §4.1: 選択肢ボタンは name="content" で value を運び、
-       _choice という別 field は作らない。 #}
+    {# 単一 <form>. action は既存の /ui エンドポイント (POST 先を新設しない). #}
     <form method="post"
           action="/ui/projects/{{ project }}/threads/{{ thread_id }}/messages"
           class="decision-form"
           accept-charset="UTF-8">
-      {# ★ opt-in トリガ (msg-103 §2)。判断ページ由来の POST であることを、
-         人の入力に依存しない専用フィールドで宣言する。
+      {# ★ opt-in トリガ (msg-103 §2). 判断ページ由来の POST であることを、
+         人の入力に依存しない専用フィールドで宣言する.
          value は非空 (`"1"`) でなければならない — 空 hidden `value=""` は
          現行 FastAPI で欠落 (`None`) と等価に潰れ、F-1 の穴に戻ってしまう
-         (msg-103 §3 / §4-1 で実測済み)。ハンドラは `== "1"` の値一致で判定する。
+         (msg-103 §3 / §4-1 で実測済み). ハンドラは `== "1"` の値一致で判定する.
          この 1 行を消すと、既存 `/ui` compose form と同一の経路 (opt-in 分岐を
-         通らない = バイト単位で既存挙動) に落ちる (G-1)。
+         通らない = バイト単位で既存挙動) に落ちる (G-1).
          msg-102 の欠陥 (`_freeform` の有無で判別しようとして F-1 の穴で
-         opt-in が起動しなかった) の再発を構造で防ぐための field。
-         spec `spec/slices/S5-decision-page.md` §3.2 / §11。 #}
+         opt-in が起動しなかった) の再発を構造で防ぐための field.
+         spec `spec/slices/S5-decision-page.md` §3.2 / §11. #}
       <input type="hidden" name="_decision_form" value="1">
       <input type="hidden" name="type" value="decide">
       <input type="hidden" name="author" value="human">
+
+      {# J-fresh の choice_options カード (spec §4.1). form の中に置く ∴
+         各カードは submit ボタンとして機能する. name="content" で id+label
+         を運ぶ. J-stale / J-absent では choice_options が空リスト (spec §4.2 /
+         §4.3) ∴ 何も出ず, カードから選ぶ経路は無い. #}
+      {% if choice_options %}
+        <div class="decision-choices">
+          {% for opt in choice_options %}
+            <button type="submit" name="content" value="{{ opt.value }}"
+                    class="decision-choice">
+              <span class="decision-choice-body">{{ opt.label }}</span>
+              {% if opt.gain %}
+                <span class="decision-choice-side">得るもの: {{ opt.gain }}</span>
+              {% endif %}
+              {% if opt.loss %}
+                <span class="decision-choice-side">失うもの: {{ opt.loss }}</span>
+              {% endif %}
+            </button>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% if material_state == "fresh" and material %}
+        {# J-fresh のみ. recommendation / unknowns も material が渡っている
+           ときだけ描画 (J-stale/absent では material=None ∴ ここも出ない
+           = I-14 の担保). #}
+        {% if material.recommendation or material.recommendation_reason %}
+          {# Every meaningful line is written as ONE physical line so no
+             template indentation leaks into the box. The ``{%- -%}``
+             modifiers strip whitespace around the tag itself, and the
+             composer's own text goes through ``.pre-wrap`` only. #}
+          <div class="decision-recommendation"
+            >{%- if material.recommendation -%}
+              <strong>推奨:</strong> {{ material.recommendation }}{%- if material.recommendation_reason %}<br>{% endif -%}
+            {%- endif -%}
+            {%- if material.recommendation_reason -%}
+              <span class="pre-wrap">{{ material.recommendation_reason }}</span>
+            {%- endif -%}
+          </div>
+        {% endif %}
+
+        {% if material.unknowns %}
+          <div class="decision-unknowns">
+            <h3>未確定事項</h3>
+            <ul>
+              {% for u in material.unknowns %}
+                <li>{{ u }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+      {% endif %}
+
+      <label for="free-textarea">自由記述 (常設)</label>
+      {# I-12: 常設. 選択に依存して現れない. ここに何か書けば、選択肢を押さずに
+         送信する第 3 のボタンで自由記述だけの決定を送れる. J-stale / J-absent
+         では選択肢ボタンが 0 件になる ∴ この textarea + freeform 送信ボタンが
+         判断を送る唯一の道になる (spec §4.2 / §4.3). #}
+      <textarea id="free-textarea" name="_freeform"
+                placeholder="この判断の背景・条件・訂正を書く. 選択肢を選ばずにこれだけで送ることもできる (I-12).">{{ freeform_value }}</textarea>
 
       <label for="np-select">次の担当 (<code>next_participant</code>)</label>
       <select id="np-select" name="next_participant">
@@ -181,28 +351,19 @@
         {% endfor %}
       </select>
 
-      <label for="free-textarea">自由記述 (常設)</label>
-      {# I-12: 常設。選択に依存して現れない。ここに何か書けば、選択肢を押さずに
-         送信する第 3 のボタンで自由記述だけの決定を送れる (spec §2.1)。 #}
-      <textarea id="free-textarea" name="_freeform"
-                placeholder="この判断の背景・条件・訂正を書く。選択肢を選ばずにこれだけで送ることもできる (I-12)。">{{ freeform_value }}</textarea>
-
       <div class="decision-choices">
-        {% for opt in choice_options %}
-          <button type="submit" name="content" value="{{ opt.value }}"
-                  class="decision-choice">{{ opt.label }}</button>
-        {% endfor %}
-        {# 3 つ目 (I-12): 自由記述だけで送るための submit。UI 上にこれが無ければ、
+        {# 「自由記述だけで送る」submit (I-12). UI 上にこれが無ければ、
            <form> は押されたボタンの name/value しか送らないので自由記述だけの
-           送信が物理的に不可能になる (msg-094 §3 / msg-098 §2)。
+           送信が物理的に不可能になる (msg-094 §3 / msg-098 §2). J-stale /
+           J-absent では判断を送る唯一の道になる.
 
            value は sentinel "(自由記述のみ)" — 純粋な空文字 `value=""` は FastAPI
            現行版が `content=` を「missing」として 422 に落とすことが実測で分かった
            (msg-097 §4.1 の「空文字は str として妥当 ∴ 422 にならない」が現行の
-           FastAPI 0.128 / pydantic 2.12 では成立しない)。既存 `content` param の
+           FastAPI 0.128 / pydantic 2.12 では成立しない). 既存 `content` param の
            signature を変えずに I-12 (「選択肢なしで自由記述のみ」) を成立させる
-           ための sentinel で、handler 側で空文字に正規化してから合成する。
-           spec `spec/slices/S5-decision-page.md` §3.1 の追記を参照。 #}
+           ための sentinel で, handler 側で空文字に正規化してから合成する.
+           spec `spec/slices/S5-decision-page.md` §3.1 の追記を参照. #}
         <button type="submit" name="content" value="(自由記述のみ)"
                 class="decision-choice decision-choice-freeform">
           自由記述だけで送る
@@ -217,7 +378,7 @@
   {% elif mode == "not_waiting" %}
     <h1>判断待ちではありません</h1>
     <p>スレッド <code>{{ thread_id }}</code> は現在、人の判断を待っている状態ではありません
-    (最終メッセージが <code>NEXT: human</code> ではない)。</p>
+    (最終メッセージが <code>NEXT: human</code> ではない).</p>
     <div class="decision-links">
       <a href="{{ thread_ui_url }}">chatroom でスレッドを開く →</a>
     </div>
@@ -226,7 +387,7 @@
     <h1>スレッドが見つかりません</h1>
     <p>{{ error_message }}</p>
     <p style="color:#57606a;">プロジェクト <code>{{ project }}</code> にこの ID のスレッドは
-    存在しません。URL に typo が無いか確かめてください。</p>
+    存在しません. URL に typo が無いか確かめてください.</p>
 
   {% elif mode == "unavailable" %}
     <h1>現在このスレッドの状態を確認できません</h1>

@@ -1,25 +1,29 @@
-r"""判断 (decision) ページ ― S5 増分 2 本体。
+r"""判断 (decision) ページ ― S5 増分 2 + S5'' 材料.
 
 Discord alert の通知本文が指す `/dashboard/decisions/{project}/{thread_id}`
 を、増分 1 のリダイレクト stub から**判断 UI 本体**に差し替える。URL は増分 1
 で敷いた契約のまま (`msg-087 §1` / spec `spec/slices/S5-decision-page.md`)、
-ハンドラの中身だけを差し替える。
+ハンドラの中身だけを差し替える。**S5'' で、判断 UI 分岐に材料 (question /
+options / gain / loss / …) を運び、3 状態 (J-fresh / J-stale / J-absent) に
+切り分けて描画する** (spec ``spec/slices/S5-decision-materials.md``)。
 
 このモジュールに置くべき理由 (触る前に読む 2 行)
 --------------------------------------------------
 
 - **この URL は出荷済みの契約である。** 動かさない。増分 1 と増分 2 の違いは
-  「同じ URL のハンドラが何を返すか」だけであって、URL そのものではない。
+  「同じ URL のハンドラが何を返すか」だけであって、URL そのものではない。S5''
+  も同じ規律 — 3 状態はハンドラ内部の切り分けであって URL の分割ではない。
 - **CI はページが外から見えるかを知らない。** 到達確認は :8443 に curl -L で
   外から叩き、最終 200 とタイトルを確かめる。CI 緑は必要条件、十分条件ではない
   (msg-084 §5。「実装済みに見えて何も出さない」型の事故は CI を素通りする)。
+  S5'' の受入基準 A-14 (材料の逐語 pin) はこの規律の実体である。
 
-D-26' の 4 分岐 (spec §1)
---------------------------
+D-26' の 4 分岐 (spec ``S5-decision-page.md`` §1)
+--------------------------------------------------
 
 Bohr の 3 分岐は「答えが得られたときの分類」であり、実装は必ず 4 通りになる:
 
-- 存在し、駐機中 → 200 判断 UI
+- 存在し、駐機中 → 200 判断 UI (S5'' で J-fresh / J-stale / J-absent の 3 状態に分割)
 - 存在するが駐機中でない → 200 「判断待ちではありません」+ chatroom 導線
 - 存在しない (Conclair が明示的に「無い」と答えた) → **404**
 - 取得できなかった (不達 / 例外 / それ以外の error envelope) → **503** + `/ui` 直リンク
@@ -39,8 +43,8 @@ match) を 404、それ以外の envelope・httpx 例外・タイムアウトは
 一律 503 にすると増分 2 で新設した 404 分岐が永遠に通らず、逆に一律 404 にすると
 Conclair 障害を「存在しない」と偽装する。
 
-駐機の判定 (spec §1 / msg-096 §2)
---------------------------------
+駐機の判定 (spec ``S5-decision-page.md`` §1 / msg-096 §2)
+---------------------------------------------------------
 
 **mindwire (`parked_humans.py`) が SOT。** magickit は単一スレッド判定のために
 mindwire を呼ばない (repo 跨ぎの依存を作らない・msg-084 §4)。
@@ -54,17 +58,50 @@ mindwire を呼ばない (repo 跨ぎの依存を作らない・msg-084 §4)。
 2. field を持たない旧 msg に限り、本文の**単独行 `^\s*NEXT:\s*human\s*$`**
    (case insensitive) を fallback で読む。この判定は `chatroom_writes` の D-30
    判定と**同一実装を共有**する (2 箇所で別々に書かない・spec §1)。
+
+S5'' — 判断材料の 3 状態 (spec ``S5-decision-materials.md`` §3)
+----------------------------------------------------------------
+
+駐機中 (mode=judgement) に到達した時、`decision_materials` テーブルを読み、
+`thread.last_msg_id` と材料の `head_msg_id` を比較して 3 状態を決める:
+
+- **J-fresh**: 材料あり ∧ 完全一致 → question / options / gain / loss / 推奨 /
+  unknowns を描画。選択肢ボタンの `content` は composer の option から
+  ``f"{id}: {label}"`` で導出 (spec §4.1)。
+- **J-stale**: 材料あり ∧ 完全一致でない (または head_msg_id が読めない) →
+  警告 + chatroom 導線 + 判断フォーム。**材料は 1 文字も描画しない** (I-14 /
+  spec §4-1 / §4.2)。CSS で隠すのでは足りない — view-source / コピペ /
+  スクリーンリーダに届く ∴ サーバ側で描画しない。
+- **J-absent**: 材料なし → 「材料が用意されていません」+ chatroom 導線 +
+  判断フォーム。**tail (末尾数通) を描画しない** (spec §4.3 / Einstein
+  msg-112 §3)。
+
+**fail-to-stale の既定** (spec §3.2): `thread.last_msg_id` が読めない
+(欠落 / null / 空文字) ときは **J-stale に倒す**。J-fresh に落とさない。
+「新しい」と主張してはならない (D-26' の 503 と同規律)。**P-9 が破れたとき
+の症状を「J-fresh が永久に出ない」に固定する** — この既定の価値は P-9 が
+真であることに依存しない (msg-118 §4 の Tier-C 指示)。
+
+エスケープ (spec §4-2 / Tier-C msg-118 §3)
+-------------------------------------------
+
+`html.unescape()` を**入れない** (無条件)。保存本文にエンティティは無く
+(Tier-C 実測)、混入があるなら描画経路 ∴ 直す場所は表示側ではない。
+材料は raw text として template に渡し、Jinja autoescape に任せる。
+``|safe`` は 1 か所も使わない (lint テストで拒否 — spec §5)。
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Body, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 
+from magickit.config import get_settings
+from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.utils.logging import get_logger
 from magickit.web.deps import templates
@@ -72,6 +109,20 @@ from magickit.web.deps import templates
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["decisions"])
+
+#: S5'' の材料 store を作る factory. tests でここを patch すれば in-memory /
+#: temp file の store を注入できる (module-level defaults を触らずに済む形)。
+#: 通常運用では ``get_settings().db_path`` を読み、``StateManager`` と同じ
+#: SQLite file を共有する。
+def _get_material_store() -> DecisionMaterialStore:
+    """Return a fresh ``DecisionMaterialStore`` bound to the configured db.
+
+    Called per-request; the store itself is stateless in Python and opens
+    a new aiosqlite connection per call. Tests patch this function to inject
+    a temp-file store (see ``tests/unit/test_decision_materials_*.py``).
+    """
+    settings = get_settings()
+    return DecisionMaterialStore(db_path=settings.db_path)
 
 #: 増分 1 から引き継ぐ Cache-Control。ハンドラ本体が実ページに変わっても、
 #: 302 の永久キャッシュを防ぐ趣旨は生きる (増分 3 で URL 契約が変わる余地を残す)。
@@ -244,6 +295,58 @@ def _participant_choices(
     return list(seen.keys())
 
 
+def _head_msg_id_from_thread(thread_meta: dict[str, Any]) -> str | None:
+    """Return the head msg id (``thread.last_msg_id``) or ``None``.
+
+    spec ``S5-decision-materials.md`` §3.1: freshness SOT is the thread
+    rollup, not ``messages[-1].msg_id``. The rollup is mode-independent
+    (``chatroom.py`` L1678-1682 docstring); using ``messages[-1]`` makes
+    the classification depend on whether the messages list happens to be
+    windowed, and a future caller changing ``mode=`` would silently
+    invalidate freshness.
+
+    Missing / null / empty string all collapse to ``None`` -- the caller
+    must treat that as "we don't know" and **fall to J-stale, not J-fresh**
+    (fail-to-stale, spec §3.2). The value of the fallback is that P-9
+    ("last_msg_id exists in live") breaking never expresses as J-fresh
+    silently returning an old material.
+    """
+    value = thread_meta.get("last_msg_id")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _classify_judgement_state(
+    material: dict[str, Any] | None,
+    head_msg_id: str | None,
+) -> str:
+    """Return one of ``"fresh"`` / ``"stale"`` / ``"absent"``.
+
+    spec §3 ordering:
+
+    1. No material stored → ``"absent"``.
+    2. Material stored, but head unknown → ``"stale"`` (fail-to-stale).
+    3. ``material.head_msg_id`` matches ``head_msg_id`` (byte-for-byte,
+       no normalization) → ``"fresh"``.
+    4. Otherwise → ``"stale"``.
+
+    The comparison is a plain ``==`` on strings. Normalization is
+    deliberately absent -- see spec §3.1 ("comparing after normalization
+    would interpret the other side's internal representation, which
+    msg-111 §3 forbids").
+    """
+    if material is None:
+        return "absent"
+    if head_msg_id is None:
+        return "stale"
+    material_head = material.get("head_msg_id")
+    if not isinstance(material_head, str) or material_head != head_msg_id:
+        return "stale"
+    return "fresh"
+
+
 def _thread_page_url(project: str, thread_id: str) -> str:
     """`/ui` 側のスレッドページ URL を組み立てる。
 
@@ -273,6 +376,47 @@ async def _load_judgement_context(project: str, thread_id: str) -> dict[str, Any
         await adapter.close()
 
 
+def _choice_options_from_material(material: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Derive the judgement page's choice buttons from composer material.
+
+    spec §4.1: the hardcoded 2-choice fallback is **abolished** (msg-117 §5).
+    Choice buttons only appear in J-fresh, and their ``content`` value is
+    ``f"{id}: {label}"`` -- ``id`` is preserved so the received msg carries
+    which option was selected, not just the text.
+
+    Returns ``[]`` when material is absent, options are missing, or any
+    option lacks an id/label. Empty return means "render no choice
+    buttons"; the "自由記述だけで送る" I-12 sentinel button is separate
+    and stays in the template for all 3 states.
+    """
+    if not material:
+        return []
+    options = material.get("options")
+    if not isinstance(options, list):
+        return []
+    built: list[dict[str, str]] = []
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        opt_id = opt.get("id")
+        label = opt.get("label")
+        if not isinstance(opt_id, str) or not opt_id:
+            continue
+        if not isinstance(label, str) or not label:
+            continue
+        built.append({
+            "id": opt_id,
+            "label": label,
+            "gain": str(opt.get("gain") or ""),
+            "loss": str(opt.get("loss") or ""),
+            # Value on the wire mirrors what the human sees. Chatroom
+            # parser expects the choice content to be the exact label
+            # the button showed (spec §4.1, matches msg-121 実タップ形).
+            "value": f"{opt_id}: {label}",
+        })
+    return built
+
+
 async def _render_decision_error_page(
     request: Request,
     *,
@@ -293,12 +437,17 @@ async def _render_decision_error_page(
     thread 文脈 (parked author / 参加者一覧 / タイトル) は Conclair から取り直す。
     Conclair も落ちていれば、最低限の form (single-entry select + textarea) に
     フォールバックする ∴ 入力が消えることは無い。
+
+    S5'' 更新: material も取り直す。J-fresh / J-stale / J-absent の 3 状態は
+    D-31 でも維持する — POST 中に material 側が更新される可能性があり、
+    「送信時は J-fresh、再描画時は J-stale」という遷移が起こりうる。
+    その場合は再描画側の状態を出す (**入力は残す**)。
     """
     # 文脈の復元は best-effort。落ちても入力保持が優先。
     parked_author = next_participant_value
     participant_choices = [next_participant_value] if next_participant_value else list(_HUMAN_IDENTITIES)
-    parked_msg_content = ""
     thread_title = thread_id
+    head_msg_id: str | None = None
     try:
         result = await _load_judgement_context(project, thread_id)
     except Exception as e:  # noqa: BLE001 - 復元失敗は最低限 form に落ちる
@@ -311,12 +460,12 @@ async def _render_decision_error_page(
             messages = result.get("messages") or []
             thread_meta = result.get("thread") or {}
             thread_title = thread_meta.get("title") or thread_id
+            head_msg_id = _head_msg_id_from_thread(thread_meta)
             if messages:
                 last = messages[-1]
                 candidate_parked = _parked_author(last)
                 if candidate_parked:
                     parked_author = candidate_parked
-                parked_msg_content = str(last.get("content") or "")
                 participant_choices = _participant_choices(messages, parked_author)
     # 「human」だけは常に含める。
     for h in _HUMAN_IDENTITIES:
@@ -325,6 +474,25 @@ async def _render_decision_error_page(
     # next_participant_value も候補に無ければ加える (D-31 で消さない)。
     if next_participant_value and next_participant_value not in participant_choices:
         participant_choices.insert(0, next_participant_value)
+
+    # Material lookup is best-effort. A store outage falls to J-absent
+    # (safer than pretending we have material) rather than 500.
+    material: dict[str, Any] | None = None
+    try:
+        store = _get_material_store()
+        material = await store.get_material(project=project, thread_id=thread_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "decision error re-render: material lookup raised, treating as J-absent",
+            project=project, thread_id=thread_id, error=str(e),
+        )
+
+    material_state = _classify_judgement_state(material, head_msg_id)
+    # J-stale 描画では材料テキストを template に渡さない (I-14 / spec §4-1)。
+    # サーバ側で描画しないと言うことは、テンプレートに文字列を渡さないこと
+    # で担保する (テンプレート側の if で「隠す」実装は I-14 を通さない)。
+    material_for_render = material if material_state == "fresh" else None
+    choice_options = _choice_options_from_material(material_for_render)
 
     return templates.TemplateResponse(
         request,
@@ -336,17 +504,16 @@ async def _render_decision_error_page(
             "thread_ui_url": _thread_page_url(project, thread_id),
             "thread_title": thread_title,
             "parked_author": parked_author,
-            "parked_msg_content": parked_msg_content,
             "participant_choices": participant_choices,
             "content_value": content_value,
             "freeform_value": freeform_value,
             "next_participant_value": next_participant_value or parked_author,
             "error_message": error_message,
-            # 選択肢セットは元 GET と同じ (差し戻された時に選び直せるように)。
-            "choice_options": [
-                {"label": "A: そのまま進める", "value": "A: そのまま進める"},
-                {"label": "B: 一旦止める / 修正が要る", "value": "B: 一旦止める / 修正が要る"},
-            ],
+            "material_state": material_state,
+            "material": material_for_render,
+            "material_head_msg_id": (material or {}).get("head_msg_id"),
+            "thread_head_msg_id": head_msg_id,
+            "choice_options": choice_options,
         },
         status_code=status_code,
         headers={"Cache-Control": _NO_STORE},
@@ -456,9 +623,32 @@ async def decision_page(
             headers={"Cache-Control": _NO_STORE},
         )
 
-    # 駐機中 → 判断 UI (200)。
+    # 駐機中 → 判断 UI (200)。S5'' で 3 状態に切り分ける。
     last = messages[-1]
     parked_author = _parked_author(last)
+    head_msg_id = _head_msg_id_from_thread(thread_meta)
+
+    # Material lookup is best-effort. spec §3.2 fail-to-stale の一貫適用:
+    # store が落ちても J-absent (「材料が無い」) に倒す。J-fresh には決して
+    # 落ちない — 我々が確認できなかったことを「新しい」と言わない
+    # (msg-093 §2 一般則 / msg-109 §7)。
+    material: dict[str, Any] | None = None
+    try:
+        store = _get_material_store()
+        material = await store.get_material(project=project, thread_id=thread_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "decision page: material lookup raised, treating as J-absent",
+            project=project, thread_id=thread_id, error=str(e),
+        )
+
+    material_state = _classify_judgement_state(material, head_msg_id)
+    # I-14 (spec §4-1): J-stale では材料テキストを template に渡さない。
+    # 「隠す」ではなく「渡さない」で担保する — 隠された文字列は view-source
+    # / コピペ / スクリーンリーダに届く。J-fresh のみ渡す。
+    material_for_render = material if material_state == "fresh" else None
+    choice_options = _choice_options_from_material(material_for_render)
+
     return templates.TemplateResponse(
         request,
         "decisions_thread.html",
@@ -469,21 +659,20 @@ async def decision_page(
             "thread_ui_url": thread_ui_url,
             "thread_title": thread_meta.get("title") or thread_id,
             "parked_author": parked_author,
-            "parked_msg_content": str(last.get("content") or ""),
             "participant_choices": _participant_choices(messages, parked_author),
             # 空の初期状態 (D-31 再描画ではないので入力保持なし)。
             "content_value": "",
             "freeform_value": "",
             "next_participant_value": parked_author,
             "error_message": None,
-            # 選択肢は将来「提示された選択肢」を Bohr の proposal から抽出して
-            # 差し込む余地を残す。増分 2 では固定 3 択 (「そのまま進める」/
-            # 「一旦止める」/ 空)。実運用では自由記述だけで送るケースが多い ∴
-            # I-12 (空選択で送れる) が最優先で、選択肢セットは薄く保つ。
-            "choice_options": [
-                {"label": "A: そのまま進める", "value": "A: そのまま進める"},
-                {"label": "B: 一旦止める / 修正が要る", "value": "B: 一旦止める / 修正が要る"},
-            ],
+            "material_state": material_state,
+            "material": material_for_render,
+            "material_head_msg_id": (material or {}).get("head_msg_id"),
+            "thread_head_msg_id": head_msg_id,
+            # 汎用 2 択は廃止 (spec §4.1 / msg-117 §5). J-fresh のときだけ
+            # composer の option 由来のカードを出す。J-stale / J-absent は
+            # 空配列 ∴ template は「自由記述だけで送る」ボタンだけを出す。
+            "choice_options": choice_options,
         },
         status_code=200,
         headers={"Cache-Control": _NO_STORE},
@@ -503,6 +692,194 @@ async def decisions_index_redirect() -> Response:
     )
 
 
+# --- S5'' 材料 API (spec spec/slices/S5-decision-materials.md §1) ---------
+
+#: composer_status のリテラル "ok" (spec §1.3)。等値比較 1 回のみ ∴
+#: parse ではない (`_decision_form == "1"` と同型)。
+_COMPOSER_STATUS_OK = "ok"
+
+
+def _bad_request(error_type: str, error: str, **details: Any) -> JSONResponse:
+    """Return a Conclair-style error envelope as JSON (400).
+
+    The judgement page and MCP tools both talk in ``{error_type, error,
+    details}`` envelopes; mindwire's push is a callback from the loop,
+    which reads envelopes in the same shape. Same schema, one renderer.
+    """
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error_type": error_type,
+            "error": error,
+            "details": details,
+        },
+    )
+
+
+@router.put("/v1/decisions/{project}/{thread_id}/material")
+async def put_decision_material(
+    project: str,
+    thread_id: str,
+    body: Annotated[dict[str, Any], Body()],
+) -> JSONResponse:
+    """UPSERT the composer material for ``(project, thread_id)`` (spec §1.1).
+
+    Wire shape (spec §1.1 table). ``head_msg_id`` is the only required
+    field; ``composer_status``, if present, must equal ``"ok"`` (spec
+    §1.3 -- we fail closed on the receive side even though mindwire is
+    supposed to filter first). All other fields are optional.
+
+    **Idempotency is structural**: SQLite ``INSERT OR REPLACE`` on
+    ``UNIQUE(project, thread_id)``. Response includes ``replaced`` so
+    callers can distinguish first-write from update.
+
+    **No auth here** (spec §9 / P-10). Auth is a land-order-3 concern
+    measured after the endpoint exists -- "測る前に塞がない"
+    (msg-122 §4). When P-10 is measured, add the auth check *at this
+    boundary*, not by inventing a hybrid API path.
+    """
+    if not isinstance(body, dict):
+        return _bad_request(
+            "InvalidMaterialPayload", "request body must be a JSON object"
+        )
+
+    head_msg_id = body.get("head_msg_id")
+    if not isinstance(head_msg_id, str) or not head_msg_id:
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "head_msg_id is required and must be a non-empty string",
+            head_msg_id=head_msg_id,
+        )
+
+    composer_status = body.get("composer_status")
+    # spec §1.3: 存在 ∧ "ok" 以外 → 400 で拒否、部分保存しない。
+    # 欠けている場合は検査しない (欠けている = "ok" と等価。過剰な要求を
+    # 供給側に押し付けない)。
+    if composer_status is not None and composer_status != _COMPOSER_STATUS_OK:
+        return _bad_request(
+            "ComposerStatusNotOk",
+            f"composer_status must be {_COMPOSER_STATUS_OK!r} to persist",
+            composer_status=composer_status,
+        )
+
+    # Optional fields with light shape validation. We do not validate
+    # inner shapes (e.g. option dict keys) beyond "is it a list" -- the
+    # renderer is defensive (`_choice_options_from_material` filters
+    # malformed rows), and rejecting on shape here would create a
+    # coupling where mindwire's next composer field addition requires a
+    # magickit schema bump. Keep the receiver permissive; keep the
+    # renderer strict (spec §4.1 filter).
+    signature = body.get("signature")
+    if signature is not None and not isinstance(signature, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "signature must be a string when present",
+        )
+    question = body.get("question")
+    if question is not None and not isinstance(question, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "question must be a string when present",
+        )
+    options = body.get("options")
+    if options is not None and not isinstance(options, list):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "options must be a list when present",
+        )
+    recommendation = body.get("recommendation")
+    if recommendation is not None and not isinstance(recommendation, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "recommendation must be a string when present",
+        )
+    recommendation_reason = body.get("recommendation_reason")
+    if recommendation_reason is not None and not isinstance(
+        recommendation_reason, str
+    ):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "recommendation_reason must be a string when present",
+        )
+    unknowns = body.get("unknowns")
+    if unknowns is not None and not isinstance(unknowns, list):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "unknowns must be a list when present",
+        )
+
+    store = _get_material_store()
+    try:
+        result = await store.put_material(
+            project=project,
+            thread_id=thread_id,
+            head_msg_id=head_msg_id,
+            signature=signature,
+            question=question,
+            options=options,
+            recommendation=recommendation,
+            recommendation_reason=recommendation_reason,
+            unknowns=unknowns,
+        )
+    except Exception as e:  # noqa: BLE001 - report the store outage instead of 500
+        logger.error(
+            "decision material PUT: store raised",
+            project=project, thread_id=thread_id, error=str(e),
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error_type": "MaterialStoreUnavailable",
+                "error": str(e),
+                "details": {"project": project, "thread_id": thread_id},
+            },
+        )
+
+    return JSONResponse(status_code=200, content=result)
+
+
+@router.get("/v1/decisions/{project}/{thread_id}/material")
+async def get_decision_material(project: str, thread_id: str) -> JSONResponse:
+    """Read back the stored material (spec §1.2).
+
+    **Purpose is external-facing verification** — the loop reads the
+    judgement page's own SQLite (no HTTP round-trip needed). This
+    endpoint exists so P-10 (auth) can be measured with "write then read"
+    (msg-118 §5 Tier-C direction: not "200 came back" but "the content I
+    PUT reads back").
+
+    404 (`MaterialNotStored`) when the row is missing; 200 with the
+    stored body otherwise.
+    """
+    store = _get_material_store()
+    try:
+        material = await store.get_material(project=project, thread_id=thread_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "decision material GET: store raised",
+            project=project, thread_id=thread_id, error=str(e),
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error_type": "MaterialStoreUnavailable",
+                "error": str(e),
+                "details": {"project": project, "thread_id": thread_id},
+            },
+        )
+
+    if material is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error_type": "MaterialNotStored",
+                "error": "no material stored for this (project, thread_id)",
+                "details": {"project": project, "thread_id": thread_id},
+            },
+        )
+    return JSONResponse(status_code=200, content=material)
+
+
 __all__ = [
     "router",
     "_is_parked_to_human",
@@ -511,4 +888,9 @@ __all__ = [
     "_render_decision_error_page",
     "_thread_page_url",
     "_participant_choices",
+    "_head_msg_id_from_thread",
+    "_classify_judgement_state",
+    "_choice_options_from_material",
+    "_get_material_store",
+    "_COMPOSER_STATUS_OK",
 ]
