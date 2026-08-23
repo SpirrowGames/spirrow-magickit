@@ -429,10 +429,10 @@ async def _lookup_one_with_budget(
 
 async def _participant_choices_registered(
     messages: list[dict[str, Any]], parked_author: str
-) -> tuple[list[str], set[str], bool]:
-    """Return the registered subset of the candidate list (I-19 / D-38).
+) -> tuple[list[str], set[str], bool, bool]:
+    """Return the registered subset of the candidate list (I-19 / D-37 / D-38).
 
-    Returns ``(choices, unknown_names, any_unknown)`` where:
+    Returns ``(choices, unknown_names, any_unknown, parked_author_unregistered)``:
 
     - ``choices`` is the ordered list of identity names to place in the
       select. It contains only names whose verdict is REGISTERED (D-36:
@@ -444,6 +444,15 @@ async def _participant_choices_registered(
       unavailable" notice (msg-146 §3 D-38 degradation copy).
     - ``any_unknown`` is a convenience flag; true iff Prismind was
       unreachable for at least one candidate.
+    - ``parked_author_unregistered`` is true iff the parked author was
+      non-empty AND Prismind actively answered UNREGISTERED for it (not
+      UNKNOWN, not "no lookup happened"). This is the D-37 condition:
+      Prismind is up, and it is *this one name* that is not a registered
+      identity ∴ the default target has been demoted to "宛先を送らない"
+      and the caller must render the specific 1-line reason (msg-146 §3
+      / msg-155 §5). D-38's "verification_unavailable" line covers a
+      different failure mode (Prismind unreachable); the two flags are
+      orthogonal and the template renders them independently.
 
     I-19: the verdict comes from ``chatroom_tools._lookup_identity``,
     the exact function the POST-time gate calls. A second implementation
@@ -468,14 +477,26 @@ async def _participant_choices_registered(
     # the budget for the small candidate counts this page sees.
     choices: list[str] = []
     unknown: set[str] = set()
+    # D-37: track the parked author's own verdict. Distinct from
+    # membership in ``choices`` because the caller needs to distinguish
+    # "we lost the default because Prismind timed out" (UNKNOWN → D-38
+    # line, "try again") from "we lost the default because this exact
+    # name is not registered" (UNREGISTERED → D-37 line, "register or
+    # pick another"). Two different remedies ∴ two different lines.
+    parked_verdict: str | None = None
     for name in candidates:
         verdict = await _lookup_one_with_budget(name, deadline)
+        if name == parked_author:
+            parked_verdict = verdict
         if verdict == _LookupVerdict.REGISTERED:
             choices.append(name)
         elif verdict == _LookupVerdict.UNKNOWN:
             unknown.add(name)
         # UNREGISTERED is silently dropped — that is the point of the filter.
-    return choices, unknown, bool(unknown)
+    parked_author_unregistered = bool(
+        parked_author and parked_verdict == _LookupVerdict.UNREGISTERED
+    )
+    return choices, unknown, bool(unknown), parked_author_unregistered
 
 
 def _resolve_default_target(
@@ -906,6 +927,7 @@ async def _render_decision_error_page(
     thread_title = thread_id
     head_msg_id: str | None = None
     verification_unavailable = False
+    parked_author_unregistered = False
     unknown_names: set[str] = set()
     context_messages: list[dict[str, Any]] = []
     try:
@@ -922,6 +944,9 @@ async def _render_decision_error_page(
         # takes precedence.
         participant_choices: list[str] = []
         verification_unavailable = True
+        # No lookup happened ∴ D-37 line stays silent (see the
+        # orthogonality note on _participant_choices_registered).
+        parked_author_unregistered = False
     else:
         if not _is_error(result):
             context_messages = result.get("messages") or []
@@ -937,6 +962,7 @@ async def _render_decision_error_page(
                 participant_choices,
                 unknown_names,
                 verification_unavailable,
+                parked_author_unregistered,
             ) = await _participant_choices_registered(
                 context_messages, parked_author
             )
@@ -945,6 +971,11 @@ async def _render_decision_error_page(
             # branch above — no candidates, mark verification unavailable.
             participant_choices = []
             verification_unavailable = True
+            # We could not verify; do NOT claim the parked author is
+            # unregistered. D-37 line only fires when Prismind actively
+            # answered "not registered" — silence otherwise (D-38 line
+            # is what covers "we could not verify").
+            parked_author_unregistered = False
 
     # I-20 (single source of truth): the *selected* value in the re-render
     # is the user's last choice iff it survived verification; otherwise
@@ -999,6 +1030,11 @@ async def _render_decision_error_page(
             "choice_options": choice_options,
             "verification_unavailable": verification_unavailable,
             "unknown_participant_count": len(unknown_names),
+            # D-37: Prismind is up, but *this exact* parked author is not a
+            # registered identity ∴ the default was demoted to NO_TARGET.
+            # Template renders a dedicated 1-line reason so the user knows
+            # WHY they landed on "宛先を送らない" (msg-146 §3 / msg-155 §5).
+            "parked_author_unregistered": parked_author_unregistered,
             "no_target_value": NO_TARGET_VALUE,
             "no_target_label": NO_TARGET_LABEL,
             "freeform_only_value": _FREEFORM_ONLY_VALUE,
@@ -1123,6 +1159,7 @@ async def decision_page(
             nw_participant_choices,
             _nw_unknown_names,
             nw_verification_unavailable,
+            nw_parked_author_unregistered,
         ) = await _participant_choices_registered(messages, default_next)
         nw_default_target = _resolve_default_target(default_next, nw_participant_choices)
         return templates.TemplateResponse(
@@ -1145,6 +1182,16 @@ async def decision_page(
                 "next_participant_value": nw_default_target,
                 "participant_choices": nw_participant_choices,
                 "verification_unavailable": nw_verification_unavailable,
+                # D-37 (msg-146 §3 / msg-155 §5): same one-line reason on
+                # the not_waiting "書き足す" form ∴ the "why did I land on
+                # 宛先を送らない" question has the same answer on both
+                # forms. Keeping this per-form so a future template split
+                # cannot leave one form silent. ``parked_author`` here is
+                # the not_waiting form's default_next (the last msg's own
+                # next_participant / author) — the name the D-37 line
+                # points at.
+                "parked_author": default_next,
+                "parked_author_unregistered": nw_parked_author_unregistered,
                 "no_target_value": NO_TARGET_VALUE,
                 "no_target_label": NO_TARGET_LABEL,
                 "freeform_only_value": _FREEFORM_ONLY_VALUE,
@@ -1182,6 +1229,7 @@ async def decision_page(
         participant_choices,
         _unknown_names,
         verification_unavailable,
+        parked_author_unregistered,
     ) = await _participant_choices_registered(messages, parked_author)
     default_target = _resolve_default_target(parked_author, participant_choices)
 
@@ -1211,6 +1259,12 @@ async def decision_page(
             # 空配列 ∴ template は「自由記述だけで送る」ラジオだけを出す。
             "choice_options": choice_options,
             "verification_unavailable": verification_unavailable,
+            # D-37 (msg-146 §3 / msg-155 §5): 1-line reason when Prismind
+            # is up but the parked author itself is not a registered
+            # identity ∴ the default was demoted to "宛先を送らない".
+            # Distinct from D-38 (Prismind unreachable) — see the docstring
+            # on _participant_choices_registered for the orthogonality.
+            "parked_author_unregistered": parked_author_unregistered,
             "no_target_value": NO_TARGET_VALUE,
             "no_target_label": NO_TARGET_LABEL,
             "freeform_only_value": _FREEFORM_ONLY_VALUE,

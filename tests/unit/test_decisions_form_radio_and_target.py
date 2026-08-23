@@ -546,6 +546,214 @@ async def test_d37_default_is_no_target_when_parked_author_is_pr_gate_relay():
     assert "selected" in r.text[open_idx:idx]
 
 
+# --- D-37 (the *line*): Prismind is UP, parked author is UNREGISTERED ----
+# Bohr msg-155 §5 gap: the D-37 default-demotion tests above check the
+# *selected value* but never that the user is told WHY. The 1-line reason
+# was frozen in msg-146 §3 ("理由を画面に 1 行出す") and the earlier round
+# of A-24 fixtures did not touch it (the fixture's parked author was not
+# pr-gate-relay ∴ D-37 never fired). These tests close that gap 0-tap.
+
+
+def test_d37_participant_choices_returns_parked_unregistered_true(monkeypatch):
+    """The tuple's 4th element (``parked_author_unregistered``) is TRUE
+    iff Prismind actively answered ``found=False`` for the parked author.
+
+    This is the exact predicate the D-37 line hangs on. Locking it as a
+    unit so a template edit and a backend edit cannot drift silently."""
+    async def per_name(name: str, **_):
+        # Only "pr-gate-relay" is unregistered; everything else registered.
+        if name == "pr-gate-relay":
+            return _lookup(found=False)
+        return _lookup(found=True)
+
+    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
+
+    messages = [
+        {"author": "Bohr", "content": "propose", "next_participant": "human"},
+        {"author": "pr-gate-relay", "content": "review posted",
+         "next_participant": "human"},
+    ]
+    choices, unknown, any_unknown, parked_unregistered = asyncio.run(
+        decision_page._participant_choices_registered(
+            messages, parked_author="pr-gate-relay"
+        )
+    )
+    assert "pr-gate-relay" not in choices
+    assert unknown == set()
+    assert any_unknown is False
+    # ★ The D-37 predicate.
+    assert parked_unregistered is True
+
+
+def test_d37_participant_choices_parked_unregistered_false_when_registered(monkeypatch):
+    """When Prismind answers ``found=True`` for the parked author, D-37
+    does not fire — the default sits on the parked author as designed."""
+    async def per_name(name: str, **_):
+        return _lookup(found=True)
+
+    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
+
+    messages = [
+        {"author": "Bohr", "content": "propose", "next_participant": "human"},
+    ]
+    _c, _u, any_unknown, parked_unregistered = asyncio.run(
+        decision_page._participant_choices_registered(
+            messages, parked_author="Bohr"
+        )
+    )
+    assert any_unknown is False
+    assert parked_unregistered is False
+
+
+def test_d37_participant_choices_parked_unknown_does_not_set_unregistered(monkeypatch):
+    """★ D-37 vs D-38 orthogonality: when Prismind is UNREACHABLE for the
+    parked author (``unavailable_reason`` set → UNKNOWN verdict), the
+    D-37 flag stays FALSE. D-38's ``verification_unavailable`` line is
+    what covers this case; showing the D-37 "not a registered identity"
+    line here would be a false accusation (we did not measure anything).
+    """
+    async def per_name(name: str, **_):
+        return _lookup(found=False, unavailable_reason="prismind down")
+
+    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
+
+    messages = [
+        {"author": "pr-gate-relay", "content": "x", "next_participant": "human"},
+    ]
+    _c, _u, any_unknown, parked_unregistered = asyncio.run(
+        decision_page._participant_choices_registered(
+            messages, parked_author="pr-gate-relay"
+        )
+    )
+    assert any_unknown is True                # D-38 line will fire
+    assert parked_unregistered is False       # D-37 line stays silent
+
+
+def test_d37_participant_choices_empty_parked_author_never_sets_flag(monkeypatch):
+    """An empty parked author has nothing to accuse ∴ the flag is FALSE
+    unconditionally. Rules out a degenerate case where a missing
+    ``last_msg.author`` would light up the D-37 line."""
+    async def per_name(name: str, **_):
+        return _lookup(found=False)
+
+    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
+
+    messages = [{"author": "Bohr", "content": "x", "next_participant": "human"}]
+    _c, _u, _any_unknown, parked_unregistered = asyncio.run(
+        decision_page._participant_choices_registered(messages, parked_author="")
+    )
+    assert parked_unregistered is False
+
+
+@pytest.mark.asyncio
+async def test_d37_line_appears_when_parked_author_is_unregistered():
+    """★ msg-155 §5 gap-closer / msg-146 §3 逐語 ("理由を画面に 1 行出す"):
+    Prismind is UP, the parked author is ``pr-gate-relay``, ∴ the page
+    renders a *specific* 1-line reason so the user knows WHY the default
+    landed on "宛先を送らない" (a silent demotion would look like a bug).
+
+    The exact string is asserted so a rewrite that softens or drops the
+    message trips this test — the reason line is the whole point of D-37.
+    """
+    payload = {
+        "thread": {"title": "T-d37-line"},
+        "messages": [
+            {"author": "Bohr", "content": "propose", "next_participant": "human"},
+            {"author": "pr-gate-relay", "content": "review posted",
+             "next_participant": "human"},
+        ],
+        "mode": "full",
+    }
+    adapter = _adapter_returning(payload)
+
+    async def per_name(name: str, **_):
+        if name == "pr-gate-relay":
+            return _lookup(found=False)
+        return _lookup(found=True)
+
+    with (
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+        patch.object(decision_page, "_resolve_identity", side_effect=per_name),
+    ):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # The 1-line reason names the specific identity (the offending name)
+    # and states the remedy (select a target OR write NEXT: in the body).
+    assert "登録済 identity ではありません" in r.text
+    assert "既定を" in r.text and "宛先を送らない" in r.text
+    # The offending name appears — future eyes need to see WHICH name
+    # tripped the check, not just "some author was unregistered".
+    assert "pr-gate-relay" in r.text
+    # The remedy is spelled out (both options).
+    assert "select" in r.text and "NEXT:" in r.text
+    # The container class is stable so CSS / a11y hooks are safe.
+    assert 'class="decision-parked-unregistered"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_d37_line_stays_silent_when_parked_author_is_registered():
+    """Negative side of the pin: no D-37 line when the parked author IS
+    registered. A false-positive here would make the page shout at users
+    for a normal handoff — much worse than staying silent."""
+    payload = {
+        "thread": {"title": "T-d37-silent"},
+        "messages": [
+            {"author": "Bohr", "content": "propose", "next_participant": "human"},
+        ],
+        "mode": "full",
+    }
+    adapter = _adapter_returning(payload)
+
+    with (
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+        patch.object(
+            decision_page, "_resolve_identity",
+            AsyncMock(return_value=_lookup(found=True)),
+        ),
+    ):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # No D-37 markup, no D-37 copy.
+    assert 'class="decision-parked-unregistered"' not in r.text
+    assert "登録済 identity ではありません" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_d37_line_stays_silent_when_prismind_is_unavailable():
+    """★ D-37 vs D-38 orthogonality end-to-end: on a Prismind outage the
+    D-38 "verification unavailable" line is what fires. The D-37 line
+    would be a false accusation (we did not measure anything for the
+    parked author) ∴ MUST NOT appear even when the default landed on
+    NO_TARGET for reasons that look adjacent.
+    """
+    payload = {
+        "thread": {"title": "T-d37-vs-d38"},
+        "messages": [
+            {"author": "pr-gate-relay", "content": "x", "next_participant": "human"},
+        ],
+        "mode": "full",
+    }
+    adapter = _adapter_returning(payload)
+
+    with (
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+        patch.object(
+            decision_page, "_resolve_identity",
+            AsyncMock(return_value=_lookup(found=False, unavailable_reason="down")),
+        ),
+    ):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # D-38 line: yes.
+    assert "宛先候補を検証できませんでした" in r.text
+    # D-37 line: no (we did not measure).
+    assert 'class="decision-parked-unregistered"' not in r.text
+    assert "登録済 identity ではありません" not in r.text
+
+
 # --- D-38: fail-closed on UNKNOWN verdict --------------------------------
 
 

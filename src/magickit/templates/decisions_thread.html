@@ -474,6 +474,20 @@
           本文の <code>NEXT:</code> 行で指定するか, 後で再読込してください.
         </div>
       {% endif %}
+      {# ★ D-37 (msg-146 §3 / Bohr msg-155 §5):
+         Prismind は生きているが, 駐機 msg の著者は登録済 identity ではない
+         ∴ 既定を "宛先を送らない" に demote した理由を 1 行出す. これを
+         verification_unavailable の下に置くのは意図的: D-38 は "測れなかった
+         (再試行できる)", D-37 は "測って未登録だった (再試行しても同じ)"
+         で残された行動が違う ∴ 両方見える必要がある.
+      #}
+      {% if parked_author_unregistered %}
+        <div class="decision-parked-unregistered" role="status">
+          <code>{{ parked_author }}</code> は登録済 identity ではありません
+          ∴ 既定を "宛先を送らない" に落としました. select で送り先を選ぶか,
+          自由記述に単独行で <code>NEXT: &lt;名前&gt;</code> を書いてください.
+        </div>
+      {% endif %}
 
       {# ★ D-35 (msg-146 §2): 送信は単一の primary ボタン. `name` 属性を
          持たせない (余分な field を送らない). ここを押すまで POST は起きない.
@@ -598,6 +612,17 @@
             <div class="decision-verify-warning" role="status">
               宛先候補を検証できませんでした. 表示している候補は限定的です;
               本文の <code>NEXT:</code> 行で指定するか, 後で再読込してください.
+            </div>
+          {% endif %}
+          {# D-37 (msg-146 §3 / Bohr msg-155 §5): 同じ 1 行を "書き足す" form
+             にも出す ∴ 「なぜ既定が "宛先を送らない" になっているか」の
+             答えが 2 つの form で同じになる (msg-140 の欠陥は本 form でも
+             再演し得た). #}
+          {% if parked_author_unregistered %}
+            <div class="decision-parked-unregistered" role="status">
+              <code>{{ parked_author }}</code> は登録済 identity ではありません
+              ∴ 既定を "宛先を送らない" に落としました. select で送り先を選ぶか,
+              自由記述に単独行で <code>NEXT: &lt;名前&gt;</code> を書いてください.
             </div>
           {% endif %}
 

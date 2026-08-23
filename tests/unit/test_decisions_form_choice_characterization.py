@@ -144,6 +144,90 @@ async def test_i18_msg121_freeform_only_wire_bytes_stable():
     assert kwargs["content"] == "NEXT: Bohr"
 
 
+# --- Pin 2b: P-14 choice + freeform byte-exact synthesis (Bohr msg-155 §3(d)) --
+
+
+def test_p14_pure_compose_choice_and_freeform_bytes_are_exactly_specified():
+    """★ Bohr msg-155 §3(d): the choice + freeform composition (P-14 in
+    spec §13.8) is a first-run path in production and A-25 measures it
+    live. If we don't pin the byte-exact expectation here, A-25 has no
+    "what should this be?" to check the live 200 against — a 200 that
+    quietly munged the newlines would still pass.
+
+    This test locks the **exact bytes** the `_compose_decision_body`
+    helper emits for the two-input case, without any HTTP or handler
+    machinery in the way. I-6 (preserve original text): no trim, no
+    normalisation, exactly two newlines between the choice line and the
+    freeform. The pure helper is the SOT; higher-level tests that assert
+    the same shape via the HTTP surface stay too (two independent handles).
+    """
+    from magickit.web import decisions as decision_page
+
+    # The exact bytes A-27 measures live. Anything other than these bytes
+    # is a P-14 regression.
+    assert decision_page._compose_decision_body(
+        "A: そのまま進める",
+        "理由: すでに検証済み",
+    ) == "A: そのまま進める\n\n理由: すでに検証済み"
+
+    # A NEXT: line appended by D-30 downstream must not change the shape
+    # of the choice→freeform join. The choice-freeform boundary is one
+    # blank line even when D-30 will add another blank + NEXT: after it.
+    body = decision_page._compose_decision_body(
+        "A: そのまま進める",
+        "理由: すでに検証済み",
+    )
+    with_next = decision_page._maybe_append_next(body, "Bohr")
+    assert with_next == (
+        "A: そのまま進める\n\n理由: すでに検証済み\n\nNEXT: Bohr"
+    )
+
+
+@pytest.mark.asyncio
+async def test_p14_http_choice_and_freeform_wire_bytes_stable():
+    """The same P-14 composition via the actual HTTP handler, so a rewrite
+    of the handler ordering (e.g. moving compose after D-30, or trimming
+    inputs) cannot pass while the pure helper stays intact. Bohr msg-155
+    §3(d): "バイト単位の期待を unit で pin していないなら, A-25 は
+    『何を期待するか』を持たずに走る".
+
+    Overlaps with ``test_choice_button_and_freeform_are_composed_with_blank_line``
+    on purpose (I-18 "locally-obvious in the file that guards the
+    rewrite"): a rename of the other test cannot silently drop this pin.
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "m-p14", "type": "decide"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "decide",
+                "author": "human",
+                "_decision_form": "1",
+                "content": "A: そのまま進める",
+                "_freeform": "理由: すでに検証済み",
+                "next_participant": "Bohr",
+            },
+        )
+
+    assert r.status_code == 303  # opt-in fired
+    kwargs = adapter.post_message.call_args.kwargs
+    # Byte-exact — no trim, no smart-quote, no collapsing whitespace.
+    # NEXT: appended by D-30 because the freeform has no standalone
+    # ``NEXT:`` line (spec §3.5).
+    assert kwargs["content"] == (
+        "A: そのまま進める\n\n理由: すでに検証済み\n\nNEXT: Bohr"
+    )
+
+
 # --- Pin 3: G-1 bit-identical POST (Einstein §2 / spec §3.2) -----------
 
 

@@ -567,9 +567,25 @@ FastAPI 422 に落ちる (msg-146 §5(a) が名指しした罠)。
   UNKNOWN 扱い。順序は sequential (総 wall-clock を予算にキャップする; gather
   だと 4 × N 秒に膨らむ)。
 
-**degradation 表示**: `verification_unavailable=True` のとき template に 1 行
+**degradation 表示** (D-38): `verification_unavailable=True` のとき template に 1 行
 「宛先候補を検証できませんでした。表示している候補は限定的です; 本文の
 `NEXT:` 行で指定するか, 後で再読込してください.」を出す。
+
+**D-37 の 1 行 (msg-146 §3 逐語 / Bohr msg-155 §5 が gap を報告)**:
+`parked_author_unregistered=True` のとき、**D-38 とは独立した** 1 行を出す:
+「`<parked_author>` は登録済 identity ではありません ∴ 既定を "宛先を送らない"
+に落としました. select で送り先を選ぶか, 自由記述に単独行で `NEXT: <名前>` を
+書いてください.」
+
+**なぜ D-38 と分けるか (直交性)**: D-38 は「Prismind に届かなかった / 遅かった」=
+**再試行できる**。D-37 は「Prismind は答えた: この名前は未登録」= **再試行しても同じ**。
+残された行動が違う ∴ 文言も分ける。両方同時に真になり得る (別 candidate の
+UNKNOWN と、parked_author の UNREGISTERED) ため片方に畳めない。
+
+**D-37 が UNKNOWN では発火しない (fail-open にしない)**: Prismind が parked_author を
+測れていないときは D-38 だけを出す。「未登録」と断定していないので D-37 の文言は
+虚偽になる (msg-084 §5 の「実測なしに主張する」パターンの再演)。実装は
+`_participant_choices_registered` 内で verdict==UNREGISTERED のときだけ flag を上げる。
 
 ### 13.5 I-20: "宛先を送らない" を選んだときの handler 側規律
 
@@ -604,6 +620,13 @@ characterization test で固定する:
 
 **実装**: `tests/unit/test_decisions_form_choice_characterization.py`。順序を
 逆にする (書いてから test) と、書き換え後の挙動を "正解" として固定してしまう。
+
+**P-14 の byte-exact pin (Bohr msg-155 §3(d) 追加)**: `test_p14_pure_compose_
+choice_and_freeform_bytes_are_exactly_specified` が pure helper (`_compose_
+decision_body`) と HTTP 経路 (`test_p14_http_choice_and_freeform_wire_bytes_
+stable`) の両方で `"A: そのまま進める\n\n理由: すでに検証済み\n\nNEXT: Bohr"`
+を pin する。**A-27 (実タップ) が「何を期待するか」を持って走れるよう unit で
+byte を固定する** — 200 を返しただけで pass にしない。
 
 ### 13.8 前提表 (Bohr msg-146 §6 継承 + 追記)
 
