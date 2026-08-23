@@ -93,7 +93,9 @@ S5'' — 判断材料の 3 状態 (spec ``S5-decision-materials.md`` §3)
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -260,22 +262,32 @@ def _parked_author(last_msg: dict[str, Any]) -> str:
     return str(last_msg.get("author") or "")
 
 
-def _participant_choices(
+def _candidate_authors(
     messages: list[dict[str, Any]], parked_author: str
 ) -> list[str]:
-    """select に並べる identity 一覧。
+    """Return the candidate identity list *before* the registry filter.
 
-    値域は登録済 identity のみ (msg-084 §2)。厳密には Prismind への問合せが要るが:
+    Bohr §3 (msg-146): candidate generation is unchanged — this is the
+    "who might we hand off to" question, which we can answer from thread
+    state without Prismind. The filter that decides *which* of these
+    resolve to a registered identity is applied in
+    ``_participant_choices_registered`` below.
 
-    - Prismind をクリティカルパスに置くと、Prismind 落ちで判断ページが描けなくなる。
-    - 万一未登録の名前を選んでも、POST 時に ``NextParticipantUnknownError`` (未登録)
-      で弾かれ、D-31 の入力保持再描画に落ちる ∴ 安全側の failure mode。
+    Ordering rules (Bohr §3 D-37): ``parked_author`` sits at index 0 so
+    the default ``selected`` in the template lines up with the parked
+    author (subject to the D-37 caveat that the default is *demoted* to
+    "宛先を送らない" when it does not resolve as registered). ``human`` is
+    appended at the end; it is a measured constant (see A-23(i) in
+    msg-146 §5) and always belongs in the candidate list even when the
+    thread has never seen a message from ``human``.
 
-    ∴ 実装形は「thread に現れる distinct な author + ``human``」で近似する。
-    thread に参加している actor は概ね登録済で、``human`` は必ず含める (人が
-    自分に返すケースがある = 「まだ考え中」を残す判断)。``parked_author`` は
-    先頭に置き、select の既定値と一致させる。``none`` / ``pr-review <ref>`` の
-    reserved は出さない (magickit が弾く。終端は closes_thread で表現する)。
+    **The old ``none`` / ``pr-review*`` exclusion is deliberately gone.**
+    The registry filter answers the same question with the actual
+    authority (I-19 / D-36) — keeping a spelled-out denylist here would
+    reintroduce the "two implementations of the same rule" trap that
+    msg-140 §4 named. When the filter is bypassed (the sync-legacy call
+    site — see the wrapper below), those tokens fall through to the
+    consumer and the POST-time gate rejects them just as it does today.
     """
     seen: dict[str, None] = {}
     if parked_author:
@@ -284,15 +296,207 @@ def _participant_choices(
         author = str(msg.get("author") or "").strip()
         if not author or author in seen:
             continue
-        # reserved words を出さない (magickit が弾く。spec §2.3)。
-        if author == "none" or author.startswith("pr-review"):
-            continue
         seen[author] = None
-    # human は必ず含める (parked_author が human なら既に入っている)。
+    # ``human`` is a measured constant (A-23(i), msg-146 §5): the gate
+    # accepts it. It always belongs in the candidate list; a later filter
+    # is allowed to drop it (D-38 fail-closed) only when Prismind actively
+    # answered "not registered" — the "no verdict" case keeps it, since
+    # that is what the constant is *for*.
     for h in _HUMAN_IDENTITIES:
         if h not in seen:
             seen[h] = None
     return list(seen.keys())
+
+
+def _participant_choices(
+    messages: list[dict[str, Any]], parked_author: str
+) -> list[str]:
+    """Backwards-compatible sync wrapper around ``_candidate_authors``.
+
+    ``_render_decision_error_page`` used to call this synchronously, and
+    the fallback path (Conclair failed → we build the form with a
+    single-entry select) still needs a synchronous list. In the normal
+    path the async ``_participant_choices_registered`` is used instead
+    (I-19). Keeping the same name so tests / callers that only ever exit
+    through the fallback path do not shift.
+    """
+    return _candidate_authors(messages, parked_author)
+
+
+#: I-20 sentinel value for the "宛先を送らない" select option (msg-146 §3).
+#: Wire value is the empty string, which is what ``_check_next_participant``
+#: already treats as caller opt-out (single-source: the same rule the MCP
+#: tool uses). The visible label is separate — see the template's option
+#: rendering. Do **NOT** invent a distinct non-empty sentinel: that would
+#: mean two ways to spell "no target" and the POST-time gate would have to
+#: learn about it.
+NO_TARGET_VALUE = ""
+NO_TARGET_LABEL = "宛先を送らない (本文の NEXT: 行に従う)"
+
+#: I-20 error message shown when the human picked "宛先を送らない" but did
+#: not put a standalone handoff-target line in the body (msg-146 §3 I-20).
+#: **Kept here** because ``NEXT:`` is a consumer-routing literal and
+#: ``chatroom_writes.py`` is on the msg-072 §1 no-vocabulary list. The
+#: message names both remedies (spec I-20 逐語).
+NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE = (
+    "宛先が指定されていません。"
+    "select で送り先を選ぶか、"
+    f"自由記述に単独行で ``{_NEXT_KEYWORD} <名前>`` を書いてください。"
+)
+
+#: I-12 sentinel for the "自由記述だけで送る" radio (spec §3.1a).
+#: Also imported by ``chatroom_writes`` for handler-side normalisation —
+#: keep exactly one literal spelling of this string in the codebase so a
+#: template edit and a handler edit cannot silently drift apart. The
+#: handler side's constant (``_FREEFORM_ONLY_SENTINEL`` in
+#: ``chatroom_writes``) re-imports this to preserve that invariant.
+_FREEFORM_ONLY_VALUE = "(自由記述のみ)"
+
+
+class _LookupVerdict:
+    """Three-value verdict for D-38 (spec msg-146 §3).
+
+    - ``REGISTERED``: Prismind answered ``found=True``.
+    - ``UNREGISTERED``: Prismind answered ``found=False`` (a real "no").
+    - ``UNKNOWN``: Prismind gave no usable verdict (outage / timeout /
+      contract violation / render-budget exhausted). D-38 fail-closed:
+      the caller drops these rather than treating them as UNREGISTERED
+      (an outage would falsely evict all valid candidates) or as
+      REGISTERED (that is the "we can't measure so let it in" trap this
+      whole spec was written to stop).
+    """
+
+    REGISTERED = "registered"
+    UNREGISTERED = "unregistered"
+    UNKNOWN = "unknown"
+
+
+#: Per-lookup timeout (seconds). Deliberately short: the adapter's own
+#: default is 240--360s (CLAUDE.md), which would let a slow Prismind
+#: freeze the whole judgement page. This bound is applied per candidate;
+#: exceeding it lands the candidate on the UNKNOWN branch (D-38).
+_LOOKUP_TIMEOUT_S = 1.0
+
+#: Per-render total budget (seconds). Once exhausted, remaining
+#: candidates are counted as UNKNOWN without a Prismind call at all.
+#: Chosen so a fully-cold render on a 4-candidate thread stays under 5s
+#: end-to-end even in the worst case (each lookup at ``_LOOKUP_TIMEOUT_S``).
+_RENDER_BUDGET_S = 4.0
+
+
+async def _resolve_identity(name: str):
+    """Thin wrapper around ``chatroom_tools._lookup_identity``.
+
+    Exists so unit tests can stub the render-critical-path Prismind
+    lookup by patching **this module's** binding without polluting
+    ``chatroom_tools._lookup_identity`` — the latter is what the
+    role / next_participant / pr-gate tests deliberately drive through
+    mocked ``_prismind_adapter``. Two consumers, one function, but the
+    tests need to swap them independently.
+    """
+    return await chatroom_tools._lookup_identity(name)
+
+
+async def _lookup_one_with_budget(
+    name: str, deadline: float
+) -> str:
+    """Look up one identity and coerce the result into a 3-value verdict.
+
+    Applies both the per-lookup timeout and the per-render deadline so
+    Prismind slowness cannot compound across candidates. Missing verdict
+    (``unavailable_reason``) is UNKNOWN so the caller drops it (D-38
+    fail-closed).
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _LookupVerdict.UNKNOWN
+    timeout = min(_LOOKUP_TIMEOUT_S, remaining)
+    try:
+        lookup = await asyncio.wait_for(
+            _resolve_identity(name), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        return _LookupVerdict.UNKNOWN
+    except Exception as e:  # noqa: BLE001 - adapter can raise transport errors
+        logger.warning(
+            "identity lookup raised", name=name, error=str(e)
+        )
+        return _LookupVerdict.UNKNOWN
+    if lookup.unavailable_reason is not None:
+        return _LookupVerdict.UNKNOWN
+    return _LookupVerdict.REGISTERED if lookup.found else _LookupVerdict.UNREGISTERED
+
+
+async def _participant_choices_registered(
+    messages: list[dict[str, Any]], parked_author: str
+) -> tuple[list[str], set[str], bool]:
+    """Return the registered subset of the candidate list (I-19 / D-38).
+
+    Returns ``(choices, unknown_names, any_unknown)`` where:
+
+    - ``choices`` is the ordered list of identity names to place in the
+      select. It contains only names whose verdict is REGISTERED (D-36:
+      no denylist). ``parked_author`` retains index 0 iff it is
+      REGISTERED — see D-37 for what to do when it is not.
+    - ``unknown_names`` is the set of candidates whose verdict was
+      UNKNOWN (dropped from ``choices`` per D-38 fail-closed). The
+      caller uses this to decide whether to show the "verification
+      unavailable" notice (msg-146 §3 D-38 degradation copy).
+    - ``any_unknown`` is a convenience flag; true iff Prismind was
+      unreachable for at least one candidate.
+
+    I-19: the verdict comes from ``chatroom_tools._lookup_identity``,
+    the exact function the POST-time gate calls. A second implementation
+    would drift from the contract check msg-044 §6.4 pinned; reusing it
+    is what makes the "shown here ⟹ accepted at POST" property hold on
+    the same day.
+
+    D-38 (fail-closed on UNKNOWN): a permissive fallback here would let a
+    Prismind outage silently disarm the very gate that filtered the
+    select in the first place — and the classic symptom is "select is
+    fine on the day the outage lasted 30s, catastrophic the day it
+    lasted 3 hours" (the outage falsely elects every candidate). The
+    corresponding UI copy is a 1-line notice; see the template.
+    """
+    candidates = _candidate_authors(messages, parked_author)
+    deadline = time.monotonic() + _RENDER_BUDGET_S
+    # Sequential rather than gathered: the render budget is a wall-clock
+    # bound, not a per-call one. Under a Prismind outage every call goes
+    # to its own timeout, so gathering them costs 4 × N seconds in the
+    # worst case; sequential+deadline caps the total at the budget. The
+    # normal (healthy Prismind) case is a few ms per lookup, well within
+    # the budget for the small candidate counts this page sees.
+    choices: list[str] = []
+    unknown: set[str] = set()
+    for name in candidates:
+        verdict = await _lookup_one_with_budget(name, deadline)
+        if verdict == _LookupVerdict.REGISTERED:
+            choices.append(name)
+        elif verdict == _LookupVerdict.UNKNOWN:
+            unknown.add(name)
+        # UNREGISTERED is silently dropped — that is the point of the filter.
+    return choices, unknown, bool(unknown)
+
+
+def _resolve_default_target(
+    parked_author: str, choices: list[str]
+) -> str:
+    """D-37: default value for the select.
+
+    Returns the parked author iff it appears in the registered choices;
+    otherwise ``NO_TARGET_VALUE``. The design keeps the parked author's
+    behaviour as spec §2.3 promised, and *demotes* the default to "don't
+    send" when the parked actor cannot be handed off to — which is
+    exactly the case for ``pr-gate-relay`` (msg-140), the trigger for
+    this whole change.
+
+    Deliberately does not silently substitute ``human``: a decision that
+    the human "returned to themselves" would look like the loop kept
+    going when it actually did not (msg-146 §3 D-37 text).
+    """
+    if parked_author and parked_author in choices:
+        return parked_author
+    return NO_TARGET_VALUE
 
 
 def _head_msg_id_from_thread(thread_meta: dict[str, Any]) -> str | None:
@@ -630,6 +834,34 @@ def _choice_options_from_material(material: dict[str, Any] | None) -> list[dict[
     return built
 
 
+def _pick_checked_choice(
+    content_value: str, choice_options: list[dict[str, str]]
+) -> str:
+    """D-31 exhaustive fallback (Einstein msg-147 §3).
+
+    Returns the value that the template must place on the ``checked``
+    radio. If ``content_value`` matches one of the available option
+    values, keep it. Otherwise (empty content, sentinel, an option value
+    that has since disappeared because material was updated between
+    submit and re-render, an outright garbage value) fall back to the
+    I-12 sentinel ``(自由記述のみ)`` so that at least one radio is
+    always checked when the form is re-rendered.
+
+    Why: if the template hangs the ``checked`` attribute off a naive
+    ``{% if content_value == opt.value %}`` and the value does not
+    appear in ``choice_options``, the render emits a radio group with
+    nothing selected. The next submit then sends no ``content=`` at
+    all, and FastAPI's required-field validator lands at 422 before
+    any of our handler code runs — the exact "silent 422" hole msg-146
+    §5(a) named. This function makes "no valid choice" collapse to the
+    single, always-present sentinel radio.
+    """
+    for opt in choice_options:
+        if opt.get("value") == content_value and content_value:
+            return content_value
+    return _FREEFORM_ONLY_VALUE
+
+
 async def _render_decision_error_page(
     request: Request,
     *,
@@ -655,12 +887,27 @@ async def _render_decision_error_page(
     D-31 でも維持する — POST 中に material 側が更新される可能性があり、
     「送信時は J-fresh、再描画時は J-stale」という遷移が起こりうる。
     その場合は再描画側の状態を出す (**入力は残す**)。
+
+    D-31 exhaustive fallback (Einstein msg-147 §3): the previously-chosen
+    ``content_value`` is fed through ``_pick_checked_choice`` so the
+    template always finds *some* radio to check. Otherwise the retry
+    submit sends no ``content=`` and stops at FastAPI's 422 (msg-146
+    §5(a) trap).
+
+    I-19 / D-36 / D-37 / D-38 (msg-146 §3): the ``next_participant``
+    select is built from the *registered* subset of the thread's
+    candidates, verified through the exact function the POST-time gate
+    calls (``_lookup_identity``). Unknown-verdict names are dropped
+    fail-closed; the caller is told when at least one drop happened so
+    the template can render the "verification unavailable" notice.
     """
     # 文脈の復元は best-effort。落ちても入力保持が優先。
     parked_author = next_participant_value
-    participant_choices = [next_participant_value] if next_participant_value else list(_HUMAN_IDENTITIES)
     thread_title = thread_id
     head_msg_id: str | None = None
+    verification_unavailable = False
+    unknown_names: set[str] = set()
+    context_messages: list[dict[str, Any]] = []
     try:
         result = await _load_judgement_context(project, thread_id)
     except Exception as e:  # noqa: BLE001 - 復元失敗は最低限 form に落ちる
@@ -668,25 +915,49 @@ async def _render_decision_error_page(
             "decision error re-render: get_thread raised, falling back",
             project=project, thread_id=thread_id, error=str(e),
         )
+        # Fallback: no context. Do NOT call Prismind at all (the user's
+        # verification budget is finite; wasting it on a lookup we cannot
+        # trust would be strictly worse than the empty select we already
+        # decided is acceptable). D-31 hard promise (input preservation)
+        # takes precedence.
+        participant_choices: list[str] = []
+        verification_unavailable = True
     else:
         if not _is_error(result):
-            messages = result.get("messages") or []
+            context_messages = result.get("messages") or []
             thread_meta = result.get("thread") or {}
             thread_title = thread_meta.get("title") or thread_id
             head_msg_id = _head_msg_id_from_thread(thread_meta)
-            if messages:
-                last = messages[-1]
+            if context_messages:
+                last = context_messages[-1]
                 candidate_parked = _parked_author(last)
                 if candidate_parked:
                     parked_author = candidate_parked
-                participant_choices = _participant_choices(messages, parked_author)
-    # 「human」だけは常に含める。
-    for h in _HUMAN_IDENTITIES:
-        if h not in participant_choices:
-            participant_choices.append(h)
-    # next_participant_value も候補に無ければ加える (D-31 で消さない)。
-    if next_participant_value and next_participant_value not in participant_choices:
-        participant_choices.insert(0, next_participant_value)
+            (
+                participant_choices,
+                unknown_names,
+                verification_unavailable,
+            ) = await _participant_choices_registered(
+                context_messages, parked_author
+            )
+        else:
+            # Conclair envelope on re-render: same treatment as the raise
+            # branch above — no candidates, mark verification unavailable.
+            participant_choices = []
+            verification_unavailable = True
+
+    # I-20 (single source of truth): the *selected* value in the re-render
+    # is the user's last choice iff it survived verification; otherwise
+    # demote to the "宛先を送らない" sentinel per D-37, so the user has to
+    # look at the field and decide again (rather than silently landing on
+    # a value the gate will reject).
+    if next_participant_value and next_participant_value in participant_choices:
+        selected_target = next_participant_value
+    elif next_participant_value == NO_TARGET_VALUE:
+        # User explicitly asked to not send a target. Preserve that intent.
+        selected_target = NO_TARGET_VALUE
+    else:
+        selected_target = _resolve_default_target(parked_author, participant_choices)
 
     # Material lookup is best-effort. A store outage falls to J-absent
     # (safer than pretending we have material) rather than 500. ``ok`` is
@@ -702,6 +973,9 @@ async def _render_decision_error_page(
     material_for_render = material if material_state == "fresh" else None
     choice_options = _choice_options_from_material(material_for_render)
 
+    # D-31 exhaustive fallback: pick the radio the template will check.
+    checked_choice_value = _pick_checked_choice(content_value, choice_options)
+
     return templates.TemplateResponse(
         request,
         "decisions_thread.html",
@@ -714,14 +988,20 @@ async def _render_decision_error_page(
             "parked_author": parked_author,
             "participant_choices": participant_choices,
             "content_value": content_value,
+            "checked_choice_value": checked_choice_value,
             "freeform_value": freeform_value,
-            "next_participant_value": next_participant_value or parked_author,
+            "next_participant_value": selected_target,
             "error_message": error_message,
             "material_state": material_state,
             "material": material_for_render,
             "material_head_msg_id": (material or {}).get("head_msg_id"),
             "thread_head_msg_id": head_msg_id,
             "choice_options": choice_options,
+            "verification_unavailable": verification_unavailable,
+            "unknown_participant_count": len(unknown_names),
+            "no_target_value": NO_TARGET_VALUE,
+            "no_target_label": NO_TARGET_LABEL,
+            "freeform_only_value": _FREEFORM_ONLY_VALUE,
         },
         status_code=status_code,
         headers={"Cache-Control": _NO_STORE},
@@ -834,6 +1114,17 @@ async def decision_page(
         # (Conclair が ChatroomStateError で拒否する ∴ 送信可能な form を
         # 出すと嘘の導線になる)。
         thread_closed = _thread_is_closed(thread_meta)
+        # I-19 / D-36 / D-37 / D-38: same registered-target filter as the
+        # judgement branch. Consistency matters: pr-gate-relay would
+        # otherwise still leak into the "書き足す" secondary form's
+        # select and reproduce the msg-140 defect on that path.
+        default_next = _default_next_participant_for_not_waiting(messages)
+        (
+            nw_participant_choices,
+            _nw_unknown_names,
+            nw_verification_unavailable,
+        ) = await _participant_choices_registered(messages, default_next)
+        nw_default_target = _resolve_default_target(default_next, nw_participant_choices)
         return templates.TemplateResponse(
             request,
             "decisions_thread.html",
@@ -851,12 +1142,12 @@ async def decision_page(
                 # closed スレッドでは template 側で描画しない。既定は最終
                 # msg の next_participant、無ければ最終 msg の著者
                 # (msg-137 §5 N-7)。
-                "next_participant_value": _default_next_participant_for_not_waiting(
-                    messages
-                ),
-                "participant_choices": _participant_choices(
-                    messages, _default_next_participant_for_not_waiting(messages)
-                ),
+                "next_participant_value": nw_default_target,
+                "participant_choices": nw_participant_choices,
+                "verification_unavailable": nw_verification_unavailable,
+                "no_target_value": NO_TARGET_VALUE,
+                "no_target_label": NO_TARGET_LABEL,
+                "freeform_only_value": _FREEFORM_ONLY_VALUE,
             },
             status_code=200,
             headers={"Cache-Control": _NO_STORE},
@@ -881,6 +1172,19 @@ async def decision_page(
     material_for_render = material if material_state == "fresh" else None
     choice_options = _choice_options_from_material(material_for_render)
 
+    # I-19 / D-36 / D-37 / D-38 (msg-146 §3): filter the candidate list
+    # through the exact registry the POST-time gate consults, so every
+    # option in the select is guaranteed to be an accepted target. The
+    # UNKNOWN verdicts are dropped fail-closed; the caller learns whether
+    # any drop happened via the ``verification_unavailable`` flag so the
+    # template can render the D-38 degradation notice.
+    (
+        participant_choices,
+        _unknown_names,
+        verification_unavailable,
+    ) = await _participant_choices_registered(messages, parked_author)
+    default_target = _resolve_default_target(parked_author, participant_choices)
+
     return templates.TemplateResponse(
         request,
         "decisions_thread.html",
@@ -891,11 +1195,12 @@ async def decision_page(
             "thread_ui_url": thread_ui_url,
             "thread_title": thread_meta.get("title") or thread_id,
             "parked_author": parked_author,
-            "participant_choices": _participant_choices(messages, parked_author),
+            "participant_choices": participant_choices,
             # 空の初期状態 (D-31 再描画ではないので入力保持なし)。
             "content_value": "",
+            "checked_choice_value": _FREEFORM_ONLY_VALUE,
             "freeform_value": "",
-            "next_participant_value": parked_author,
+            "next_participant_value": default_target,
             "error_message": None,
             "material_state": material_state,
             "material": material_for_render,
@@ -903,8 +1208,12 @@ async def decision_page(
             "thread_head_msg_id": head_msg_id,
             # 汎用 2 択は廃止 (spec §4.1 / msg-117 §5). J-fresh のときだけ
             # composer の option 由来のカードを出す。J-stale / J-absent は
-            # 空配列 ∴ template は「自由記述だけで送る」ボタンだけを出す。
+            # 空配列 ∴ template は「自由記述だけで送る」ラジオだけを出す。
             "choice_options": choice_options,
+            "verification_unavailable": verification_unavailable,
+            "no_target_value": NO_TARGET_VALUE,
+            "no_target_label": NO_TARGET_LABEL,
+            "freeform_only_value": _FREEFORM_ONLY_VALUE,
         },
         status_code=200,
         headers={"Cache-Control": _NO_STORE},
@@ -1125,6 +1434,17 @@ __all__ = [
     "_choice_options_from_material",
     "_get_material_store",
     "_COMPOSER_STATUS_OK",
+    # I-19 / D-36 / D-37 / D-38 (msg-146 §3): registered-target filtering
+    "_candidate_authors",
+    "_participant_choices_registered",
+    "_resolve_default_target",
+    "_lookup_one_with_budget",
+    "_LookupVerdict",
+    "NO_TARGET_VALUE",
+    "NO_TARGET_LABEL",
+    # D-35 + D-31 exhaustive fallback (Einstein msg-147 §3)
+    "_pick_checked_choice",
+    "_FREEFORM_ONLY_VALUE",
     # N-1〜N-8: 「判断待ちではありません」の 3 状態分類 (msg-137)
     "_classify_not_waiting",
     "_is_human_decide",

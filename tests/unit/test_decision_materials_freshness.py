@@ -479,11 +479,22 @@ async def test_container_boxes_do_not_carry_pre_wrap_directly(
         r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
 
     assert r.status_code == 200
-    # The two container rules must not set `white-space: pre-wrap`
+    # The container rules must not set `white-space: pre-wrap`
     # themselves. A false positive on this test means someone re-added
     # it to the container — read the CSS block's comment before touching.
+    # ``.decision-choice`` was added to the sweep when D-35 replaced the
+    # submit-button choices with radio+label cards (msg-146 §2): the new
+    # ``<label>`` cards are containers with template indentation just
+    # like ``.decision-question`` and ``.decision-recommendation`` were.
+    # Extending the existing detector rather than adding a third one so
+    # the invariant lives in one place (msg-146 §2 逐語: 「新規カードでも
+    # 守る」／既存 2 本の regression を及ぶよう拡張する).
     import re
-    for cls in (".decision-question", ".decision-recommendation"):
+    for cls in (
+        ".decision-question",
+        ".decision-recommendation",
+        ".decision-choice",
+    ):
         # Grab the rule body for the class (up to the closing brace).
         rule = re.search(
             rf"{re.escape(cls)}\s*\{{[^{{}}]*\}}", r.text
