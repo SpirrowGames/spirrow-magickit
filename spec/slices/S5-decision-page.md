@@ -4,6 +4,12 @@
 を、リダイレクト stub から**判断 UI 本体**に差し替える。URL は増分 1 で敷いた
 契約のまま、ハンドラの中身だけを差し替える。
 
+**★ 実機受入 (msg-139 / msg-140 / msg-146 / msg-147 / msg-151) 反映**:
+Takahito が実機で 2 件の欠陥を報告 (D-35 / D-36〜D-38 / I-19〜I-21) — form の
+選択と送信が分離できない件、宛先 select に "選ぶと必ず失敗する値" が出る件。
+両件を 1 PR で修正 (1 増分の中の 2 項目, 実タップを 1 回で通す)。詳細は §13
+「D-35 (radio+submit の分離) + D-36〜D-38 (registered-target filter)」以下。
+
 ## 0. スコープ / 非スコープ
 
 **スコープ (この増分)**
@@ -461,3 +467,181 @@ msg-102 §4 が名指しした欠陥: `tests/unit/test_decisions_form.py` の全
 **既存の I-12 / 合成 / D-31 / close+freeform テストはすべて `_decision_form=1`
 を付けるよう更新した** (これらは判断ページ由来の入力を模しており、テンプレート
 が常に送るこの field を欠かせない)。
+
+## 13. ★ Takahito 実機受入で見つけた 2 欠陥 (msg-139 / msg-140) と修正
+
+### 13.0 発端 (msg-139 / msg-140 逐語要旨)
+
+** 欠陥 A (msg-139)**: 選択肢を押した瞬間に POST される ∴ 「選んで補足を
+書いてから送る」ができない。携帯で誤タップが即確定投稿になる。
+
+**欠陥 B (msg-140)**: 宛先 select に `pr-gate-relay` が並び、選ぶと必ず
+`NextParticipantUnknownError` になる。UI が「選べる = 選べる」と読ませて、
+選んだ人の側でエラーにする。
+
+**観測と媒体 (msg-146 §0 教訓 (6) の適用)**:
+
+| 欠陥 | 観測 | 媒体 | 確度 |
+|---|---|---|---|
+| A: 選択と送信が分離できない | Takahito 実機タップ (msg-139 §2) | 実機ブラウザ | 確定 |
+| B: 宛先 select が失敗値を出す | 実機タップ + Tier-C ソース読解 (msg-140 §3) | 実機 + ソース | 失敗は確定/原因は A-23(ii) で確認 |
+
+### 13.1 A-23(ii) — 実装前の premise 測定 (Einstein msg-147 §2)
+
+**着手前に測った**: scratch project に `next_participant=pr-gate-relay` の
+`decide` を POST し、raw error を記録。
+
+```
+=== A-23(ii): next_participant=pr-gate-relay ===
+<div class="alert alert-error"><strong>NextParticipantUnknownError</strong>:
+next_participant 'pr-gate-relay' is not a registered identity. …
+```
+
+**結論**: 拒否理由は「未登録」で確定。∴ 「registered で絞る」設計は的を外さない。
+（もし `RoleNotAllowed` 等の別理由だったら D-36〜D-38 の設計は再考が必要だった。
+測定を先に置いたのは msg-133 §1.1 の教訓の直接適用: 前提を確立してから設計する。）
+
+**A-23(i)**: `next_participant=human` は受理を確認 (`human` を常に含める
+根拠に使える定数であることの実測)。
+
+### 13.2 D-35: radio + 単一 submit — 選択と送信の分離
+
+**旧**: 選択肢は `<button type="submit" name="content" value="A: ...">` の
+連打。押した瞬間に POST。
+
+**新**: 選択肢は `<label>` の中に `<input type="radio" name="content" value="A: ...">`。
+submit は `<button type="submit">送信</button>` 1 つに集約 (`name` 属性なし ∴
+余分な field を送らない)。
+
+**罠を、罠に触れずに通過する** (msg-146 §2 の要):
+- `content` は共有 handler の必須 Form field ∴ 「未選択でブラウザが送らない」
+  経路に落ちると FastAPI が 422 (spec §3.1a の実測)。
+- **既定 checked の "自由記述だけで送る" radio が常に 1 つある** ∴ form は
+  常に非空の `content=` を送る。既存 signature は変えない ∴ G-1 も無傷。
+
+**画面順** (縦 1 カラム、上から): 問い → 選択肢カード群 → recommendation
+/ unknowns (J-fresh のみ) → 自由記述 → 宛先 → **送信ボタン**。
+
+### 13.3 D-31 exhaustive fallback (Einstein msg-147 §3)
+
+D-35 で導入した radio group の落とし穴: 再描画時、以前の `content` が
+現行 option 集合に無いと `checked` が付く radio が 0 個になり、次の submit で
+FastAPI 422 に落ちる (msg-146 §5(a) が名指しした罠)。
+
+**修正**: handler 側 `_pick_checked_choice(content_value, choice_options)`:
+- content_value が現行 option の value と一致 → その value
+- 一致しない (option が消えた/空文字/garbage) → sentinel `(自由記述のみ)`
+
+**invariant**: **template が返す radio group には必ず 1 つ ``checked`` がある。**
+
+### 13.4 I-19 / D-36 / D-37 / D-38: 宛先を receiver 権威で絞る
+
+**I-19 (msg-146 §3 の中心規律)**: **select に並ぶ値 ⊆ POST 時に受理される値**。
+判定は POST-time gate と同じ関数を通す (`chatroom_tools._lookup_identity`)。
+描画側に別 lookup を書かない (drift を防ぐ; msg-044 §6.4 の contract check
+を書き直す羽目にならない)。
+
+**D-36**: 現行の `author == "none" or author.startswith("pr-review")` 拒否リストを
+**削除**。候補生成 (thread の distinct author + `human`) は維持。それぞれを
+`_lookup_identity` に通して verdict が "registered" のものだけを select に出す。
+`pr-gate-relay` を Prismind に登録して直さない — reserved は reserved のまま
+(judge を渡す先ではない)。
+
+**D-37 (default demotion)**: select の既定値は駐機 msg の著者。ただし駐機著者
+が registered filter を通らなかった場合、既定は "宛先を送らない" (empty)。
+`human` に自動 fallback しない (「人の判断が人に返る = ループが静かに止まる」を
+静かに起こさない)。
+
+**D-38 (3 値 fail-closed)**:
+- `REGISTERED` → 出す
+- `UNREGISTERED` → 出さない
+- `UNKNOWN` (Prismind 不達 / timeout / contract violation / render 予算超過)
+  → 出さない (**fail-closed**; permissive fallback は「outage 中に select が
+  全員通す」形になる = 元の欠陥の再演)
+
+**実装**:
+- 1 lookup あたりの timeout: `_LOOKUP_TIMEOUT_S = 1.0s` (adapter default
+  240--360s は継がない; CLAUDE.md 記載の Lexora `/health` が 20-40s
+  ブロックする実例に照らして継承は危険)。
+- render 全体の予算: `_RENDER_BUDGET_S = 4.0s`。予算超過分は Prismind を呼ばず
+  UNKNOWN 扱い。順序は sequential (総 wall-clock を予算にキャップする; gather
+  だと 4 × N 秒に膨らむ)。
+
+**degradation 表示** (D-38): `verification_unavailable=True` のとき template に 1 行
+「宛先候補を検証できませんでした。表示している候補は限定的です; 本文の
+`NEXT:` 行で指定するか, 後で再読込してください.」を出す。
+
+**D-37 の 1 行 (msg-146 §3 逐語 / Bohr msg-155 §5 が gap を報告)**:
+`parked_author_unregistered=True` のとき、**D-38 とは独立した** 1 行を出す:
+「`<parked_author>` は登録済 identity ではありません ∴ 既定を "宛先を送らない"
+に落としました. select で送り先を選ぶか, 自由記述に単独行で `NEXT: <名前>` を
+書いてください.」
+
+**なぜ D-38 と分けるか (直交性)**: D-38 は「Prismind に届かなかった / 遅かった」=
+**再試行できる**。D-37 は「Prismind は答えた: この名前は未登録」= **再試行しても同じ**。
+残された行動が違う ∴ 文言も分ける。両方同時に真になり得る (別 candidate の
+UNKNOWN と、parked_author の UNREGISTERED) ため片方に畳めない。
+
+**D-37 が UNKNOWN では発火しない (fail-open にしない)**: Prismind が parked_author を
+測れていないときは D-38 だけを出す。「未登録」と断定していないので D-37 の文言は
+虚偽になる (msg-084 §5 の「実測なしに主張する」パターンの再演)。実装は
+`_participant_choices_registered` 内で verdict==UNREGISTERED のときだけ flag を上げる。
+
+### 13.5 I-20: "宛先を送らない" を選んだときの handler 側規律
+
+**要件** (msg-146 §3): "宛先を送らない" 選択 (wire は `next_participant=""`) は、
+本文に単独行 `NEXT: <名前>` が無ければ **送信を拒否**、D-31 で入力を保持
+したまま再描画。理由の明示 (「宛先が指定されていません…」)。
+
+**なぜ寛容側にしないか**: 代替は「宛先が 1 つも無い投稿」= 「誰も呼ばれない
+まま止まる」— 本スレッドが 4 回踏んだ静かな失敗の族そのもの。ここだけ検証側を
+選ぶ (I-12 の「自由記述だけで送れる」は content 側の要件で、これは宛先側の
+規律 ∴ 矛盾しない — Einstein msg-147 §1 が確定)。
+
+### 13.6 I-21: `<label>` の内側に `<a>` を置かない (template lint)
+
+**要件** (msg-146 §3): 選択肢カードは全体が `<label>` ∴ 内側に `<a>` を置くと
+タップがラベル選択に吸われる、あるいは「リンクを踏んだつもりで選択が変わる」。
+`spirrow-mindwire` 側で「URL を材料に載せる」作業が進行中であり、URL 到着後に
+気づけば実タップを 1 回焼く ∴ **先に pin する**。
+
+**実装**: `tests/unit/test_decisions_form_radio_and_target.py::test_i21_no_
+anchor_tag_inside_decision_choice_label` が template を読んで
+`<label class="...decision-choice...">` ブロック内に `<a` を含まないことを assert。
+
+### 13.7 I-18: 既に払った実タップの pin — 書き換えの前に固定
+
+**規律** (msg-146 §4): msg-121 の実タップで確認済の 3 挙動を、**書き換える前に**
+characterization test で固定する:
+
+1. 空欄送信は 422 で拒否 (msg-121 fix)
+2. 自由記述だけの wire bytes 安定 (msg-121 tap)
+3. G-1 バイト同一 POST (`_decision_form` なしは既存挙動)
+
+**実装**: `tests/unit/test_decisions_form_choice_characterization.py`。順序を
+逆にする (書いてから test) と、書き換え後の挙動を "正解" として固定してしまう。
+
+**P-14 の byte-exact pin (Bohr msg-155 §3(d) 追加)**: `test_p14_pure_compose_
+choice_and_freeform_bytes_are_exactly_specified` が pure helper (`_compose_
+decision_body`) と HTTP 経路 (`test_p14_http_choice_and_freeform_wire_bytes_
+stable`) の両方で `"A: そのまま進める\n\n理由: すでに検証済み\n\nNEXT: Bohr"`
+を pin する。**A-27 (実タップ) が「何を期待するか」を持って走れるよう unit で
+byte を固定する** — 200 を返しただけで pass にしない。
+
+### 13.8 前提表 (Bohr msg-146 §6 継承 + 追記)
+
+| 前提 | 状態 | 破れたときの症状 |
+|---|---|---|
+| P-13 | `content=` 空文字は現行 FastAPI で 422 | 実測 (msg-102 / spec §11.4) — 本 PR は既定 checked radio で常に非空を送る形で回避 |
+| P-14 | 選択 + 自由記述の合成は本番未走行 | msg-121 以前は radio 未実装 ∴ 併用不可能 — A-27 の実タップで初測 |
+| P-15 | 登録済 identity の全列挙 API が無い | CLAUDE.md 実測 — 候補生成 (thread author + human) の維持根拠 |
+| P-16 (新規) | `pr-gate-relay` の拒否理由は "未登録" | **A-23(ii) 実測済 (2026-08-24)** — `NextParticipantUnknownError` |
+| Q-6 (未解決) | D-30 が未登録名を本文行として吐き得る | 本 PR で扱わず記録のみ (Tier-C msg-151 判断) |
+
+### 13.9 スコープ外 (混ぜない)
+
+- A-19 / A-21 / A-22 (`T-decision-material-push` 側の受入、ループ側で実行)。
+- 問いの平易化 / URL を材料に載せる件 (`spirrow-mindwire` / `T-decision-request-composer`)。
+- 通知ヘッダの文面 (`spirrow-mindwire` / `T-park-alert-says-judgement-when-it-is-a-fault`)。
+- `_get_material_store()` の毎リクエスト `mkdir` (msg-131 非ブロッキング指摘)。
+- D-30 の未登録名追記 (Q-6 - 別増分)。

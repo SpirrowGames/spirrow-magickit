@@ -41,7 +41,10 @@ from magickit.utils.logging import get_logger
 # 制約: adapter / MCP tool / この chatroom_writes.py に consumer 用語の literal を
 # 書かない)。judgement page は決定 UI 特化の別ファイル ∴ そこに集約するのが妥当。
 from magickit.web.decisions import (
+    _FREEFORM_ONLY_VALUE,
+    NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE,
     _compose_decision_body,
+    _has_standalone_next_line,
     _maybe_append_next,
 )
 
@@ -62,15 +65,18 @@ router = APIRouter(tags=["chatroom-ui"])
 # ``closes`` が真のとき自由記述を黙って捨てる (最も重要な 1 通で最も長く打った
 # 文章が落ちる)。∴ ``content`` そのものを合成後の値へ差し替える。
 
-#: I-12 sentinel: 判断ページの「自由記述だけで送る」ボタンが送る ``content`` 値。
+#: I-12 sentinel: 判断ページの「自由記述だけで送る」radio が送る ``content`` 値。
 #: 純粋な空文字 (``value=""``) は現行 FastAPI (0.128 / pydantic 2.12) で
 #: ``content=`` が「missing」として 422 に落とされる — msg-097 §4.1 の
 #: 「空文字は str として妥当 ∴ 422 にならない」が empirical に成立しない ∴
 #: 既存 ``content`` param の signature を変えずに I-12 を成立させるための
 #: sentinel を挟む。``_compose_decision_body`` に渡す前に空文字へ正規化する。
-#: ボタンの ``value`` 属性は user が typo できず、button 由来値以外に content
-#: が入る経路は無い ∴ 衝突しない (spec §3.1a の empirical finding)。
-_FREEFORM_ONLY_SENTINEL = "(自由記述のみ)"
+#: radio の ``value`` 属性は user が typo できず、button/radio 由来値以外に
+#: content が入る経路は無い ∴ 衝突しない (spec §3.1a の empirical finding)。
+#: **単一 SOT**: ``magickit.web.decisions._FREEFORM_ONLY_VALUE`` を re-export する。
+#: template・handler 双方が同じ文字列を参照することで、片側だけの typo で
+#: sentinel 経路が黙って壊れることを構造で防ぐ (I-20 と同型の一箇所主義)。
+_FREEFORM_ONLY_SENTINEL = _FREEFORM_ONLY_VALUE
 
 
 def _next_participant_error_message(envelope: dict[str, Any]) -> str:
@@ -369,14 +375,20 @@ async def post_message(
     # だけ意味を持つ ∴ 変数の初期化も opt-in 分岐の内側に閉じる (msg-103 §3:
     # 「正規化は opt-in 分岐の内側でのみ行う。`_decision_form` を持たない POST
     # の content が偶然 sentinel と一致しても触らない」)。
+    # ``original_content`` は re-render 時に radio の checked を復元するための
+    # 値。D-31 exhaustive fallback (Einstein msg-147 §3): 値そのものは *渡す*
+    # だけ (`_pick_checked_choice` が現行 option 集合と付き合わせて安全に落とす)。
     original_content = ""
     original_freeform = ""
     if is_decision_post:
-        # sentinel は user 視点で「選択肢なし」を意味する ∴ 復元時も空を渡す
-        # (元のボタン value を再描画に leak させない)。
-        original_content = "" if content == _FREEFORM_ONLY_SENTINEL else content
+        # sentinel は user 視点で「選択肢なし」を意味する ∴ 復元時は sentinel の
+        # まま渡し、template 側で「自由記述のみ」radio に checked が付く。
+        # (空へ潰すと exhaustive fallback が働かず、次の submit で本来の
+        # 「自由記述のみ」radio に checked が入っているのに UI 上は「何も
+        # 選ばれていない」ように見えて混乱するため。)
+        original_content = content
         original_freeform = decision_freeform or ""
-        # I-12 sentinel 正規化: 「自由記述だけで送る」ボタンは
+        # I-12 sentinel 正規化: 「自由記述だけで送る」radio は
         # ``content=(自由記述のみ)`` を送る ∴ 合成前に空文字へ戻す。純粋な
         # ``value=""`` が現行 FastAPI で 422 に落ちる回避策 (spec §3.1a)。
         # **opt-in が真のときだけ正規化する** — 既存 `/ui` compose form から
@@ -389,6 +401,22 @@ async def post_message(
         # `_enforce_close_policies` の生 `content` 引数 / adapter.post_message の
         # body_content) はすべて合成後を見る。
         content = composed
+
+        # I-20 (msg-146 §3): 宛先を送らない (next_participant="") を選んだときは、
+        # 本文に単独行 ``NEXT:`` が無ければ送信を拒否する。既定を「宛先を送らない」
+        # に demote した (D-37) 帰結として、人が UI を触らずに送信ボタンだけ押した
+        # ケースがここに落ちる ∴ 本文で宛先が指定されていることを要求する。
+        # 代替は「宛先が 1 つも無い投稿」= 「誰も呼ばれないまま止まる」で、
+        # 本スレッドが 4 回踏んだ静かな失敗の族そのもの (spec §3 I-20 逐語)。
+        if not next_participant and not _has_standalone_next_line(content):
+            return await _render_decision_error(
+                request,
+                project=project, thread_id=thread_id,
+                content_value=original_content,
+                freeform_value=original_freeform,
+                next_participant_value=next_participant,
+                error_message=NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE,
+            )
 
     if _embodiment_missing(msg_type=type, author=author, embodiment=embodiment):
         envelope = chatroom_tools._embodiment_required_error(msg_kind=type)

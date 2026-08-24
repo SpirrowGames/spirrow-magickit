@@ -670,19 +670,31 @@ async def test_choice_button_with_empty_freeform_fires_opt_in_and_appends_next()
 
 
 @pytest.mark.asyncio
-async def test_all_empty_composed_body_is_empty_and_no_next_appended():
-    """spec §3.3 の corner: `content` sentinel + 空 `_freeform` + 空
-    `next_participant` → 合成本文は "" (新たな拒否を作らない)。
+async def test_i20_all_empty_next_participant_and_empty_body_is_rejected():
+    """★ I-20 (msg-146 §3 / Bohr): 「宛先を送らない」= 空 next_participant を
+    選んだときは、本文に単独行 ``NEXT:`` が無ければ送信を拒否する。
 
-    Einstein msg-104 §3 (P-7) が心配した経路: 空 `content` が下流に届く。
-    ここでは downstream (AsyncMock adapter) が受け入れることを confirm。
-    live Conclair が空本文で crash するかは外形で測るしかない (§P-7 実測項目、
-    spec §11.7)。
+    旧 (spec §3.3 の corner): `content` sentinel + 空 `_freeform` + 空
+    `next_participant` → 合成本文は "" が下流に届いていた。
+    新 (msg-146 §3 I-20): 「宛先を送らない」を選んで本文に指定も無い状態は、
+    「誰も呼ばれないまま止まる」の族 (本スレッドが 4 回踏んだ静かな失敗)。
+    ∴ 400 + D-31 で入力を残したまま再描画し、宛先を求める。
+
+    Einstein msg-104 §3 (P-7) が心配していた「空 content が下流に届く」は、
+    この 1 経路 (I-20 が拒否する) だけが該当していた ∴ 本 pin により
+    P-7 の残余 risk 自体が消える。
     """
     adapter = AsyncMock()
     adapter.post_message = AsyncMock(
         return_value={"msg": {"msg_id": "empty-body", "type": "decide"}}
     )
+    # get_thread が D-31 の best-effort context 復元で呼ばれる。
+    adapter.get_thread = AsyncMock(return_value={
+        "thread": {"title": "T"},
+        "messages": [{"author": "Bohr", "content": "please decide",
+                       "next_participant": "human"}],
+        "mode": "full",
+    })
     adapter.close = AsyncMock()
 
     with (
@@ -698,10 +710,49 @@ async def test_all_empty_composed_body_is_empty_and_no_next_appended():
                 "_decision_form": "1",
                 "content": "(自由記述のみ)",
                 "_freeform": "",
-                "next_participant": "",  # 追記名も空
+                "next_participant": "",  # 「宛先を送らない」
+            },
+        )
+
+    # I-20 rejects: 400 with re-render, adapter.post_message NOT called.
+    assert r.status_code == 400
+    adapter.post_message.assert_not_called()
+    # Error message mentions the two remedies (spec I-20 逐語).
+    assert "宛先" in r.text
+
+
+@pytest.mark.asyncio
+async def test_i20_all_empty_next_participant_with_body_next_line_is_accepted():
+    """I-20 (msg-146 §3): 「宛先を送らない」でも, 本文に単独行 ``NEXT:`` が
+    あれば送信を許可する (parser が本文の NEXT: を宛先として拾う).
+
+    D-30 は追記しない (`_maybe_append_next` は next_participant が空なら
+    追記しない). ∴ 本文はそのまま下流に届く.
+    """
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "body-next", "type": "decide"}}
+    )
+    adapter.close = AsyncMock()
+
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "decide",
+                "author": "human",
+                "_decision_form": "1",
+                "content": "(自由記述のみ)",
+                "_freeform": "考慮の結果\n\nNEXT: Einstein",
+                "next_participant": "",  # 「宛先を送らない」— 本文で指定
             },
         )
 
     assert r.status_code == 303
     kwargs = adapter.post_message.call_args.kwargs
-    assert kwargs["content"] == ""  # spec §3.3: 空のまま下流に渡す
+    # 本文はそのまま (D-30 追記なし; freeform だけ).
+    assert kwargs["content"] == "考慮の結果\n\nNEXT: Einstein"

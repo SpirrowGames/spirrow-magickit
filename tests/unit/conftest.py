@@ -18,11 +18,49 @@ from __future__ import annotations
 import os
 import tempfile
 from typing import Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
 from magickit.core.decision_materials import DecisionMaterialStore
+from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import decisions as decisions_module
+
+
+@pytest.fixture(autouse=True)
+def stub_decision_identity_lookup(monkeypatch):
+    """Default the *decision page's* identity lookup to "registered".
+
+    Scoped to ``decisions_module._resolve_identity`` (the local wrapper
+    added by I-19 / msg-146 §3), so the fixture does **not** interfere
+    with the role / next_participant / pr-gate tests that drive
+    ``chatroom_tools._lookup_identity`` through a mocked
+    ``_prismind_adapter``. Those tests share the identity registry the
+    real POST-time gate uses; the decision page wrapper is a separate
+    binding for exactly this test-isolation reason.
+
+    Why the default is "registered" rather than the real Prismind call:
+    the real call is a connection-refused per candidate in the unit
+    env, which is (a) ~4s per test at the render-budget cap and (b) a
+    behaviour swap unrelated tests were not written for (the select
+    empties, ``parked_author`` is dropped, etc). Tests that WANT to
+    observe UNKNOWN / UNREGISTERED branches override with
+    ``patch.object(chatroom_tools, "_lookup_identity", side_effect=...)``
+    (that is the surface the decision-page wrapper calls into).
+
+    The stubbed verdict is "registered with no allowed_roles" — the
+    same shape ``_identity_response`` uses in
+    ``test_next_participant_gate``: ``found=True`` satisfies the select
+    filter, ``allowed_roles=()`` is inert because the filter does not
+    read it.
+    """
+    async def _stub(name: str):
+        return chatroom_tools._IdentityLookup(
+            unavailable_reason=None, found=True, allowed_roles=()
+        )
+
+    monkeypatch.setattr(decisions_module, "_resolve_identity", _stub)
+    yield _stub
 
 
 @pytest.fixture(autouse=True)
