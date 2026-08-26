@@ -317,8 +317,13 @@ def build_digest_input(view: dict[str, Any], bounds: DigestBounds) -> DigestInpu
         head_count, tail_count = len(head), len(tail)
         omitted = len(rendered) - head_count - tail_count
         if omitted <= 0:
-            # Everything fit after all (the per-message cap did the work).
-            body = "\n\n".join(rendered)
+            # head + tail between them covered every message. Only reachable
+            # when a single message is itself larger than the head budget
+            # (each loop admits its first block regardless), which needs
+            # `max_msg_chars * 2 > max_input_chars` -- a misconfiguration.
+            # Still handled rather than trusted: emitting an over-budget body
+            # here would spend the ~120s of GPU the ceiling exists to avoid.
+            body = joined[:body_budget]
             head_count, tail_count, omitted = len(rendered), 0, 0
         else:
             omitted_chars = sum(
@@ -326,6 +331,9 @@ def build_digest_input(view: dict[str, Any], bounds: DigestBounds) -> DigestInpu
             )
             marker = _ELISION.format(omitted=omitted, chars=omitted_chars)
             body = "\n\n".join(head) + marker + "\n\n".join(tail)
+        # The separators and the marker are counted approximately above, so
+        # clamp once at the end. The ceiling is a timeout, not a preference.
+        body = body[:body_budget]
 
     covered = messages if omitted == 0 else messages[:head_count] + messages[-tail_count:]
     source_last = max(

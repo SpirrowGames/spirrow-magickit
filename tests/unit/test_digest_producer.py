@@ -259,11 +259,12 @@ def test_source_last_msg_id_comes_from_the_rendered_tail() -> None:
     assert out.source_last_msg_id in out.text
 
 
-def test_the_input_stays_near_the_ceiling() -> None:
+def test_the_input_stays_under_the_ceiling() -> None:
     """The ceiling is derived from Cognilens's 30s timeout, so it must hold."""
-    out = build_digest_input(_oversized_view(), _bounds(max_input_chars=12000))
+    bounds = _bounds(max_input_chars=12000)
+    out = build_digest_input(_oversized_view(), bounds)
 
-    assert len(out.text) <= 13000
+    assert len(out.text) <= bounds.max_input_chars
 
 
 # =====================================================================
@@ -954,3 +955,25 @@ async def test_the_sweeper_is_cancellable() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_the_ceiling_holds_even_when_one_message_exceeds_the_head_budget() -> None:
+    """A timeout, not a preference: an over-budget prompt burns GPU for nothing.
+
+    Reachable only under `max_msg_chars * 2 > max_input_chars`, i.e. a
+    misconfiguration -- handled rather than trusted.
+    """
+    bounds = _bounds(max_input_chars=2000, max_msg_chars=5000)
+    view = _view([_msg(1, content="A" * 4000), _msg(2, content="B" * 4000)])
+
+    out = build_digest_input(view, bounds)
+
+    assert len(out.text) <= bounds.max_input_chars
+
+
+def test_the_ceiling_holds_for_a_normal_oversized_thread() -> None:
+    bounds = _bounds(max_input_chars=6000)
+    out = build_digest_input(_oversized_view(count=60, chars=1000), bounds)
+
+    assert len(out.text) <= bounds.max_input_chars
+    assert out.truncated is True
