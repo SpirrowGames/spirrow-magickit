@@ -84,6 +84,22 @@ _DROP_REQUEST_HEADERS = frozenset(
     }
 )
 
+#: Marks a request as having arrived through Magickit. Conclair renders the
+#: 要約生成 button only when it sees this, because that button posts to a
+#: route *Magickit* claims (``chatroom_digest``) -- through a direct :8115
+#: tunnel it would 404. That is the same failure the loop-control
+#: passthrough below exists to prevent, in the one direction a passthrough
+#: cannot fix: Conclair has no LLM and, being a leaf, must not acquire one.
+#:
+#: Set per request rather than as a Conclair config flag, because the same
+#: Conclair process serves both paths at once and a flag cannot tell them
+#: apart. Overwritten rather than merged, so the value is ours.
+#:
+#: Spoofable, and that is fine: it decides what to *render*, not what is
+#: allowed. The tailnet is the trust boundary, same as ``actor``.
+VIA_HEADER = "X-Spirrow-Via"
+VIA_VALUE = "magickit"
+
 _client: httpx.AsyncClient | None = None
 
 
@@ -120,12 +136,19 @@ def _forwardable_request_headers(request: Request) -> dict[str, str]:
     HTMX drives the whole UI, so ``HX-Request`` / ``HX-Target`` and friends
     must survive the hop -- Conclair branches on them to decide between a
     full page and a partial.
+
+    ``VIA_HEADER`` is *set*, not forwarded: it tells Conclair the request
+    came through Magickit, and a client-supplied value must not be able to
+    claim that.
     """
-    return {
+    headers = {
         key: value
         for key, value in request.headers.items()
         if key.lower() not in _DROP_REQUEST_HEADERS
+        and key.lower() != VIA_HEADER.lower()
     }
+    headers[VIA_HEADER] = VIA_VALUE
+    return headers
 
 
 def _relativize_location(location: str, upstream_base: str) -> str:

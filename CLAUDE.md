@@ -41,7 +41,8 @@ src/magickit/
 ├── main.py / mcp_server.py / config.py
 ├── api/            routes.py, routes_v2.py, websocket.py, models.py
 ├── core/           task_queue, dependency_graph, state_manager, context_manager,
-│                   project_manager, scheduler, lock_manager, event_publisher
+│                   project_manager, scheduler, lock_manager, event_publisher,
+│                   digest_producer (chatroom 要約の producer)
 ├── mcp/
 │   ├── github_dispatch.py      github-mcp パススルーディスパッチャ
 │   └── tools/                  MCP ツール群 (下表)
@@ -49,7 +50,8 @@ src/magickit/
 │                   lexora, cognilens, prismind, chatroom, unrealwise,
 │                   phanthand (開発PC・独立クラス)
 ├── web/            人間向け HTML。ops(稼働状況) / chatroom_dashboard /
-│                   chatroom_proxy / chatroom_writes / mojibake / deps
+│                   chatroom_proxy / chatroom_writes / chatroom_digest /
+│                   mojibake / deps
 ├── templates/ static/
 └── utils/logging.py
 ```
@@ -385,6 +387,63 @@ API キー未設定のまま `api.openai.com` を叩いて遠端で不定期に�
 
 設定: `ops.stall_minutes` (YAML) / `MAGICKIT_OPS_STALL_MINUTES` (env)。
 
+### チャットルーム要約 (digest) — `core/digest_producer.py`
+
+**Magickit が producer、Conclair が保管庫。** Conclair は他の Spirrow サービスを
+呼ばない leaf (`chatroom_proxy.py` の「No circular dependency」) で、要約を作るには
+Cognilens → Lexora を呼ぶことになる = orchestration ∴ LLM 呼び出しはこちら側で行い、
+結果を `PUT /v1/.../digest` で Conclair に預ける (許された唯一の向き)。
+ティアは Lexora の **`light`** — Cognilens の `config.yaml` が既に `model: "light"`
+なので配線変更は無い。`light` は capabilities に `summarization` を明記し、
+`no_think` なので `<think>` 除去も不要で、ローカル vLLM ∴ 課金ゼロ。
+
+- **freshness は Conclair から導出し、ローカルにキャッシュしない。** digest は
+  `source_last_msg_id` を持ち、messages は append-only ∴「msg-N まで対象」は
+  永久に真。再起動を跨いで正しく、オンデマンド経路が書いた分も見える
+- **失敗の backoff だけ in-memory** (失敗時は何も PUT しない ∴ Conclair は
+  覚えられない) ∴ **sweeper を走らせるプロセスは 1 つだけ = `main.py` の
+  FastAPI プロセス**。`mcp_server.py` は systemd の **2 unit** で動くので、
+  そこに登録すると 1 枚の GPU に sweeper が 3 つ載り failure memory も 3 分裂する
+- **`last_msg_id` が変われば failure count はリセット。** 新しい msg は「今なら
+  通るかもしれない」新証拠であり、誰かが気にしている証拠。リセットが無いと
+  一度の Lexora 障害が永久ブラックリストになる
+- **フラグは 2 本** (`sweeper_enabled` 既定 off / `on_demand_enabled` 既定 on)。
+  無人の GPU 使用と有人の GPU 使用は別のリスクで、既定を逆にすることで
+  「まず評価できる」状態で出せる。sweeper が off であることはログに出す
+  (「なぜ要約が無いのか」に答えが要る)
+- **律速は Lexora light の 60s ではなく `spirrow-cognilens/config.yaml` の
+  `llm.timeout: 30` / `max_retries: 3`。** 長すぎるプロンプトは **~120 秒の GPU を
+  食って何も返さない** ∴ `max_input_chars` はそちらから導出する。上げるときは
+  先に cognilens の `llm.timeout` を上げること
+- **長すぎるスレッドは head+tail 切り出し** (message 境界のみ)。中略マーカーを
+  **プロンプトに入れる**のでモデルが「中略あり」と言える。`progressive_compress` /
+  `unify_summaries` を使わない理由: 前者は wire 不整合の既往、後者は 4〜6 呼び出しに
+  増える上、プロンプトが「同一主題の複数文書」向け (重複除去/矛盾明示) でスレッドの
+  逐次チャンクには噛み合わず lossy な連結に退化する
+- **PUT 前の受入ゲート** (`accept_digest`): error envelope / 空 / 原文以上の長さ /
+  暴走デコードを弾く。**`quality_score` でゲートしない** — `preserve=[]` では
+  `preservation_ratio=1.0` 固定 ∴ 出力長のみの関数に退化する。ログには残す
+- **`hold` の project も digest する。loop control は読まない。** `hold` は
+  「ループが次のターンを取るか」の言明で「誰も読んではいけない」ではなく、人が
+  HOLD を打つのは**まさに何が起きたか見に行くつもりのとき**。GPU 論も逆向き
+  (held ならループが GPU を使っていない)。「全部止めたい」は `sweeper_enabled` が
+  担う。さらに loop control の契約は「読み取り失敗 = hold」∴ それを要約器に
+  組み込むと Conclair のしゃっくりで全 digest が静かに止まる
+- **`tier` / `model` は「要求値」であって観測ではない。** Cognilens の
+  `tools/summarize.py` は `metadata["model"]` を返さないため。`payload.get("model")`
+  を読んでいるので、Cognilens が返すようになった日に自動的に本物になる
+- **オンデマンド POST は proxy より前に claim する** (`chatroom_writes` と同じ前例)。
+  ∴ ボタンは **:8443 経由でしか効かない** — proxy が `X-Spirrow-Via: magickit` を
+  注入するので Conclair は効く経路でだけボタンを描ける。偽装可能だが問題ない:
+  **何を描くかを決めるだけで、何を許すかは決めない** (`actor` と同じ立場)
+- **稼働状況ページの要約は「最後に動いたスレッド」のもの**を「直近の動き」セルの
+  サブラインに出す。`awaiting_reply` のものを選ばないのは、それが既にブロック軸の
+  バッジで、第 2 の場所に出すと 2 軸を潰すから。**他スレッドの digest で代替しない**
+  (thread A と書いてあるセルに thread B の要約が出るのが最悪)。古さは Conclair が
+  返した `stale` だけを根拠にする
+
+設定は `config/magickit_config.yaml` の `digest:` ブロック (各値に理由をコメント済)。
+
 ### 静的資産は自オリジンから配る (CDN 禁止)
 
 **テンプレートの `src=` / `href=` にオリジン付き URL を書かない。** HTMX も含めて
@@ -448,6 +507,14 @@ MAGICKIT_MCP_PORT=8114        # MCP server (Streamable HTTP)
 MAGICKIT_TRANSPORT_MODE=http  # http (default) | sse (legacy)
 MAGICKIT_AUTH_DISABLED=0      # 1 to bypass Google OAuth on the MCP endpoint
 MAGICKIT_OPS_STALL_MINUTES=30 # 稼働状況ページの「停止疑い」しきい値
+
+MAGICKIT_DIGEST_ON_DEMAND_ENABLED=1    # 「要約生成」ボタン (既定 on)
+MAGICKIT_DIGEST_SWEEPER_ENABLED=0      # 無人の定期生成 (既定 off)
+MAGICKIT_DIGEST_SWEEP_INTERVAL_MINUTES=15
+MAGICKIT_DIGEST_MAX_THREADS_PER_CYCLE=5
+MAGICKIT_DIGEST_MIN_MSG_COUNT=4        # これ未満は要約しない
+MAGICKIT_DIGEST_MIN_REDIGEST_MINUTES=60
+MAGICKIT_DIGEST_MAX_INPUT_CHARS=24000  # cognilens の llm.timeout から導出した値
 
 GITHUB_MCP_PAT_IMPLEMENTER=github_pat_...  # Contents/PR/Issues RW
 GITHUB_MCP_PAT_REVIEWER=github_pat_...     # PR/Issues RW, Contents read-only

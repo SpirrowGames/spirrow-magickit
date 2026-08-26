@@ -91,6 +91,24 @@
                     {{ row.last_event.actor }} / {{ row.last_event.action }}
                     / {{ row.last_event.timestamp | ago }}
                 </div>
+                {#
+                  要約は「直近の動き」のサブラインとして、説明対象の thread_id の
+                  真下に置く。7 列目にしない: 既に 6 列 + `.table-stack` で、
+                  スマホでは 7 列目の自由文がカードの中段に段落として落ちる。
+                  サブラインなら「他スレッドの要約を出さない」という正直さが
+                  レイアウトとして表現される。
+                  古さは Conclair が返した `stale` だけを根拠にする。無ければ
+                  生成時刻を出して判定は主張しない (このページの既定の作法)。
+                #}
+                {% if row.digest_line %}
+                <div class="muted ops-sub ops-digest" title="{{ row.digest_full }}">
+                    {% if row.digest_is_stale %}<span class="ops-badge ops-badge-pending">古い</span>{% endif %}
+                    {{ row.digest_line }}
+                    <span class="ops-digest-age">（要約 {{ row.digest_generated_at | ago }}）</span>
+                </div>
+                {% else %}
+                <div class="muted ops-sub ops-digest">要約 未生成</div>
+                {% endif %}
                 {% else %}
                 <span class="muted">—</span>
                 {% endif %}

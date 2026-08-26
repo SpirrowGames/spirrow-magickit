@@ -251,11 +251,150 @@ class ChatroomAdapter(BaseAdapter):
         project: str,
         thread_id: str,
         mode: str = "full",
+        include_digest: bool = False,
     ) -> dict[str, Any]:
+        params: dict[str, Any] = {"mode": mode}
+        if include_digest:
+            # Orthogonal to `mode`. `mode=summary` filters the *messages*
+            # (decide-only on a resolved thread); the digest is a separate
+            # object. Only sent when asked, so nothing changes for the
+            # callers that do not read it.
+            params["include_digest"] = "true"
         return await self._request_json(
             "GET",
             f"/v1/projects/{project}/threads/{thread_id}",
-            params={"mode": mode},
+            params=params,
+        )
+
+    # --- thread digests (LLM summaries) ---------------------------------
+    #
+    # Magickit is the producer and Conclair the store: the digest is
+    # computed here (Cognilens -> Lexora light) and PUT back. That is the
+    # only allowed direction -- Conclair must stay a leaf that calls
+    # nothing, which is also why it cannot make a digest itself.
+
+    async def get_thread_digest(
+        self,
+        *,
+        project: str,
+        thread_id: str,
+        scope: str = "thread",
+        target_msg_id: str | None = None,
+        style: str | None = None,
+    ) -> dict[str, Any]:
+        """Read a thread's stored digest and how far behind it is.
+
+        A thread with no digest yet answers **200** with
+        ``present: false``, not an error envelope. Branch on ``present``:
+        reading "not digested yet" as an outage means never digesting
+        anything, and reading an outage as "not digested yet" costs one
+        light-tier call. Conclair 404s only when the *thread* is missing.
+
+        Args:
+            project: Project identifier.
+            thread_id: Thread whose digest to read.
+            scope: ``thread`` for the whole-thread digest, ``message`` for one msg.
+            target_msg_id: The msg, when ``scope`` is ``message``.
+            style: Which digest to read; producers may store several.
+
+        Returns:
+            Conclair's ``ThreadDigestResponse``, or its error envelope.
+        """
+        params: dict[str, Any] = {"scope": scope}
+        if target_msg_id is not None:
+            params["target_msg_id"] = target_msg_id
+        if style is not None:
+            params["style"] = style
+        return await self._request_json(
+            "GET",
+            f"/v1/projects/{project}/threads/{thread_id}/digest",
+            params=params,
+        )
+
+    async def put_thread_digest(
+        self,
+        *,
+        project: str,
+        thread_id: str,
+        digest: str,
+        source_last_msg_id: str,
+        source_msg_count: int,
+        producer: str,
+        scope: str = "thread",
+        target_msg_id: str | None = None,
+        style: str | None = None,
+        truncated: bool | None = None,
+        model: str | None = None,
+        tier: str | None = None,
+        source_chars: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        duration_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Store (upsert) a finished digest.
+
+        ``source_last_msg_id`` is the freshness key: messages are
+        append-only, so the digest is stale iff it differs from the
+        thread's current ``last_msg_id``. **It must come from the same
+        read the digest was computed from** -- reusing an id from an
+        earlier listing marks the digest as covering messages it never
+        saw. Conclair rejects an id that is not in this thread (409),
+        which also catches a sibling thread's id (``msg_id`` is allocated
+        project-wide) and an over-padded one.
+
+        Args:
+            project: Project identifier.
+            thread_id: Thread the digest describes.
+            digest: The summary text.
+            source_last_msg_id: Newest msg the digest covers.
+            source_msg_count: Msgs the producer actually read (provenance;
+                Conclair derives staleness from the log, not from this).
+            producer: Who wrote it. A record, not a credential.
+            scope: ``thread`` or ``message``.
+            target_msg_id: The msg, when ``scope`` is ``message``.
+            style: Style label; part of the storage key.
+            truncated: The producer shortened the input before summarizing.
+            model: Model that served the request, when observable.
+            tier: Lexora tier that was *requested*.
+            source_chars: Characters actually fed to the model.
+            input_tokens: Prompt tokens, when reported.
+            output_tokens: Completion tokens, when reported.
+            duration_ms: Wall clock for the summarize call.
+
+        Returns:
+            Conclair's ``ThreadDigestResponse``, or its error envelope.
+        """
+        body: dict[str, Any] = {
+            "digest": digest,
+            "source_last_msg_id": source_last_msg_id,
+            "source_msg_count": source_msg_count,
+            "producer": producer,
+            "scope": scope,
+        }
+        # Optional fields are omitted rather than sent as null so Conclair's
+        # own defaults apply -- the same convention as `mark_read`.
+        if target_msg_id is not None:
+            body["target_msg_id"] = target_msg_id
+        if style is not None:
+            body["style"] = style
+        if truncated is not None:
+            body["truncated"] = truncated
+        if model is not None:
+            body["model"] = model
+        if tier is not None:
+            body["tier"] = tier
+        if source_chars is not None:
+            body["source_chars"] = source_chars
+        if input_tokens is not None:
+            body["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            body["output_tokens"] = output_tokens
+        if duration_ms is not None:
+            body["duration_ms"] = duration_ms
+        return await self._request_json(
+            "PUT",
+            f"/v1/projects/{project}/threads/{thread_id}/digest",
+            json=body,
         )
 
     async def list_events(

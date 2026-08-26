@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
@@ -22,6 +23,7 @@ from magickit.api.websocket import router as ws_router, broadcast_to_project
 from magickit.auth.jwt import JWTHandler
 from magickit.auth.middleware import AuthMiddleware
 from magickit.config import get_settings
+from magickit.core.digest_producer import DigestProducer, sweep_forever
 from magickit.core.event_publisher import EventPublisher
 from magickit.core.lock_manager import LockManager
 from magickit.core.migrations import MigrationManager
@@ -34,6 +36,7 @@ from magickit.utils.logging import configure_logging, get_logger
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import close_client as close_chatroom_ui_client
 from magickit.web import dashboard_router as chatroom_dashboard_router
+from magickit.web import digest_router as chatroom_digest_router
 from magickit.web import decisions_router, deploys_router, ops_router
 from magickit.web import router as chatroom_ui_router
 from magickit.web import writes_router as chatroom_writes_router
@@ -149,6 +152,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.event_publisher = event_publisher
     app.state.auth_enabled = settings.auth_enabled
 
+    # Chatroom thread digests. The producer is built unconditionally: the
+    # on-demand route uses it even when the sweeper is off, and the
+    # concurrency semaphore it holds is what keeps ten button presses from
+    # becoming ten concurrent vLLM requests on the one GPU.
+    app.state.digest_producer = DigestProducer(settings)
+
+    # The sweeper is the only thing in Magickit that consumes the GPU
+    # unprompted, so it is opt-in -- and it is started here and ONLY here.
+    # `mcp_server.py` runs as two systemd units, so registering it there
+    # would give three sweepers sharing one card and three disjoint
+    # failure memories (the backoff table is in-memory by design; see
+    # core/digest_producer.py).
+    #
+    # The task reference is held on app.state for two reasons: it is the
+    # cancellation handle, and without a reference a long-lived task can be
+    # garbage collected mid-flight. The existing `asyncio.create_task` sites
+    # (notification_manager, event_publisher) do not hold one -- tolerable
+    # for a fire-and-forget notification, not for this.
+    app.state.digest_sweeper = None
+    if settings.digest_sweeper_enabled:
+        interval = settings.digest_sweep_interval_minutes * 60
+        app.state.digest_sweeper = asyncio.create_task(
+            sweep_forever(
+                app.state.digest_producer,
+                interval=interval,
+                # A cycle that outlives its own interval is the
+                # ops.PROBE_TIMEOUT lesson applied here.
+                cycle_timeout=interval * 0.8,
+            )
+        )
+        logger.info(
+            "Digest sweeper started",
+            interval_minutes=settings.digest_sweep_interval_minutes,
+            max_threads_per_cycle=settings.digest_max_threads_per_cycle,
+        )
+    else:
+        # Logged rather than silent: "why is there no digest" must have an
+        # answer in the log.
+        logger.info(
+            "Digest sweeper disabled", reason="digest.sweeper_enabled=false"
+        )
+
     # Initialize templates
     if TEMPLATES_DIR.exists():
         templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -159,6 +204,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("Shutting down Magickit")
+    if app.state.digest_sweeper is not None:
+        app.state.digest_sweeper.cancel()
+        # `sweep_forever` re-raises CancelledError, so gather it rather than
+        # awaiting it directly.
+        await asyncio.gather(app.state.digest_sweeper, return_exceptions=True)
     await close_chatroom_ui_client()
     await state_manager.close()
 
@@ -195,6 +245,13 @@ def create_app() -> FastAPI:
     # routes are handled here -- with the role / naysayer / embodiment gates
     # -- instead of being forwarded to Conclair's own ungated form handlers.
     app.include_router(chatroom_writes_router)
+
+    # On-demand digest generation. Same reason as the writes router above:
+    # registered before the proxy so this POST is answered here -- Magickit
+    # is the producer, and Cognilens and the GPU live on this side --
+    # instead of being forwarded to a Conclair that has no such route and,
+    # being a leaf, cannot have one.
+    app.include_router(chatroom_digest_router)
 
     # Chatroom panel for the dashboard.
     app.include_router(chatroom_dashboard_router)

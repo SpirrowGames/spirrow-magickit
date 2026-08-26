@@ -856,6 +856,11 @@ textarea {
 
 .ops-idle { font-weight: 600; }
 
+/* The digest sub-line. Already truncated server-side (digest_line), so this
+   is only the visual softening; the full text is in the cell's title. */
+.ops-digest { max-width: 34em; }
+.ops-digest-age { white-space: nowrap; opacity: 0.8; }
+
 /* The stalled row gets a rule down its edge, not a fill: a filled row
    makes its own text harder to read, and this table is mostly text. */
 .ops-row-stalled { box-shadow: inset 3px 0 0 var(--danger-color); }

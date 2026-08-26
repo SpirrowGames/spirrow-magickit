@@ -188,6 +188,62 @@ async def test_htmx_request_headers_reach_conclair():
 
 
 @pytest.mark.asyncio
+async def test_the_via_header_tells_conclair_the_request_came_through_magickit():
+    """Conclair renders the 要約生成 button only where it works.
+
+    That button posts to a route Magickit claims, so through a direct :8115
+    tunnel it would 404. A per-request header is the only signal that can
+    say which path a request took: the same Conclair process serves both at
+    once, so a config flag there cannot tell them apart.
+    """
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({k.lower(): v for k, v in request.headers.items()})
+        return httpx.Response(200, text="ok")
+
+    _install_upstream(handler)
+    await _get("/ui/projects/p/threads/T-x")
+
+    assert seen.get("x-spirrow-via") == "magickit"
+
+
+@pytest.mark.asyncio
+async def test_a_client_supplied_via_header_is_replaced_not_merged():
+    """It decides what to render, not what is allowed -- but it must be ours."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({k.lower(): v for k, v in request.headers.items()})
+        return httpx.Response(200, text="ok")
+
+    _install_upstream(handler)
+    await _get("/ui/projects/p/threads/T-x", headers={"X-Spirrow-Via": "spoofed"})
+
+    assert seen.get("x-spirrow-via") == "magickit"
+
+
+@pytest.mark.asyncio
+async def test_the_via_header_reaches_conclair_on_the_loop_control_post():
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({k.lower(): v for k, v in request.headers.items()})
+        return httpx.Response(200, text="ok")
+
+    _install_upstream(handler)
+    app = create_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        follow_redirects=False,
+    ) as client:
+        await client.post("/ui/projects/p/control", data={"state": "hold", "actor": "x"})
+
+    assert seen.get("x-spirrow-via") == "magickit"
+
+
+@pytest.mark.asyncio
 async def test_hx_trigger_response_header_is_forwarded():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="ok", headers={"HX-Trigger": "messagePosted"})
@@ -317,6 +373,13 @@ async def test_loop_control_post_returns_the_widget_partial():
         (
             "/ui/projects/{project}/threads/{thread_id}/close",
             "magickit.web.chatroom_writes",
+        ),
+        # Digest generation: Magickit is the producer (Cognilens and the GPU
+        # are on this side), and Conclair -- being a leaf -- cannot have this
+        # route at all. Forwarding it would 404.
+        (
+            "/ui/projects/{project}/threads/{thread_id}/digest",
+            "magickit.web.chatroom_digest",
         ),
     ],
 )
