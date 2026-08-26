@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from magickit.adapters.cognilens import CognilensError
 from magickit.mcp.tools import task
 
 
@@ -992,3 +993,55 @@ class TestRegisterTools:
             assert phase_param.default is inspect.Parameter.empty, (
                 f"{name}.phase must be required (no default), got default={phase_param.default!r}"
             )
+
+
+class TestAttachmentSummary:
+    """Tests for _attachment_summary (Cognilens fallback for attachments).
+
+    CognilensAdapter raises rather than returning a rejection as if it were
+    prose, so this helper is what decides whether an attachment survives a
+    summarizer outage.
+    """
+
+    async def test_returns_the_summary_on_success(self):
+        cognilens = AsyncMock()
+        cognilens.summarize.return_value = "3 行の要約"
+
+        out = await task._attachment_summary(cognilens, "body" * 500)
+
+        assert out == "3 行の要約"
+        cognilens.summarize.assert_awaited_once()
+
+    async def test_falls_back_to_a_labelled_excerpt(self):
+        """The attachment must survive, and the reader must know it is not a summary."""
+        cognilens = AsyncMock()
+        cognilens.summarize.side_effect = CognilensError(
+            "summarize returned no 'summary'", tool="summarize"
+        )
+        content = "line\n" * 1000
+
+        out = await task._attachment_summary(cognilens, content)
+
+        assert out.startswith("(要約失敗")
+        assert "以下略" in out
+        assert content[:100] in out
+        # The excerpt is bounded: the stored document must not change size
+        # class just because the summarizer was down.
+        assert len(out) < len(content)
+
+    async def test_short_content_is_not_marked_elided(self):
+        cognilens = AsyncMock()
+        cognilens.summarize.side_effect = CognilensError("down", tool="summarize")
+
+        out = await task._attachment_summary(cognilens, "short body")
+
+        assert "short body" in out
+        assert "以下略" not in out
+
+    async def test_a_non_cognilens_error_is_not_swallowed(self):
+        """Only Cognilens failures degrade. A bug here must still surface."""
+        cognilens = AsyncMock()
+        cognilens.summarize.side_effect = TypeError("unexpected keyword argument")
+
+        with pytest.raises(TypeError):
+            await task._attachment_summary(cognilens, "body")

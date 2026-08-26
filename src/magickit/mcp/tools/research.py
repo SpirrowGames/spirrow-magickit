@@ -11,7 +11,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from magickit.adapters.cognilens import CognilensAdapter
+from magickit.adapters.cognilens import CognilensAdapter, CognilensError
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.utils.logging import get_logger
@@ -247,12 +247,39 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             target_tokens=max_tokens,
         )
 
-        # Use optimize_context for task-aware compression
-        compressed = await cognilens.optimize_context(
-            context=combined_text,
-            task_description=f"Summarize knowledge relevant to: {query}. Style: {summary_style}",
-            target_tokens=max_tokens,
-        )
+        # Use optimize_context for task-aware compression.
+        #
+        # A compression failure degrades to the uncompressed text rather than
+        # failing the whole call: the caller asked for knowledge, and getting
+        # it over budget beats getting nothing. But it must not *look* like a
+        # successful compression, so the over-budget answer carries
+        # `compressed: false` and the reason -- a caller sizing a context
+        # window has to be able to tell the difference.
+        try:
+            compressed = await cognilens.optimize_context(
+                context=combined_text,
+                task_description=(
+                    f"Summarize knowledge relevant to: {query}. Style: {summary_style}"
+                ),
+                target_tokens=max_tokens,
+            )
+        except CognilensError as e:
+            logger.warning(
+                "Compression unavailable; returning uncompressed results",
+                error=str(e),
+                error_type=e.error_type,
+                original_tokens=original_tokens,
+                target_tokens=max_tokens,
+            )
+            return {
+                "summary": combined_text,
+                "source_count": len(unique_entries),
+                "sources": sources,
+                "original_tokens": original_tokens,
+                "final_tokens": original_tokens,
+                "compressed": False,
+                "compression_error": str(e),
+            }
 
         final_tokens = len(compressed) // 4
 
@@ -262,6 +289,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "sources": sources,
             "original_tokens": original_tokens,
             "final_tokens": final_tokens,
+            "compressed": True,
         }
 
     @mcp.tool()
@@ -382,13 +410,29 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
             full_text = "\n\n".join(combined_content)
 
-            # Check if we need to compress first
+            # Check if we need to compress first.
+            #
+            # If compression is unavailable, hard-truncate to the budget
+            # rather than sending an unbounded document downstream: the
+            # budget is the caller's context window, and honouring it with a
+            # visible cut is better than blowing it silently.
             if len(full_text) // 4 > token_budget:
-                full_text = await cognilens.optimize_context(
-                    context=full_text,
-                    task_description=f"Extract key information about: {query}",
-                    target_tokens=token_budget,
-                )
+                try:
+                    full_text = await cognilens.optimize_context(
+                        context=full_text,
+                        task_description=f"Extract key information about: {query}",
+                        target_tokens=token_budget,
+                    )
+                except CognilensError as e:
+                    logger.warning(
+                        "Compression unavailable; truncating to the token budget",
+                        error=str(e),
+                        error_type=e.error_type,
+                        token_budget=token_budget,
+                    )
+                    full_text = (
+                        full_text[: token_budget * 4] + "\n\n…(圧縮できなかったため以下略)"
+                    )
 
             try:
                 # Build essence params, excluding None values

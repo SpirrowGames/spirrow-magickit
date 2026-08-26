@@ -9,7 +9,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from magickit.adapters.cognilens import CognilensAdapter
+from magickit.adapters.cognilens import CognilensAdapter, CognilensError
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.config import Settings
@@ -145,12 +145,29 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 target_tokens=max_context_tokens,
             )
 
-            final_context = await cognilens.optimize_context(
-                context=combined_context,
-                task_description=f"Compress context relevant to: {task}",
-                target_tokens=max_context_tokens,
-            )
-            context_compressed = True
+            # A compression failure must still respect `max_context_tokens`:
+            # the number is the caller's prompt budget, and handing an
+            # uncompressed context to Lexora would blow it. Hard-truncate
+            # with a visible marker and leave `context_compressed` false, so
+            # the response says which of the two happened.
+            try:
+                final_context = await cognilens.optimize_context(
+                    context=combined_context,
+                    task_description=f"Compress context relevant to: {task}",
+                    target_tokens=max_context_tokens,
+                )
+                context_compressed = True
+            except CognilensError as e:
+                logger.warning(
+                    "Context compression unavailable; truncating to the budget",
+                    error=str(e),
+                    error_type=e.error_type,
+                    target_tokens=max_context_tokens,
+                )
+                final_context = (
+                    combined_context[: max_context_tokens * 4]
+                    + "\n\n…(圧縮できなかったため以下略)"
+                )
 
         final_context_tokens = len(final_context) // 4
 

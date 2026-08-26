@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from magickit.adapters.cognilens import CognilensError
 from magickit.adapters.phanthand import (
     PhanthandConnectionError,
     PhanthandFileNotFoundError,
@@ -226,6 +227,79 @@ async def test_smart_read_summarize_mode(tools: dict) -> None:
     assert result["success"] is True
     assert result["results"][0]["processed"] == "A main function that does nothing."
     mock_cog.summarize.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_smart_read_degrades_to_raw_when_cognilens_fails(tools: dict) -> None:
+    """A summarizer failure must not lose a file that was read successfully.
+
+    The Phanthand read is the expensive, fallible half; by the time Cognilens
+    is called the content is already in hand. Dropping the file into `errors`
+    would throw away a read the caller paid for, so the file degrades to raw
+    content and says so.
+    """
+    content = "def main():\n    pass\n" * 100
+    mock_phanthand = AsyncMock()
+    mock_phanthand.read_file.return_value = {
+        "path": "/src/main.py",
+        "content": content,
+        "size": 2000,
+        "encoding": "utf-8",
+    }
+
+    with patch("magickit.mcp.tools.smart_read._get_phanthand", return_value=mock_phanthand), \
+         patch("magickit.mcp.tools.smart_read.CognilensAdapter") as MockCognilens:
+        mock_cog = AsyncMock()
+        mock_cog.summarize.side_effect = CognilensError(
+            "summarize returned no 'summary'", tool="summarize"
+        )
+        MockCognilens.return_value = mock_cog
+
+        result = await tools["smart_read"](
+            files=["/src/main.py"],
+            phanthand_url="http://localhost:7300",
+            phanthand_api_key="key",
+            mode="summarize",
+        )
+
+    assert result["success"] is True
+    assert result["errors"] == []
+    entry = result["results"][0]
+    assert entry["processed"] == content
+    # "mode: raw" alone would read as a choice; the pair says it was a fallback.
+    assert entry["mode"] == "raw"
+    assert entry["requested_mode"] == "summarize"
+    assert "summary" in entry["processing_error"]
+
+
+@pytest.mark.asyncio
+async def test_smart_read_success_carries_no_fallback_markers(tools: dict) -> None:
+    """The fallback keys must be absent on the happy path, not merely empty."""
+    mock_phanthand = AsyncMock()
+    mock_phanthand.read_file.return_value = {
+        "path": "/src/main.py",
+        "content": "x",
+        "size": 1,
+        "encoding": "utf-8",
+    }
+
+    with patch("magickit.mcp.tools.smart_read._get_phanthand", return_value=mock_phanthand), \
+         patch("magickit.mcp.tools.smart_read.CognilensAdapter") as MockCognilens:
+        mock_cog = AsyncMock()
+        mock_cog.summarize.return_value = "summary"
+        MockCognilens.return_value = mock_cog
+
+        result = await tools["smart_read"](
+            files=["/src/main.py"],
+            phanthand_url="http://localhost:7300",
+            phanthand_api_key="key",
+            mode="summarize",
+        )
+
+    entry = result["results"][0]
+    assert entry["mode"] == "summarize"
+    assert "requested_mode" not in entry
+    assert "processing_error" not in entry
 
 
 # ── smart_read: essence mode ─────────────────────────────────────
