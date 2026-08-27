@@ -72,7 +72,12 @@ digest:
   # 無人の定期生成。既定 off — これは Magickit で唯一「誰にも頼まれずに
   # ローカル GPU を使い始める」機構で、コードを書いているループと同じ 1 枚を
   # 共有している。実際の挙動を観測してから on にすること。
-  sweeper_enabled: false
+  #
+  # 2026-08-28 に on。単独で on にしたのではなく、下の sweeper_gpu_idle_only
+  # (GPU が 20 秒静かなときだけ動く) と対で入れている ∴ 「誰にも頼まれずに」は
+  # 残るが「ループの邪魔をしながら」は外れた、という判断。skip 率は毎サイクル
+  # の digest sweep 行の gate_stats に出るので、緩めるかどうかはそれを見て。
+  sweeper_enabled: true
   sweep_interval_minutes: 15
 
   # sweeper が「GPU が暇なときだけ」動く条件。true のまま sweeper_enabled を
