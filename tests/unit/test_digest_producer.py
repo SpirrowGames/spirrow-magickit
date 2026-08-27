@@ -23,11 +23,13 @@ from magickit.adapters.cognilens import CognilensError
 from magickit.core.digest_producer import (
     DigestBounds,
     DigestInput,
+    DigestOutcome,
     DigestProducer,
     accept_digest,
     build_digest_input,
     sweep_forever,
 )
+from magickit.core.gpu_gate import GateVerdict
 
 NOW = datetime(2026, 8, 27, 4, 12, tzinfo=timezone.utc)
 
@@ -943,7 +945,7 @@ async def test_the_sweeper_sleeps_before_its_first_cycle() -> None:
     order: list[str] = []
     producer = MagicMock()
 
-    async def _cycle() -> list[Any]:
+    async def _cycle(_gate: Any = None) -> list[Any]:
         order.append("cycle")
         raise asyncio.CancelledError
 
@@ -966,7 +968,7 @@ async def test_the_sweeper_sleeps_before_its_first_cycle() -> None:
 async def test_one_bad_cycle_does_not_end_the_sweeper() -> None:
     calls = 0
 
-    async def _cycle() -> list[Any]:
+    async def _cycle(_gate: Any = None) -> list[Any]:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -993,7 +995,7 @@ async def test_one_bad_cycle_does_not_end_the_sweeper() -> None:
 async def test_the_sweeper_is_cancellable() -> None:
     """CancelledError must be re-raised, or shutdown hangs on this task."""
 
-    async def _cycle() -> list[Any]:
+    async def _cycle(_gate: Any = None) -> list[Any]:
         return []
 
     producer = MagicMock()
@@ -1199,3 +1201,220 @@ def test_the_truncated_flag_is_not_reused_for_a_cut_off_output() -> None:
     src = inspect.getsource(digest_producer._looks_truncated)
     assert "truncated=" not in src
     assert "rejected_truncated_output" not in src
+
+
+# =====================================================================
+# the GPU idle gate, where it meets the sweeper
+# =====================================================================
+
+
+class _FakeGate:
+    """A gate with a scripted answer, recording how it was asked.
+
+    Not a MagicMock: the two methods mean different things (sustained quiet
+    to enter, one sample to continue) and a test that cannot tell them apart
+    cannot pin the asymmetry that is the whole design.
+    """
+
+    def __init__(self, *, entry: bool = True, during: list[bool] | None = None) -> None:
+        self._entry = entry
+        self._during = list(during or [])
+        self.stats: dict[str, int] = {}
+        self.entry_checks = 0
+        self.mid_checks = 0
+
+    async def confirm_idle(self) -> GateVerdict:
+        self.entry_checks += 1
+        return GateVerdict(self._entry, "idle" if self._entry else "busy", "running=2")
+
+    async def still_idle(self) -> GateVerdict:
+        self.mid_checks += 1
+        idle = self._during.pop(0) if self._during else True
+        return GateVerdict(idle, "idle" if idle else "busy", "running=1")
+
+
+async def test_a_busy_gpu_skips_the_whole_cycle_rather_than_shrinking_it() -> None:
+    """A gate that retried inside the interval would be a gate that polls a
+    busy GPU."""
+    cycles = 0
+
+    async def _cycle(_gate: Any = None) -> list[Any]:
+        nonlocal cycles
+        cycles += 1
+        raise asyncio.CancelledError
+
+    producer = MagicMock()
+    producer.run_cycle = _cycle
+    gate = _FakeGate(entry=False)
+
+    sleeps = 0
+
+    async def _sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 3:
+            raise asyncio.CancelledError
+
+    original = asyncio.sleep
+    asyncio.sleep = _sleep  # type: ignore[assignment]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await sweep_forever(
+                producer, interval=900, cycle_timeout=720, gate=gate
+            )
+    finally:
+        asyncio.sleep = original  # type: ignore[assignment]
+
+    assert cycles == 0
+    assert gate.entry_checks >= 1
+
+
+async def test_a_quiet_gpu_runs_the_cycle_and_hands_the_gate_down() -> None:
+    """The cycle must keep the gate: a check at the door only, and a cleared
+    cycle would hold the card for its whole budget however busy it got."""
+    seen: list[Any] = []
+
+    async def _cycle(gate: Any = None) -> list[Any]:
+        seen.append(gate)
+        raise asyncio.CancelledError
+
+    producer = MagicMock()
+    producer.run_cycle = _cycle
+    gate = _FakeGate(entry=True)
+
+    async def _sleep(_seconds: float) -> None:
+        return None
+
+    original = asyncio.sleep
+    asyncio.sleep = _sleep  # type: ignore[assignment]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await sweep_forever(
+                producer, interval=900, cycle_timeout=720, gate=gate
+            )
+    finally:
+        asyncio.sleep = original  # type: ignore[assignment]
+
+    assert seen == [gate]
+
+
+async def test_the_gate_is_checked_after_the_sleep_not_before_it() -> None:
+    """Checking first would measure the GPU 15 minutes before using it."""
+    order: list[str] = []
+
+    async def _cycle(_gate: Any = None) -> list[Any]:
+        raise asyncio.CancelledError
+
+    producer = MagicMock()
+    producer.run_cycle = _cycle
+
+    class _Recording(_FakeGate):
+        async def confirm_idle(self) -> GateVerdict:
+            order.append("gate")
+            return await super().confirm_idle()
+
+    async def _sleep(_seconds: float) -> None:
+        order.append("sleep")
+
+    original = asyncio.sleep
+    asyncio.sleep = _sleep  # type: ignore[assignment]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await sweep_forever(
+                producer, interval=900, cycle_timeout=720, gate=_Recording()
+            )
+    finally:
+        asyncio.sleep = original  # type: ignore[assignment]
+
+    assert order[:2] == ["sleep", "gate"]
+
+
+async def test_the_cycle_gives_up_the_moment_the_gpu_stops_being_idle() -> None:
+    room = _chatroom_mock()
+    room.list_threads.return_value = {
+        "items": [
+            {"thread_id": f"T-{n}", "status": "active", "last_msg_id": "msg-020",
+             "msg_count": 20, "last_activity_at": "2026-08-27T04:00:00Z"}
+            for n in range(4)
+        ]
+    }
+    # The default per-project cap is 2; this test is about the gate, so lift
+    # it out of the way rather than tuning the assertion around it.
+    producer = _producer(
+        bounds=_bounds(max_threads_per_project=5, max_threads_per_cycle=5)
+    )
+    producer._chatroom = lambda: room  # type: ignore[method-assign]
+    digested: list[str] = []
+
+    async def _digest(**kwargs: Any) -> Any:
+        digested.append(kwargs["thread_id"])
+        return DigestOutcome(kwargs["project"], kwargs["thread_id"], "written", "ok")
+
+    producer.digest_thread = _digest  # type: ignore[method-assign]
+    producer._needs_digest = AsyncMock(return_value=(True, ""))  # type: ignore[method-assign]
+
+    # Idle for the second thread, busy before the third.
+    gate = _FakeGate(during=[True, False])
+
+    outcomes = await producer.run_cycle(gate)
+
+    assert digested == ["T-0", "T-1"]
+    gpu_busy = [o for o in outcomes if o.reason == "gpu_busy"]
+    assert [o.thread_id for o in gpu_busy] == ["T-2", "T-3"]
+    assert all(o.action == "skipped" for o in gpu_busy)
+    # The observation reaches the per-thread record, not just the sweep line.
+    assert gpu_busy[0].detail == "running=1"
+
+
+async def test_the_first_thread_is_not_re_gated() -> None:
+    """`sweep_forever` just paid 20 seconds to establish sustained quiet;
+    asking again here buys the same answer twice."""
+    room = _chatroom_mock()
+    room.list_threads.return_value = {
+        "items": [
+            {"thread_id": "T-only", "status": "active", "last_msg_id": "msg-020",
+             "msg_count": 20, "last_activity_at": "2026-08-27T04:00:00Z"},
+        ]
+    }
+    producer = _producer()
+    producer._chatroom = lambda: room  # type: ignore[method-assign]
+
+    async def _digest(**kwargs: Any) -> Any:
+        return DigestOutcome(kwargs["project"], kwargs["thread_id"], "written", "ok")
+
+    producer.digest_thread = _digest  # type: ignore[method-assign]
+    producer._needs_digest = AsyncMock(return_value=(True, ""))  # type: ignore[method-assign]
+    gate = _FakeGate()
+
+    await producer.run_cycle(gate)
+
+    assert gate.mid_checks == 0
+
+
+async def test_a_cycle_without_a_gate_still_runs_every_candidate() -> None:
+    """The gate is optional at this seam: `run_cycle()` is what the tests
+    above and any future caller use, and it must not depend on one."""
+    room = _chatroom_mock()
+    room.list_threads.return_value = {
+        "items": [
+            {"thread_id": f"T-{n}", "status": "active", "last_msg_id": "msg-020",
+             "msg_count": 20, "last_activity_at": "2026-08-27T04:00:00Z"}
+            for n in range(3)
+        ]
+    }
+    producer = _producer(
+        bounds=_bounds(max_threads_per_project=5, max_threads_per_cycle=5)
+    )
+    producer._chatroom = lambda: room  # type: ignore[method-assign]
+    digested: list[str] = []
+
+    async def _digest(**kwargs: Any) -> Any:
+        digested.append(kwargs["thread_id"])
+        return DigestOutcome(kwargs["project"], kwargs["thread_id"], "written", "ok")
+
+    producer.digest_thread = _digest  # type: ignore[method-assign]
+    producer._needs_digest = AsyncMock(return_value=(True, ""))  # type: ignore[method-assign]
+
+    await producer.run_cycle()
+
+    assert digested == ["T-0", "T-1", "T-2"]
