@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     # unattended GPU use (the sweeper) and attended GPU use (the button).
     # Shipping the sweeper off and the button on is what makes the feature
     # evaluable before it is trusted.
+    # --- deploy approval from the dashboard ------------------------------
+    #
+    # Tailnet logins allowed to approve a deploy from `/dashboard/deploys`
+    # (`web/identity.py` explains why a header is evidence at all). Empty
+    # by default and empty is a real answer: a deployment that has not
+    # named anyone gets the page it had before, read-only, rather than one
+    # that anybody on the tailnet can press. A tagged device such as the
+    # development loop has no user login and so can never appear here.
+    deploy_approver_logins: list[str] = Field(default_factory=list)
+
     digest_on_demand_enabled: bool = Field(default=True)
     # The only thing in Magickit that would start consuming the local GPU
     # with nobody asking, on the same card as the loop that writes code.
@@ -341,6 +351,15 @@ class Settings(BaseSettings):
         # Ops view settings
         if ops := yaml_config.get("ops"):
             flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
+
+        # Who may approve a deploy from the dashboard. An explicit empty
+        # list is meaningful (nobody), so this reads the key rather than
+        # truth-testing the section.
+        if (deploy := yaml_config.get("deploy")) is not None:
+            if "approver_logins" in deploy:
+                flat_config["deploy_approver_logins"] = list(
+                    deploy.get("approver_logins") or []
+                )
 
         # Chatroom thread digests. `False` survives the None-strip below, so
         # `sweeper_enabled: false` in YAML does take effect.
