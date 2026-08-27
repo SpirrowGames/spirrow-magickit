@@ -24,6 +24,7 @@ from magickit.auth.jwt import JWTHandler
 from magickit.auth.middleware import AuthMiddleware
 from magickit.config import get_settings
 from magickit.core.digest_producer import DigestProducer, sweep_forever
+from magickit.core.gpu_gate import GpuGateBounds, GpuIdleGate
 from magickit.core.event_publisher import EventPublisher
 from magickit.core.lock_manager import LockManager
 from magickit.core.migrations import MigrationManager
@@ -170,6 +171,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # garbage collected mid-flight. The existing `asyncio.create_task` sites
     # (notification_manager, event_publisher) do not hold one -- tolerable
     # for a fire-and-forget notification, not for this.
+    #
+    # The gate is built whether or not it is enabled: a disabled gate answers
+    # "idle, gate_off" to everything, so there is one code path through the
+    # sweeper rather than two. It is held on app.state because its per-reason
+    # tally is the evidence for deciding whether the gate can eventually come
+    # off -- see core/gpu_gate.py.
+    app.state.digest_gpu_gate = GpuIdleGate(GpuGateBounds.from_settings(settings))
+
     app.state.digest_sweeper = None
     if settings.digest_sweeper_enabled:
         interval = settings.digest_sweep_interval_minutes * 60
@@ -180,12 +189,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 # A cycle that outlives its own interval is the
                 # ops.PROBE_TIMEOUT lesson applied here.
                 cycle_timeout=interval * 0.8,
+                gate=app.state.digest_gpu_gate,
             )
         )
         logger.info(
             "Digest sweeper started",
             interval_minutes=settings.digest_sweep_interval_minutes,
             max_threads_per_cycle=settings.digest_max_threads_per_cycle,
+            # Logged at startup so a sweeper that never runs can be told apart
+            # from a sweeper that is being refused, before reading a single
+            # cycle's line.
+            gpu_idle_only=settings.digest_sweeper_gpu_idle_only,
+            gpu_metrics_url=settings.digest_gpu_metrics_url,
+            gpu_idle_samples=settings.digest_gpu_idle_samples,
         )
     else:
         # Logged rather than silent: "why is there no digest" must have an

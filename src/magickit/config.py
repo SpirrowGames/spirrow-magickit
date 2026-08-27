@@ -145,6 +145,35 @@ class Settings(BaseSettings):
     digest_sweeper_enabled: bool = Field(default=False)
     digest_sweep_interval_minutes: int = Field(default=15)
 
+    # Whether the sweeper must find the GPU quiet before each cycle, and what
+    # "quiet" means. See core/gpu_gate.py for why the signal is vLLM's own
+    # request gauges rather than nvidia-smi, and why an unreadable probe
+    # counts as busy.
+    #
+    # Defaults to True, so turning the sweeper on does not also mean opting
+    # into unconditional GPU use -- the two questions ("may it run at all",
+    # "may it run now") stay separately answerable, the same split as
+    # on_demand_enabled vs sweeper_enabled one field above.
+    digest_sweeper_gpu_idle_only: bool = Field(default=True)
+    digest_gpu_metrics_url: str = Field(default="http://localhost:8000/metrics")
+    # Sustained quiet, not an instant. The sample right after the coding loop
+    # finishes a turn reads idle and is precisely when the next request is
+    # coming, so 3 samples 10s apart ask for 20 seconds of silence before we
+    # believe it. Costs 20s of wall clock per cycle, outside the cycle's own
+    # timeout because it is not part of the cycle.
+    digest_gpu_idle_samples: int = Field(default=3)
+    digest_gpu_sample_interval_seconds: float = Field(default=10.0)
+    # Short: an unreachable metrics endpoint must be *concluded* quickly, not
+    # waited on. The conclusion is "busy", so a slow probe only delays a
+    # decision already made.
+    digest_gpu_probe_timeout_seconds: float = Field(default=5.0)
+    # Thresholds, in requests. 0/0 means "nothing at all in flight". Raising
+    # max_running to 1 would let a digest ride along with one in-flight
+    # request, which is a real position to take once the skip rate is known --
+    # it is a config field for exactly that reason.
+    digest_gpu_max_running: int = Field(default=0)
+    digest_gpu_max_waiting: int = Field(default=0)
+
     # Per-cycle budget. 5 threads run sequentially, so worst case is a few
     # minutes out of every 15 -- the GPU is free the rest of the time. The
     # per-project cap stops one busy project from spending the whole budget
@@ -379,7 +408,14 @@ class Settings(BaseSettings):
             for yaml_key, field in (
                 ("on_demand_enabled", "digest_on_demand_enabled"),
                 ("sweeper_enabled", "digest_sweeper_enabled"),
+                ("sweeper_gpu_idle_only", "digest_sweeper_gpu_idle_only"),
                 ("sweep_interval_minutes", "digest_sweep_interval_minutes"),
+                ("gpu_metrics_url", "digest_gpu_metrics_url"),
+                ("gpu_idle_samples", "digest_gpu_idle_samples"),
+                ("gpu_sample_interval_seconds", "digest_gpu_sample_interval_seconds"),
+                ("gpu_probe_timeout_seconds", "digest_gpu_probe_timeout_seconds"),
+                ("gpu_max_running", "digest_gpu_max_running"),
+                ("gpu_max_waiting", "digest_gpu_max_waiting"),
                 ("max_threads_per_cycle", "digest_max_threads_per_cycle"),
                 (
                     "max_threads_per_project_per_cycle",

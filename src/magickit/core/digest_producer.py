@@ -39,6 +39,7 @@ from typing import Any, Literal
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.cognilens import CognilensAdapter, CognilensError
 from magickit.config import Settings
+from magickit.core.gpu_gate import GpuIdleGate
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -165,7 +166,8 @@ class DigestOutcome:
     action: Literal["written", "skipped", "failed"]
     #: A short token, so "why is there no digest" has an answer per thread:
     #: too_short / too_small / fresh / recently_digested / backoff /
-    #: read_error / cognilens_error / conclair_error / rejected_* / timeout.
+    #: read_error / cognilens_error / conclair_error / rejected_* / timeout /
+    #: gpu_busy (the GPU stopped being idle partway through the cycle).
     reason: str
     source_last_msg_id: str | None = None
     input_chars: int = 0
@@ -897,19 +899,54 @@ class DigestProducer:
 
     # --- one cycle -------------------------------------------------------
 
-    async def run_cycle(self) -> list[DigestOutcome]:
+    async def run_cycle(self, gate: GpuIdleGate | None = None) -> list[DigestOutcome]:
         """Select, filter, and digest up to the per-cycle budget.
 
         Sequential by construction (``max_concurrency`` defaults to 1):
         there is one GPU, so parallelism buys no throughput and only makes
         the coding loop's own requests queue behind these.
+
+        Args:
+            gate: When given, re-checked before every thread *after* the
+                first, and the cycle gives up the moment the GPU stops being
+                idle. Without it a cycle that was cleared to start would hold
+                the card for its whole budget -- several minutes -- however
+                busy things got in the meantime, which is the difference
+                between a gate at the door and a gate that keeps mattering.
+                The first thread is exempt because ``sweep_forever`` just
+                established sustained quiet; re-asking here would only pay
+                for the same answer.
+
+                The check is safe from counting our own work: the loop is
+                sequential, so nothing of ours is in flight at the moment it
+                runs. A concurrent on-demand press *is* counted, and should
+                be -- somebody is using the GPU.
         """
         chatroom = self._chatroom()
         cognilens = self._cognilens()
         outcomes: list[DigestOutcome] = []
         try:
             candidates = await self.select_candidates(chatroom)
-            for candidate in candidates:
+            for index, candidate in enumerate(candidates):
+                if gate is not None and index:
+                    verdict = await gate.still_idle()
+                    if not verdict.idle:
+                        # Every remaining thread gets its own outcome rather
+                        # than one line about the cycle: `_reason_counts` is
+                        # what makes "why is there no digest" answerable per
+                        # thread, and a break that reported nothing would
+                        # look identical to a cycle that found no candidates.
+                        outcomes.extend(
+                            DigestOutcome(
+                                remaining.project,
+                                remaining.thread_id,
+                                "skipped",
+                                "gpu_busy",
+                                detail=verdict.observed,
+                            )
+                            for remaining in candidates[index:]
+                        )
+                        break
                 needed, skip_reason = await self._needs_digest(
                     chatroom, candidate, force=False
                 )
@@ -936,7 +973,11 @@ class DigestProducer:
 
 
 async def sweep_forever(
-    producer: DigestProducer, *, interval: float, cycle_timeout: float
+    producer: DigestProducer,
+    *,
+    interval: float,
+    cycle_timeout: float,
+    gate: GpuIdleGate | None = None,
 ) -> None:
     """Run one digest cycle per interval, forever.
 
@@ -950,12 +991,33 @@ async def sweep_forever(
         interval: Seconds between cycles.
         cycle_timeout: Hard stop for one cycle. A cycle that outlives its
             own interval is the ops.PROBE_TIMEOUT lesson applied here.
+        gate: When given, each cycle must first find the GPU sustainedly
+            idle (``core/gpu_gate.py``). A refused cycle is skipped whole and
+            logged with its reason -- never retried inside the interval,
+            because a gate that retries is a gate that polls a busy GPU.
+
+            Its wait happens *outside* ``cycle_timeout``, which measures the
+            cycle. The effective period is therefore interval plus the gate's
+            sampling window (~20s at the shipped defaults), and that is the
+            intended reading: the budget bounds work, not waiting.
     """
     while True:
         try:
             await asyncio.sleep(interval)
+            if gate is not None:
+                verdict = await gate.confirm_idle()
+                if not verdict.idle:
+                    # info, not warning: a refusal is this feature working.
+                    logger.info(
+                        "digest sweep skipped",
+                        reason=verdict.reason,
+                        observed=verdict.observed,
+                        samples_taken=verdict.samples_taken,
+                        gate_stats=dict(gate.stats),
+                    )
+                    continue
             outcomes = await asyncio.wait_for(
-                producer.run_cycle(), timeout=cycle_timeout
+                producer.run_cycle(gate), timeout=cycle_timeout
             )
             logger.info(
                 "digest sweep complete",
@@ -963,6 +1025,7 @@ async def sweep_forever(
                 skipped=sum(1 for o in outcomes if o.action == "skipped"),
                 failed=sum(1 for o in outcomes if o.action == "failed"),
                 reasons=_reason_counts(outcomes),
+                gate_stats=dict(gate.stats) if gate is not None else None,
             )
         except asyncio.CancelledError:
             # Must re-raise, or the sweeper cannot be cancelled and shutdown

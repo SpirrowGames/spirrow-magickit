@@ -75,6 +75,34 @@ digest:
   sweeper_enabled: false
   sweep_interval_minutes: 15
 
+  # sweeper が「GPU が暇なときだけ」動く条件。true のまま sweeper_enabled を
+  # on にするのが想定手順で、既定 true なのは「動かしてよいか」と「今動いて
+  # よいか」を別々に答えられる状態を保つため (on_demand と sweeper を 2 枚の
+  # フラグに割ったのと同じ理由)。
+  sweeper_gpu_idle_only: true
+
+  # 判定は vLLM 自身のキュー。nvidia-smi の utilization は瞬間値で、しかも
+  # このマシンでは 0% のまま 31,770MiB / 32,607MiB が重みで常駐している ∴
+  # 「誰か待っているか」に答えられない。GPU を掴むプロセスは vLLM 1 つだけ
+  # (Forge 停止 + bge-m3 CPU 化) なので、このゲージは GPU 需要の全体になる。
+  #
+  # Lexora 経由にしないのは /stats が累積カウンタで「今」を答えられないから。
+  # モデル呼び出しではなく観測用の read ∴ ゲートウェイの外側を回ってはいない。
+  gpu_metrics_url: "http://localhost:8000/metrics"
+
+  # 「今」暇では足りない — ループが 1 ターン終えた直後は必ず idle に見え、
+  # そこが次のリクエストが来る瞬間。10 秒 x 3 = 20 秒の静寂を条件にする。
+  # この待ちは cycle_timeout の外側 ∴ 実効周期は interval + 約 20 秒。
+  gpu_idle_samples: 3
+  gpu_sample_interval_seconds: 10.0
+  # 取れないときは「暇」ではなく「不明」→ 見送る。∴ 遅く待つ意味が無く短い。
+  gpu_probe_timeout_seconds: 5.0
+  # 閾値 (リクエスト数)。0/0 は「1 本も飛んでいないこと」。skip 率を観測した
+  # 後に max_running: 1 (1 本までは相乗り可) へ緩めるのは十分あり得る判断で、
+  # そのために config にしてある。
+  gpu_max_running: 0
+  gpu_max_waiting: 0
+
   # 1 サイクルの上限。5 本を逐次で回すので最悪でも数分、15 分間隔なら GPU の
   # 大半は空く。1 プロジェクトあたりの取り分を別に切るのは、忙しい 1 本が
   # 予算を食い切って他が永久に順番待ちになるのを防ぐため (round-robin と組)。
