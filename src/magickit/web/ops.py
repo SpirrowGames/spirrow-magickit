@@ -131,6 +131,12 @@ class ProjectOps:
 
     last_event: dict[str, Any] = field(default_factory=dict)
 
+    # The digest of `last_event.thread_id`, when one is stored. Answers a
+    # third question the two axes do not: 何を話しているのか. Never another
+    # thread's digest -- see `_row_digest`.
+    digest: dict[str, Any] | None = None
+    digest_chars: int = 160
+
     # Derived below; templates read these rather than recomputing.
     status: str = "unknown"
     heartbeat_at: datetime | None = None
@@ -141,6 +147,41 @@ class ProjectOps:
     @property
     def status_label(self) -> str:
         return STATUS_LABELS.get(self.status, self.status)
+
+    @property
+    def digest_line(self) -> str:
+        """The digest, cut to one scannable line. Empty when there is none.
+
+        Truncated because a 400-token digest is 4-6 lines and 20 rows of
+        that stops being readable in one screen, which is this page's whole
+        claim. The full text goes in the cell's `title`.
+        """
+        if not self.digest:
+            return ""
+        text = " ".join(str(self.digest.get("digest", "")).split())
+        if len(text) <= self.digest_chars:
+            return text
+        return text[: self.digest_chars - 1] + "…"
+
+    @property
+    def digest_full(self) -> str:
+        return str(self.digest.get("digest", "")) if self.digest else ""
+
+    @property
+    def digest_is_stale(self) -> bool:
+        """Only ever from Conclair's own verdict.
+
+        This page's standing rule is to make no claim it cannot back. A
+        digest response without `stale` (an older Conclair) gets its age
+        shown and no staleness claim at all.
+        """
+        return bool(self.digest and self.digest.get("stale") is True)
+
+    @property
+    def digest_generated_at(self) -> datetime | None:
+        if not self.digest:
+            return None
+        return parse_ts(self.digest.get("generated_at"))
 
     @property
     def blocked_note(self) -> str:
@@ -270,6 +311,51 @@ async def _row_details(adapter: ChatroomAdapter, row: ProjectOps) -> None:
                 "timestamp": latest.get("timestamp"),
             }
 
+    await _row_digest(adapter, row)
+
+
+async def _row_digest(adapter: ChatroomAdapter, row: ProjectOps) -> None:
+    """Attach the digest of the thread that moved last, if there is one.
+
+    **Which thread**: ``last_event.thread_id``, which the read above already
+    produced -- so selecting it costs no extra call. Not the
+    ``awaiting_reply`` one: "awaiting a reply" is already the ブロック軸
+    badge, and putting that thread's digest in a second place would make the
+    blocked axis louder and the 稼働軸 quieter, which is exactly the
+    two-axis collapse this module forbids. The digest answers a *third*
+    question -- 何を話しているのか -- and the thread that moved last is the
+    honest answer to it.
+
+    **Never substituted.** If that thread has no digest, the cell says so.
+    A digest labelled with this project that describes thread B while the
+    直近の動き cell says thread A is the worst possible cell on this page.
+
+    A separate step rather than a third leg of the gather above, because it
+    depends on that gather's result. Guarded on its own: a missing digest is
+    not a reason to stop reporting whether anything is running, so this
+    never reaches the `unavailable` path that blanks the page.
+    """
+    thread_id = row.last_event.get("thread_id")
+    if not thread_id:
+        return
+    try:
+        stored = await adapter.get_thread_digest(
+            project=row.project, thread_id=str(thread_id)
+        )
+    except Exception as e:  # noqa: BLE001 - a dead cell must not kill the page
+        logger.warning(
+            "Digest read failed for the ops row",
+            project=row.project,
+            thread_id=thread_id,
+            error=str(e),
+        )
+        return
+    if _is_error(stored) or not stored.get("present"):
+        return
+    digest = stored.get("digest")
+    if isinstance(digest, dict):
+        row.digest = digest
+
 
 async def collect(settings: Settings, *, now: datetime | None = None) -> dict[str, Any]:
     """Build the whole view. Returns the template context."""
@@ -314,6 +400,7 @@ async def collect(settings: Settings, *, now: datetime | None = None) -> dict[st
                     awaiting=int(by_status.get("awaiting_reply", 0) or 0),
                     gated=int(entry.get("gated_thread_count", 0) or 0),
                     last_activity_at=parse_ts(entry.get("last_activity_at")),
+                    digest_chars=settings.digest_dashboard_chars,
                 )
             )
 

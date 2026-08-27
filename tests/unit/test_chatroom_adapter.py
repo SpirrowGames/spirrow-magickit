@@ -477,3 +477,152 @@ async def test_list_unread_default_include_resolved_is_false(
     await adapter.list_unread(project="p", identity_name="Bohr")
     params = dict(request_mock.call_args.kwargs["params"])
     assert params["include_resolved"] == "false"
+
+
+# ---- thread digests ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_put_thread_digest_sends_the_required_fields(
+    adapter: ChatroomAdapter,
+) -> None:
+    request_mock = _patch_request(adapter, _resp(200, {"present": True}))
+
+    await adapter.put_thread_digest(
+        project="p",
+        thread_id="T-1",
+        digest="要約",
+        source_last_msg_id="msg-042",
+        source_msg_count=18,
+        producer="magickit-digest-sweeper",
+    )
+
+    method, path = request_mock.call_args.args
+    assert method == "PUT"
+    assert path == "/v1/projects/p/threads/T-1/digest"
+    assert request_mock.call_args.kwargs["json"] == {
+        "digest": "要約",
+        "source_last_msg_id": "msg-042",
+        "source_msg_count": 18,
+        "producer": "magickit-digest-sweeper",
+        "scope": "thread",
+    }
+
+
+@pytest.mark.asyncio
+async def test_put_thread_digest_omits_unset_optionals(
+    adapter: ChatroomAdapter,
+) -> None:
+    """Omitted rather than null, so Conclair's own defaults apply.
+
+    Same convention as mark_read's up_to_msg_id.
+    """
+    request_mock = _patch_request(adapter, _resp(200, {"present": True}))
+
+    await adapter.put_thread_digest(
+        project="p", thread_id="T-1", digest="要約",
+        source_last_msg_id="msg-042", source_msg_count=18, producer="x",
+    )
+
+    body = request_mock.call_args.kwargs["json"]
+    for field in ("style", "truncated", "model", "tier", "target_msg_id",
+                  "source_chars", "input_tokens", "output_tokens", "duration_ms"):
+        assert field not in body
+
+
+@pytest.mark.asyncio
+async def test_put_thread_digest_carries_provenance_when_given(
+    adapter: ChatroomAdapter,
+) -> None:
+    request_mock = _patch_request(adapter, _resp(200, {"present": True}))
+
+    await adapter.put_thread_digest(
+        project="p", thread_id="T-1", digest="要約",
+        source_last_msg_id="msg-042", source_msg_count=18, producer="x",
+        style="concise", truncated=True, model="Qwen3-32B", tier="light",
+        source_chars=21000, input_tokens=6000, output_tokens=380,
+        duration_ms=18400,
+    )
+
+    body = request_mock.call_args.kwargs["json"]
+    assert body["style"] == "concise"
+    assert body["truncated"] is True
+    assert body["model"] == "Qwen3-32B"
+    assert body["tier"] == "light"
+    assert body["source_chars"] == 21000
+    assert body["duration_ms"] == 18400
+
+
+@pytest.mark.asyncio
+async def test_put_thread_digest_keeps_truncated_false_on_the_wire(
+    adapter: ChatroomAdapter,
+) -> None:
+    """`False` is a claim ("nothing was elided"), not an unset value."""
+    request_mock = _patch_request(adapter, _resp(200, {"present": True}))
+
+    await adapter.put_thread_digest(
+        project="p", thread_id="T-1", digest="要約",
+        source_last_msg_id="msg-042", source_msg_count=18, producer="x",
+        truncated=False,
+    )
+
+    assert request_mock.call_args.kwargs["json"]["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_defaults_to_the_thread_scope(
+    adapter: ChatroomAdapter,
+) -> None:
+    request_mock = _patch_request(
+        adapter, _resp(200, {"present": False, "digest": None})
+    )
+
+    await adapter.get_thread_digest(project="p", thread_id="T-1")
+
+    method, path = request_mock.call_args.args
+    assert method == "GET"
+    assert path == "/v1/projects/p/threads/T-1/digest"
+    assert request_mock.call_args.kwargs["params"] == {"scope": "thread"}
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_absence_is_not_an_error(
+    adapter: ChatroomAdapter,
+) -> None:
+    """Callers branch on `present`, not on `error_type`.
+
+    Reading "not digested yet" as an outage means never digesting anything.
+    """
+    _patch_request(adapter, _resp(200, {"present": False, "digest": None}))
+
+    result = await adapter.get_thread_digest(project="p", thread_id="T-1")
+
+    assert "error_type" not in result
+    assert result["present"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_forwards_the_error_envelope(
+    adapter: ChatroomAdapter,
+) -> None:
+    err = {"error_type": "ChatroomNotFoundError", "error": "no thread"}
+    _patch_request(adapter, _resp(404, err))
+
+    assert await adapter.get_thread_digest(project="p", thread_id="T-x") == err
+
+
+@pytest.mark.asyncio
+async def test_get_thread_only_asks_for_the_digest_when_told(
+    adapter: ChatroomAdapter,
+) -> None:
+    """Nothing changes for the callers that do not read it."""
+    request_mock = _patch_request(adapter, _resp(200, {"thread": {}, "messages": []}))
+
+    await adapter.get_thread(project="p", thread_id="T-1")
+    assert request_mock.call_args.kwargs["params"] == {"mode": "full"}
+
+    await adapter.get_thread(project="p", thread_id="T-1", include_digest=True)
+    assert request_mock.call_args.kwargs["params"] == {
+        "mode": "full",
+        "include_digest": "true",
+    }

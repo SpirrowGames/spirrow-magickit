@@ -218,7 +218,7 @@ def test_parse_ts_returns_none_rather_than_raising(value):
 # --- collect(): degradation ----------------------------------------------
 
 
-def _adapter(summaries, *, control=None, events=None):
+def _adapter(summaries, *, control=None, events=None, digest=None):
     adapter = AsyncMock()
     if isinstance(summaries, BaseException):
         adapter.list_project_summaries.side_effect = summaries
@@ -231,7 +231,35 @@ def _adapter(summaries, *, control=None, events=None):
         "observed_at": None,
     }
     adapter.list_events.return_value = events or {"items": []}
+    # Explicit rather than left to AsyncMock's auto-attribute, so a test that
+    # does not care about digests still gets a deterministic "none stored".
+    adapter.get_thread_digest.return_value = digest or {
+        "present": False,
+        "digest": None,
+    }
     return adapter
+
+
+def _event(thread_id="T-1", **kw):
+    entry = {
+        "thread_id": thread_id,
+        "actor": "Heisenberg",
+        "action": "post_message",
+        "timestamp": NOW.isoformat(),
+    }
+    entry.update(kw)
+    return {"items": [entry]}
+
+
+def _digest(text="Bohr が X を提案、Einstein が Y を指摘。", **kw):
+    body = {
+        "digest": text,
+        "stale": False,
+        "generated_at": NOW.isoformat(),
+        "producer": "magickit-digest-sweeper",
+    }
+    body.update(kw)
+    return {"present": True, "digest": body}
 
 
 def _summary(**kw):
@@ -612,3 +640,145 @@ async def test_table_opts_into_stacking():
     body = (await _get("/dashboard/_ops", adapter)).text
 
     assert "table-stack" in body
+
+
+# --- the digest sub-line --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_digest_of_the_thread_that_moved_last_is_shown():
+    """Which thread: `last_event.thread_id`, which the events read already gave.
+
+    Not the awaiting_reply one -- "awaiting a reply" is already the ブロック軸
+    badge, and a second appearance would make the blocked axis louder and the
+    稼働軸 quieter. The digest answers a third question (何を話しているのか).
+    """
+    adapter = _adapter(
+        {"items": [_summary()], "total": 1},
+        events=_event("T-42"),
+        digest=_digest(),
+    )
+
+    context = await _collect(adapter)
+    row = context["rows"][0]
+
+    assert row.digest is not None
+    assert "Bohr が X を提案" in row.digest_line
+    adapter.get_thread_digest.assert_awaited_once()
+    assert adapter.get_thread_digest.await_args.kwargs["thread_id"] == "T-42"
+
+
+@pytest.mark.asyncio
+async def test_no_events_means_no_digest_read_at_all():
+    """Nothing to label it with, so there is nothing to ask for."""
+    adapter = _adapter({"items": [_summary()], "total": 1}, events={"items": []})
+
+    context = await _collect(adapter)
+
+    assert context["rows"][0].digest is None
+    adapter.get_thread_digest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_absent_digest_leaves_the_row_empty_rather_than_substituting():
+    """A digest describing thread B under a cell that says thread A is the
+    worst possible cell on this page."""
+    adapter = _adapter(
+        {"items": [_summary()], "total": 1},
+        events=_event("T-42"),
+        digest={"present": False, "digest": None},
+    )
+
+    context = await _collect(adapter)
+
+    assert context["rows"][0].digest is None
+    assert context["rows"][0].digest_line == ""
+
+
+@pytest.mark.asyncio
+async def test_a_failing_digest_read_leaves_the_rest_of_the_row_intact():
+    """A missing digest is not a reason to stop reporting whether anything runs."""
+    adapter = _adapter(
+        {"items": [_summary()], "total": 1},
+        control={
+            "desired_state": "run",
+            "configured": True,
+            "observed_state": "run",
+            "observed_at": NOW.isoformat(),
+        },
+        events=_event("T-42"),
+    )
+    adapter.get_thread_digest.side_effect = httpx.ConnectError("nope")
+
+    context = await _collect(adapter)
+    row = context["rows"][0]
+
+    assert context["unavailable"] is None
+    assert row.status == "running"
+    assert row.last_event["thread_id"] == "T-42"
+    assert row.digest is None
+
+
+@pytest.mark.asyncio
+async def test_a_digest_error_envelope_is_treated_as_absent():
+    adapter = _adapter(
+        {"items": [_summary()], "total": 1},
+        events=_event("T-42"),
+        digest={"error_type": "ChatroomNotFoundError", "error": "gone"},
+    )
+
+    context = await _collect(adapter)
+
+    assert context["rows"][0].digest is None
+
+
+def test_the_digest_line_is_truncated_and_the_full_text_kept():
+    row = _row(
+        digest={"digest": "あ" * 500, "stale": False},
+        digest_chars=160,
+    )
+
+    assert len(row.digest_line) == 160
+    assert row.digest_line.endswith("…")
+    assert len(row.digest_full) == 500
+
+
+def test_the_digest_line_collapses_newlines():
+    """A multi-line digest in a table cell would break the row height."""
+    row = _row(digest={"digest": "one\n\ntwo\nthree", "stale": False})
+
+    assert row.digest_line == "one two three"
+
+
+def test_staleness_is_claimed_only_when_conclair_says_so():
+    """This page never invents a verdict.
+
+    An older Conclair that does not send `stale` gets its age shown and no
+    claim made -- the same stance as `control` read failures becoming
+    `unknown` rather than "probably running".
+    """
+    assert _row(digest={"digest": "x", "stale": True}).digest_is_stale is True
+    assert _row(digest={"digest": "x", "stale": False}).digest_is_stale is False
+    assert _row(digest={"digest": "x"}).digest_is_stale is False
+    assert _row(digest=None).digest_is_stale is False
+
+
+@pytest.mark.asyncio
+async def test_the_digest_is_escaped_in_the_rendered_page():
+    """The digest is model output derived from user-supplied message content."""
+    adapter = _adapter(
+        {"items": [_summary()], "total": 1},
+        events=_event("T-42"),
+        digest=_digest("<script>alert(1)</script>"),
+    )
+
+    with patch.object(ops, "ChatroomAdapter", return_value=adapter):
+        app = create_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            response = await client.get("/dashboard/_ops")
+
+    assert response.status_code == 200
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;" in response.text

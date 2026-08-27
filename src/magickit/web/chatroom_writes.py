@@ -176,6 +176,7 @@ def _flash(
     *,
     status_code: int = 200,
     text_fields: dict[str, str] | None = None,
+    trigger: str = "messagePosted",
 ) -> Response:
     """Render a success flash into Conclair's alert markup.
 
@@ -183,6 +184,12 @@ def _flash(
     looks mis-decoded, the warning is appended below the success. The
     check runs on what the author typed, not on what was stored, so a body
     rewritten by the close policies is not what gets inspected.
+
+    ``trigger`` is the ``HX-Trigger`` event name. It is a parameter rather
+    than a constant because a digest is not a post, and Conclair's page may
+    want to bind the two differently -- but the markup is shared on purpose,
+    so a gate rejection and a digest failure land in the same flash slot
+    styled by the same stylesheet.
     """
     body = f'<div class="alert alert-success">{html.escape(message)}</div>'
     hit = first_mojibake(text_fields or {})
@@ -196,7 +203,7 @@ def _flash(
         content=body,
         status_code=status_code,
         media_type="text/html; charset=utf-8",
-        headers={"HX-Trigger": "messagePosted"},
+        headers={"HX-Trigger": trigger},
     )
 
 

@@ -48,3 +48,107 @@ ops:
   # かつ「夜中に落ちていた」を翌朝まで気づかない長さにはしない。
   # これは推測であって観測ではない (web/ops.py を参照)。
   stall_minutes: 30
+
+# チャットルーム要約 (digest)
+#
+# producer は Magickit、保管と表示は Conclair。messages は append-only ∴
+# digest が陳腐化するのは source_last_msg_id != thread.last_msg_id のときだけ。
+digest:
+  # 人が押したときだけ生成する経路。ボタンは Magickit 経由 (:8443) のみ有効。
+  on_demand_enabled: true
+
+  # 無人の定期生成。既定 off — これは Magickit で唯一「誰にも頼まれずに
+  # ローカル GPU を使い始める」機構で、コードを書いているループと同じ 1 枚を
+  # 共有している。実際の挙動を観測してから on にすること。
+  sweeper_enabled: false
+  sweep_interval_minutes: 15
+
+  # 1 サイクルの上限。5 本を逐次で回すので最悪でも数分、15 分間隔なら GPU の
+  # 大半は空く。1 プロジェクトあたりの取り分を別に切るのは、忙しい 1 本が
+  # 予算を食い切って他が永久に順番待ちになるのを防ぐため (round-robin と組)。
+  max_threads_per_cycle: 5
+  max_threads_per_project_per_cycle: 2
+  # GPU 1 枚・vLLM 1 インスタンス ∴ 並列にしても速くならず、コードを書いて
+  # いるループのリクエストを待たせるだけ。
+  max_concurrency: 1
+
+  # これ未満は要約しない。propose + 返信 1 本は、それ自体が最短で正確な説明。
+  # 件数だけでは嘘をつく (1 行 ack が 6 本 vs 8KB が 2 本) ∴ 両方を見る。
+  min_msg_count: 4
+  min_input_chars: 1200
+  # 1 msg 増えるだけで陳腐化する ∴ 床が無いと活発な 1 本が毎サイクル独占する。
+  min_redigest_minutes: 60
+
+  # 入力上限。context 長ではなく **timeout** から決めた値。律速は Lexora
+  # light の 60s ではなく spirrow-cognilens の llm.timeout=30 / max_retries=3
+  # (= 失敗しても ~120s の GPU を食う)。
+  #
+  # context 長は律速ではない。直感と逆なので明記しておく: 実測 (2026-08-27、
+  # 実バックエンド) で日本語の散文 + 識別子 + コードは **~0.40 token/文字** ∴
+  # 24k 文字 ≒ 9.6k prompt token で、context 32768 の 3 分の 1 程度しか使わない。
+  # 上げるときに見るべきは cognilens の llm.timeout であって context ではない。
+  max_input_chars: 24000
+  # 中略は真ん中に入れる。propose (なぜ) と直近 (どこで詰まったか) を残す。
+  head_chars_ratio: 0.6
+  # 貼られたログ 1 本で head を食い潰さないための個別上限。
+  max_msg_chars: 4000
+
+  # Cognilens summarize の引数。bullet はダッシュボードの 1 行に向かず、
+  # detailed はこの圧縮率では目的を失う。
+  style: "concise"
+  # 400 から実測に基づき引き上げた。Cognilens は prompt で
+  # `最大{max_tokens}トークン程度` と宣言し `concise` は「1-3文で」を求めるが、
+  # 下の preserve 4 項目が両方と競合する: 実スレッド 14 サンプルで completion は
+  # 85〜379 token に散り、要求を全部満たそうとした 1 本は 379/400 で
+  # 796 文字の多節構造になった。上限が効いてしまうと文中で切れ、しかも
+  # Cognilens は finish_reason を返さない ∴ 断片が完成した要約の顔で届く。
+  # 600 は観測最大に余裕を持たせた**上限**であって目標ではなく、使わなければ
+  # コストは無い。切れて見えるものは accept_digest が別途拒否する。
+  max_tokens: 600
+  # 1 回の summarize の打ち切り。cognilens 内部の worst case (30s x 4 試行) +
+  # 余裕。services.cognilens.timeout (240s) をそのまま継ぐと sweep 間隔より
+  # 長生きする (ops.PROBE_TIMEOUT と同じ理由)。
+  summarize_timeout_seconds: 150.0
+
+  # sweeper の対象 status。resolved を既定に入れない — それらの digest は
+  # 二度と古くならない代わりに、初回 sweep が 3,000 件超の archive を GPU で
+  # 総なめすることになる。backfill は script の仕事。
+  include_statuses: ["active", "awaiting_reply"]
+
+  # 失敗したスレッドの再試行間隔 (指数)。同じスレッドで予算を永久に燃やさない
+  # ための唯一の防壁。last_msg_id が変われば「新しい証拠」なので回数はリセット。
+  failure_backoff_minutes: 30
+  failure_backoff_max_minutes: 720
+  max_consecutive_failures: 5
+
+  # 手動生成の外側の打ち切り (read + summarize + PUT)。押した人を無限に
+  # 待たせない。summarize_timeout_seconds より必ず長くすること。
+  on_demand_timeout_seconds: 180.0
+
+  # 稼働状況ページの 1 行に出す文字数 (全文は title 属性)。
+  dashboard_chars: 160
+
+  # 要約が必ず残すもの。Cognilens が prompt に
+  # `- 以下の要素は必ず保持: ...` として差し込む ∴ 他の Cognilens 利用者と
+  # 共有しているプロンプト本体を触らずに出力を制御できる唯一のレバー。
+  #
+  # 実測 (2026-08-27、実バックエンド) に基づく。各行に理由がある:
+  #
+  # - preserve 無しでは msg id が **1 つも引用されない** (実スレッド 2 本 ×
+  #   プロンプト 4 種 = 8 出力すべてで 0 件。英語指示の 2 種も同じ)。引用は
+  #   頼まなければ起きない。msg id を入力に含めている意味は、要約が
+  #   「msg-1870 で決定」と書けてログまで辿れることにある
+  # - 1 行目で主題を要求しているのは意図的。引用だけを要求すると帰属
+  #   (誰がどの msg で何を言ったか) に引っ張られ、実質が押し出される。
+  #   「PR #184 が next_participant 消費側配線を実装した」が主題のスレッドで、
+  #   引用ありの版はどちらも merge 手続きの話から始めて、何を作ったのかを
+  #   最後まで書かなかった
+  # - 「記録されている場合のみ」は丁寧さではない。「発言者名とその role」と
+  #   だけ書いたら、role が NULL の msg に対して `msg-1802 (human, role: human)`
+  #   と**記録に無い属性値を書き足した**。`_render_message` は null role を
+  #   意図的に落としている ∴ prompt 側で戻させない
+  preserve:
+    - "このスレッドで決まったこと・作られたもの (主題)"
+    - "決定を下した msg の id (msg-NNNN 形式)"
+    - "発言者名。role は記録されている場合のみ併記し、無い場合は補わない"
+    - "引き渡し先の thread id"

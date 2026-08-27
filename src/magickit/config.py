@@ -122,6 +122,133 @@ class Settings(BaseSettings):
     # This is a *suspicion* threshold, not a fact -- see web/ops.py.
     ops_stall_minutes: int = Field(default=30)
 
+    # Chatroom thread digests. Magickit is the producer (Cognilens -> Lexora
+    # `light`); Conclair stores and renders. See core/digest_producer.py.
+    #
+    # Two enable flags, not one, because they are two different risks:
+    # unattended GPU use (the sweeper) and attended GPU use (the button).
+    # Shipping the sweeper off and the button on is what makes the feature
+    # evaluable before it is trusted.
+    digest_on_demand_enabled: bool = Field(default=True)
+    # The only thing in Magickit that would start consuming the local GPU
+    # with nobody asking, on the same card as the loop that writes code.
+    digest_sweeper_enabled: bool = Field(default=False)
+    digest_sweep_interval_minutes: int = Field(default=15)
+
+    # Per-cycle budget. 5 threads run sequentially, so worst case is a few
+    # minutes out of every 15 -- the GPU is free the rest of the time. The
+    # per-project cap stops one busy project from spending the whole budget
+    # and starving the others (paired with a round-robin cursor).
+    digest_max_threads_per_cycle: int = Field(default=5)
+    digest_max_threads_per_project_per_cycle: int = Field(default=2)
+    # One GPU, one vLLM instance: concurrency buys no throughput and only
+    # makes the coding loop's own requests queue behind these.
+    digest_max_concurrency: int = Field(default=1)
+
+    # Floors below which a digest is worse than the original. A propose plus
+    # one reply already *is* the shortest accurate account of itself.
+    # Message count alone lies (six one-line acks vs two 8KB essays), so
+    # both apply.
+    digest_min_msg_count: int = Field(default=4)
+    digest_min_input_chars: int = Field(default=1200)
+    # A single new msg makes a digest stale, so without a floor one busy
+    # thread would take the whole budget every cycle.
+    digest_min_redigest_minutes: int = Field(default=60)
+
+    # Input ceiling, derived from a *timeout* rather than a context length.
+    # The binding limit is not Lexora's light tier (60s) but Cognilens's own
+    # `llm.timeout: 30` with `max_retries: 3` -- an over-long prompt spends
+    # ~120s of GPU and returns nothing.
+    #
+    # Context length is NOT the constraint, and it is worth saying so because
+    # the intuition runs the other way. Measured against the live backend
+    # (2026-08-27): mixed Japanese prose + identifiers + code costs ~0.40
+    # tokens/char, so 24k chars is ~9.6k prompt tokens against a 32768
+    # context -- roughly a third of it. Raise spirrow-cognilens/config.yaml's
+    # llm.timeout before raising this; the context has room, the clock does
+    # not.
+    digest_max_input_chars: int = Field(default=24000)
+    # Where the elision goes when a thread does not fit: keep the propose
+    # (why the thread exists) and the latest exchange (where it is stuck).
+    digest_head_chars_ratio: float = Field(default=0.6)
+    # Per-message cap, so one pasted log cannot eat the head budget.
+    digest_max_msg_chars: int = Field(default=4000)
+
+    # Cognilens summarize arguments. `bullet` does not fit the dashboard's
+    # one-line slot and `detailed` loses the point at this compression.
+    digest_style: str = Field(default="concise")
+    # Raised from 400 after measuring. Cognilens states the budget in its
+    # prompt (`最大{max_tokens}トークン程度`) and `concise` asks for 1-3
+    # sentences, but the four-item `digest_preserve` list below competes with
+    # both: across 14 real-thread samples completions ran 85-379 tokens, and
+    # one asked-for-everything thread produced a multi-section 796-char
+    # answer at 379/400. A ceiling that binding truncates mid-sentence, and
+    # Cognilens does not forward `finish_reason`, so the fragment would
+    # arrive looking like a finished summary. 600 leaves the observed
+    # maximum room; it is a cap, not a target, and costs nothing unused.
+    # `accept_digest` still refuses anything that looks cut off.
+    digest_max_tokens: int = Field(default=600)
+    # Cut-off for one summarize call: Cognilens's own worst case (30s x 4
+    # attempts) plus slack. Deliberately *not* `cognilens_timeout` (240s),
+    # which is sized for real document work and would outlive the sweep
+    # interval -- the same mistake ops.PROBE_TIMEOUT documents.
+    digest_summarize_timeout_seconds: float = Field(default=150.0)
+
+    # Which threads the sweeper considers. `resolved` is excluded by default:
+    # those digests would never go stale (nothing more can be posted), but
+    # turning them on means the first sweep grinds through a 3,000+ message
+    # archive nobody asked about. A backfill is a script, not a default.
+    digest_include_statuses: list[str] = Field(
+        default_factory=lambda: ["active", "awaiting_reply"]
+    )
+
+    # Per-thread failure backoff. The only thing stopping one structurally
+    # undigestable thread from burning the budget every cycle forever.
+    digest_failure_backoff_minutes: int = Field(default=30)
+    digest_failure_backoff_max_minutes: int = Field(default=720)
+    digest_max_consecutive_failures: int = Field(default=5)
+
+    # Outer bound on the on-demand path (read + summarize + PUT), so the
+    # person who pressed the button is not left waiting forever. Must stay
+    # longer than digest_summarize_timeout_seconds.
+    digest_on_demand_timeout_seconds: float = Field(default=180.0)
+
+    # How much of a digest the ops dashboard shows inline (full text in the
+    # title attribute). 20 rows x 5 lines stops being scannable in one
+    # screen, which is that page's entire claim.
+    digest_dashboard_chars: int = Field(default=160)
+
+    # What the summary must keep. Cognilens renders this into its prompt as
+    # `- 以下の要素は必ず保持: ...`, so it is the one lever we have over the
+    # output without changing a prompt that other Cognilens consumers share.
+    #
+    # Measured against the live backend (2026-08-27), and every clause below
+    # is there because the measurement put it there:
+    #
+    # - Without a preserve list the model cites NO msg ids at all -- 0 across
+    #   4 prompt variants on 2 real threads, including two English-instructed
+    #   ones. Citation is not something the model does unasked, and the whole
+    #   point of feeding it msg ids is that the digest can say "msg-1870 で
+    #   決定" and be followed back into the log.
+    # - The first clause names the subject on purpose. Asking for citations
+    #   alone dragged both tested variants away from what the thread was
+    #   *about* and into who-said-what-where; on a thread whose substance was
+    #   "PR #184 wired next_participant", the cited versions opened on the
+    #   procedural merge argument instead and never said what was built.
+    # - "記録されている場合のみ" is not politeness. Asked for "発言者名と
+    #   その role", the model wrote `msg-1802 (human, role: human)` for a
+    #   message whose stored `role` is NULL -- inventing a field value the
+    #   record does not have. `_render_message` deliberately omits a null
+    #   role; this keeps the prompt from putting it back.
+    digest_preserve: list[str] = Field(
+        default_factory=lambda: [
+            "このスレッドで決まったこと・作られたもの (主題)",
+            "決定を下した msg の id (msg-NNNN 形式)",
+            "発言者名。role は記録されている場合のみ併記し、無い場合は補わない",
+            "引き渡し先の thread id",
+        ]
+    )
+
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Settings":
         """Load settings from a YAML config file.
@@ -214,6 +341,38 @@ class Settings(BaseSettings):
         # Ops view settings
         if ops := yaml_config.get("ops"):
             flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
+
+        # Chatroom thread digests. `False` survives the None-strip below, so
+        # `sweeper_enabled: false` in YAML does take effect.
+        if digest := yaml_config.get("digest"):
+            for yaml_key, field in (
+                ("on_demand_enabled", "digest_on_demand_enabled"),
+                ("sweeper_enabled", "digest_sweeper_enabled"),
+                ("sweep_interval_minutes", "digest_sweep_interval_minutes"),
+                ("max_threads_per_cycle", "digest_max_threads_per_cycle"),
+                (
+                    "max_threads_per_project_per_cycle",
+                    "digest_max_threads_per_project_per_cycle",
+                ),
+                ("max_concurrency", "digest_max_concurrency"),
+                ("min_msg_count", "digest_min_msg_count"),
+                ("min_input_chars", "digest_min_input_chars"),
+                ("min_redigest_minutes", "digest_min_redigest_minutes"),
+                ("max_input_chars", "digest_max_input_chars"),
+                ("head_chars_ratio", "digest_head_chars_ratio"),
+                ("max_msg_chars", "digest_max_msg_chars"),
+                ("style", "digest_style"),
+                ("max_tokens", "digest_max_tokens"),
+                ("summarize_timeout_seconds", "digest_summarize_timeout_seconds"),
+                ("include_statuses", "digest_include_statuses"),
+                ("failure_backoff_minutes", "digest_failure_backoff_minutes"),
+                ("failure_backoff_max_minutes", "digest_failure_backoff_max_minutes"),
+                ("max_consecutive_failures", "digest_max_consecutive_failures"),
+                ("on_demand_timeout_seconds", "digest_on_demand_timeout_seconds"),
+                ("dashboard_chars", "digest_dashboard_chars"),
+                ("preserve", "digest_preserve"),
+            ):
+                flat_config[field] = digest.get(yaml_key)
 
         # Remove None values
         flat_config = {k: v for k, v in flat_config.items() if v is not None}
