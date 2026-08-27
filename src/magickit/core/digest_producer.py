@@ -85,6 +85,7 @@ class DigestBounds:
     max_tokens: int
     min_msg_count: int
     min_input_chars: int
+    min_output_chars: int
     max_input_chars: int
     head_chars_ratio: float
     max_msg_chars: int
@@ -106,6 +107,7 @@ class DigestBounds:
             max_tokens=settings.digest_max_tokens,
             min_msg_count=settings.digest_min_msg_count,
             min_input_chars=settings.digest_min_input_chars,
+            min_output_chars=settings.digest_min_output_chars,
             max_input_chars=settings.digest_max_input_chars,
             head_chars_ratio=settings.digest_head_chars_ratio,
             max_msg_chars=settings.digest_max_msg_chars,
@@ -397,6 +399,14 @@ def accept_digest(
         return False, "rejected_empty"
     if stripped.startswith("{'") or '"error_type"' in stripped[:200]:
         return False, "rejected_error_envelope"
+    if len(stripped) < bounds.min_output_chars:
+        # A collapsed decode, not a terse summary. `_looks_truncated` below
+        # only catches a completion that died *at* the ceiling; nothing else
+        # here looks at the low end, so without this rule a one-token answer
+        # is indistinguishable from a short one and gets stored as `ok`.
+        # Measured: a Cognilens whose `context_window` understated the
+        # backend clamped the budget to 1 token and returned `遠`.
+        return False, "rejected_too_short_output"
     if len(stripped) >= len(source.text):
         # The model echoed the input. Real with no-think models on short
         # inputs, and a "digest" longer than its source is a lie that

@@ -151,6 +151,18 @@ class Settings(BaseSettings):
     # both apply.
     digest_min_msg_count: int = Field(default=4)
     digest_min_input_chars: int = Field(default=1200)
+    # Floor on the *output*. A completion this short is a collapsed decode,
+    # not a terse summary: measured 2026-08-27, a Cognilens whose
+    # `llm.context_window` understated the backend clamped the completion
+    # budget to 1 token and returned the single character `遠`, which
+    # `accept_digest` stored as a successful digest because every other
+    # rule (empty / error-envelope / longer-than-source / runaway /
+    # truncated-at-the-ceiling) is about the *upper* end. The upstream bug
+    # is fixed; this floor is what makes it unable to reach a human again,
+    # whatever the next cause turns out to be. Real `concise` summaries
+    # measured 126-796 chars, so this sits an order of magnitude below the
+    # shortest genuine one.
+    digest_min_output_chars: int = Field(default=40)
     # A single new msg makes a digest stale, so without a floor one busy
     # thread would take the whole budget every cycle.
     digest_min_redigest_minutes: int = Field(default=60)
@@ -357,6 +369,7 @@ class Settings(BaseSettings):
                 ("max_concurrency", "digest_max_concurrency"),
                 ("min_msg_count", "digest_min_msg_count"),
                 ("min_input_chars", "digest_min_input_chars"),
+                ("min_output_chars", "digest_min_output_chars"),
                 ("min_redigest_minutes", "digest_min_redigest_minutes"),
                 ("max_input_chars", "digest_max_input_chars"),
                 ("head_chars_ratio", "digest_head_chars_ratio"),
