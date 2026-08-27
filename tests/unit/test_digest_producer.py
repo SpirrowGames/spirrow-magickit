@@ -50,6 +50,7 @@ def _bounds(**overrides: Any) -> DigestBounds:
         "failure_backoff_max": timedelta(minutes=720),
         "max_consecutive_failures": 5,
         "summarize_timeout": 150.0,
+        "preserve": ("主題", "msg id", "発言者"),
     }
     base.update(overrides)
     return DigestBounds(**base)
@@ -977,3 +978,171 @@ def test_the_ceiling_holds_for_a_normal_oversized_thread() -> None:
 
     assert len(out.text) <= bounds.max_input_chars
     assert out.truncated is True
+
+
+# ---- preserve reaches Cognilens ---------------------------------------
+
+
+async def test_the_preserve_list_is_sent_with_every_summarize() -> None:
+    """Measured 2026-08-27: without it the model cites no msg ids at all.
+
+    0 citations across 4 prompt variants on 2 real threads, English-instructed
+    ones included. Citation is not something the model does unasked, and
+    feeding it msg ids is pointless if the digest never quotes one.
+    """
+    room = _chatroom_mock()
+    lens = _cognilens_mock()
+    producer = _producer()
+
+    await producer.digest_thread(
+        project="p1", thread_id="T-1", chatroom=room, cognilens=lens
+    )
+
+    kwargs = lens.summarize_payload.await_args.kwargs
+    assert kwargs["preserve"] == ["主題", "msg id", "発言者"]
+
+
+async def test_an_empty_preserve_list_is_still_passed_as_a_list() -> None:
+    """Cognilens omits the constraint line for an empty list; the adapter
+    drops the argument entirely. Either way this must not crash."""
+    room = _chatroom_mock()
+    lens = _cognilens_mock()
+    producer = _producer(bounds=_bounds(preserve=()))
+
+    outcome = await producer.digest_thread(
+        project="p1", thread_id="T-1", chatroom=room, cognilens=lens
+    )
+
+    assert outcome.action == "written"
+    assert lens.summarize_payload.await_args.kwargs["preserve"] == []
+
+
+def test_the_shipped_preserve_list_guards_the_two_measured_failures() -> None:
+    """Both clauses exist because a measurement put them there.
+
+    - The subject clause: asking for citations alone dragged the output away
+      from what the thread was about and into who-said-what-where.
+    - The conditional-role clause: asked for "発言者名とその role", the model
+      wrote `role: human` for a message whose stored role is NULL.
+    """
+    from magickit.config import Settings
+
+    preserve = Settings().digest_preserve
+
+    assert any("主題" in item for item in preserve)
+    assert any("記録されている場合のみ" in item for item in preserve)
+    assert any("msg-NNNN" in item for item in preserve)
+
+
+# ---- truncated output ---------------------------------------------------
+
+
+def test_a_completion_cut_off_at_the_ceiling_is_rejected() -> None:
+    """Cognilens does not forward `finish_reason`, so a cut-off completion
+    arrives looking exactly like a short one. Storing it would put a fragment
+    in front of a human as if it were a summary."""
+    bounds = _bounds(max_tokens=400)
+
+    accepted, reason = accept_digest(
+        "PR #184 は next_participant の消費側配線を実装し、msg-1802 で human が",
+        _source(),
+        bounds,
+        output_tokens=380,
+    )
+
+    assert accepted is False
+    assert reason == "rejected_truncated_output"
+
+
+def test_a_long_but_finished_summary_is_accepted() -> None:
+    """Near the ceiling is not the signal; near the ceiling AND unterminated is.
+
+    A summary that used its whole budget and still landed on 。 is simply a
+    long finished one.
+    """
+    accepted, reason = accept_digest(
+        "PR #184 は next_participant の消費側配線を実装した。",
+        _source(),
+        _bounds(max_tokens=400),
+        output_tokens=395,
+    )
+
+    assert accepted is True
+    assert reason == ""
+
+
+def test_an_unterminated_summary_well_under_the_ceiling_is_accepted() -> None:
+    """That is a style problem, not a truncation -- and rejecting it would
+    mean no digest at all for a thread that produced a usable one."""
+    accepted, _ = accept_digest(
+        "PR #184 は next_participant の消費側配線を実装した",
+        _source(),
+        _bounds(max_tokens=400),
+        output_tokens=40,
+    )
+
+    assert accepted is True
+
+
+def test_without_a_token_count_the_truncation_check_stands_down() -> None:
+    """An older Cognilens that omits `compressed_tokens` must not make every
+    digest look truncated."""
+    accepted, _ = accept_digest(
+        "途中で切れているように見える文",
+        _source(),
+        _bounds(max_tokens=400),
+        output_tokens=None,
+    )
+
+    assert accepted is True
+
+
+async def test_the_producer_feeds_the_reported_token_count_to_the_gate() -> None:
+    room = _chatroom_mock()
+    lens = _cognilens_mock()
+    lens.summarize_payload.return_value = {
+        "summary": "PR #184 は next_participant の消費側配線を実装し、msg-1802 で",
+        "original_tokens": 9000,
+        "compressed_tokens": 580,
+    }
+    producer = _producer(bounds=_bounds(max_tokens=600))
+
+    outcome = await producer.digest_thread(
+        project="p1", thread_id="T-1", chatroom=room, cognilens=lens
+    )
+
+    assert outcome.action == "failed"
+    assert outcome.reason == "rejected_truncated_output"
+    room.put_thread_digest.assert_not_awaited()
+
+
+async def test_a_non_integer_token_count_does_not_crash_the_gate() -> None:
+    room = _chatroom_mock()
+    lens = _cognilens_mock()
+    lens.summarize_payload.return_value = {
+        "summary": "要約です。",
+        "compressed_tokens": "580",  # a stringly-typed upstream
+    }
+    producer = _producer()
+
+    outcome = await producer.digest_thread(
+        project="p1", thread_id="T-1", chatroom=room, cognilens=lens
+    )
+
+    assert outcome.action == "written"
+
+
+def test_the_truncated_flag_is_not_reused_for_a_cut_off_output() -> None:
+    """`truncated` means the INPUT was elided.
+
+    Overloading one field with two events is the defect (`field_mismatch`)
+    that the thread this feature was measured against exists to fix; the
+    rejection has its own reason string instead.
+    """
+    import inspect
+
+    from magickit.core import digest_producer
+
+    src = inspect.getsource(digest_producer._looks_truncated)
+    assert "truncated=" not in src
+    assert "rejected_truncated_output" not in src

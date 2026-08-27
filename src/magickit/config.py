@@ -177,7 +177,17 @@ class Settings(BaseSettings):
     # Cognilens summarize arguments. `bullet` does not fit the dashboard's
     # one-line slot and `detailed` loses the point at this compression.
     digest_style: str = Field(default="concise")
-    digest_max_tokens: int = Field(default=400)
+    # Raised from 400 after measuring. Cognilens states the budget in its
+    # prompt (`最大{max_tokens}トークン程度`) and `concise` asks for 1-3
+    # sentences, but the four-item `digest_preserve` list below competes with
+    # both: across 14 real-thread samples completions ran 85-379 tokens, and
+    # one asked-for-everything thread produced a multi-section 796-char
+    # answer at 379/400. A ceiling that binding truncates mid-sentence, and
+    # Cognilens does not forward `finish_reason`, so the fragment would
+    # arrive looking like a finished summary. 600 leaves the observed
+    # maximum room; it is a cap, not a target, and costs nothing unused.
+    # `accept_digest` still refuses anything that looks cut off.
+    digest_max_tokens: int = Field(default=600)
     # Cut-off for one summarize call: Cognilens's own worst case (30s x 4
     # attempts) plus slack. Deliberately *not* `cognilens_timeout` (240s),
     # which is sized for real document work and would outlive the sweep
@@ -207,6 +217,37 @@ class Settings(BaseSettings):
     # title attribute). 20 rows x 5 lines stops being scannable in one
     # screen, which is that page's entire claim.
     digest_dashboard_chars: int = Field(default=160)
+
+    # What the summary must keep. Cognilens renders this into its prompt as
+    # `- 以下の要素は必ず保持: ...`, so it is the one lever we have over the
+    # output without changing a prompt that other Cognilens consumers share.
+    #
+    # Measured against the live backend (2026-08-27), and every clause below
+    # is there because the measurement put it there:
+    #
+    # - Without a preserve list the model cites NO msg ids at all -- 0 across
+    #   4 prompt variants on 2 real threads, including two English-instructed
+    #   ones. Citation is not something the model does unasked, and the whole
+    #   point of feeding it msg ids is that the digest can say "msg-1870 で
+    #   決定" and be followed back into the log.
+    # - The first clause names the subject on purpose. Asking for citations
+    #   alone dragged both tested variants away from what the thread was
+    #   *about* and into who-said-what-where; on a thread whose substance was
+    #   "PR #184 wired next_participant", the cited versions opened on the
+    #   procedural merge argument instead and never said what was built.
+    # - "記録されている場合のみ" is not politeness. Asked for "発言者名と
+    #   その role", the model wrote `msg-1802 (human, role: human)` for a
+    #   message whose stored `role` is NULL -- inventing a field value the
+    #   record does not have. `_render_message` deliberately omits a null
+    #   role; this keeps the prompt from putting it back.
+    digest_preserve: list[str] = Field(
+        default_factory=lambda: [
+            "このスレッドで決まったこと・作られたもの (主題)",
+            "決定を下した msg の id (msg-NNNN 形式)",
+            "発言者名。role は記録されている場合のみ併記し、無い場合は補わない",
+            "引き渡し先の thread id",
+        ]
+    )
 
     @classmethod
     def from_yaml(cls, config_path: str | Path) -> "Settings":
@@ -329,6 +370,7 @@ class Settings(BaseSettings):
                 ("max_consecutive_failures", "digest_max_consecutive_failures"),
                 ("on_demand_timeout_seconds", "digest_on_demand_timeout_seconds"),
                 ("dashboard_chars", "digest_dashboard_chars"),
+                ("preserve", "digest_preserve"),
             ):
                 flat_config[field] = digest.get(yaml_key)
 

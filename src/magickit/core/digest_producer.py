@@ -61,6 +61,15 @@ _MSG_ELISION = "… ({chars} 文字省略) …"
 #: decode rather than a long summary.
 _RUNAWAY_CHARS_PER_TOKEN = 6
 
+#: A completion this close to the token ceiling was probably cut off rather
+#: than finished. Cognilens does not forward vLLM's `finish_reason`, so this
+#: plus the terminator check below is the only way to notice.
+_TRUNCATION_BUDGET_FRACTION = 0.9
+
+#: A finished Japanese summary ends on one of these. A digest that stops
+#: mid-clause is a fragment being presented as a summary.
+_SENTENCE_TERMINATORS = ("。", "！", "？", ".", "!", "?", "）", ")", "」", "]", "`")
+
 
 @dataclass(frozen=True)
 class DigestBounds:
@@ -88,6 +97,7 @@ class DigestBounds:
     failure_backoff_max: timedelta
     max_consecutive_failures: int
     summarize_timeout: float
+    preserve: tuple[str, ...]
 
     @classmethod
     def from_settings(cls, settings: Settings) -> DigestBounds:
@@ -110,6 +120,7 @@ class DigestBounds:
             ),
             max_consecutive_failures=settings.digest_max_consecutive_failures,
             summarize_timeout=settings.digest_summarize_timeout_seconds,
+            preserve=tuple(settings.digest_preserve),
         )
 
 
@@ -215,12 +226,19 @@ def _render_message(msg: dict[str, Any], *, max_chars: int) -> str:
     """One message as prompt text.
 
     Included, and why: ``msg_id`` (so the digest can cite "msg-012 で決定",
-    which makes it actionable rather than merely descriptive); ``author``
+    which makes it actionable rather than merely descriptive -- note this
+    only happens because ``digest_preserve`` asks for it; measured
+    2026-08-27, a prompt without that ask cites no msg id at all, so
+    rendering the ids here is necessary but not sufficient); ``author``
     (a design thread's meaning is inseparable from who said what);
     ``role``, only when non-null (the role gate guarantees a recorded role
-    was validated, so it is trustworthy); ``type`` (handoff / ack / decide
-    are the plot); ``timestamp`` truncated to the minute (full ISO is ~500
-    tokens of noise over 40 msgs).
+    was validated, so it is trustworthy -- and omitting a null one matters:
+    asked for "発言者名とその role" without a caveat, the model wrote
+    ``role: human`` for a message whose stored role is NULL, i.e. invented a
+    field value the record does not have. ``digest_preserve`` carries the
+    matching caveat); ``type`` (handoff / ack / decide are the plot);
+    ``timestamp`` truncated to the minute (full ISO is ~500 tokens of noise
+    over 40 msgs).
 
     Excluded: ``embodiment`` (operational, not semantic) and the per-msg
     ``tags`` / ``commit_ref`` / ``reply_to`` / ``related_tasks`` (noise at
@@ -353,7 +371,11 @@ def build_digest_input(view: dict[str, Any], bounds: DigestBounds) -> DigestInpu
 
 
 def accept_digest(
-    summary: str, source: DigestInput, bounds: DigestBounds
+    summary: str,
+    source: DigestInput,
+    bounds: DigestBounds,
+    *,
+    output_tokens: int | None = None,
 ) -> tuple[bool, str]:
     """Decide whether a summary is fit to store.
 
@@ -382,7 +404,40 @@ def accept_digest(
         return False, "rejected_longer_than_source"
     if len(stripped) > bounds.max_tokens * _RUNAWAY_CHARS_PER_TOKEN:
         return False, "rejected_runaway_length"
+    if _looks_truncated(stripped, bounds, output_tokens):
+        # Storing this would put a fragment in front of a human as if it
+        # were a summary. Rejecting instead sends the thread to the failure
+        # backoff, where a genuinely un-summarizable thread stops being
+        # retried -- which is the honest outcome.
+        #
+        # Deliberately NOT recorded via the `truncated` flag: that one means
+        # the *input* was elided. Overloading one field with two events is
+        # the exact defect the thread this feature was measured against is
+        # about (`field_mismatch`), so it is not repeated here.
+        return False, "rejected_truncated_output"
     return True, ""
+
+
+def _looks_truncated(
+    summary: str, bounds: DigestBounds, output_tokens: int | None
+) -> bool:
+    """Did the model run out of budget mid-sentence?
+
+    Cognilens's ``summarize`` payload carries ``compressed_tokens`` but not
+    vLLM's ``finish_reason``, so a cut-off completion arrives looking exactly
+    like a short one. Both signals are required together: a summary near the
+    ceiling that still ends on a terminator is simply a long finished one,
+    and a summary ending mid-clause well under the ceiling is a style
+    problem rather than a truncation.
+
+    Measured 2026-08-27: 14 samples ran 85-379 completion tokens against a
+    400 ceiling, so this was reachable in production before the ceiling was
+    raised.
+    """
+    if output_tokens is None:
+        return False
+    near_ceiling = output_tokens >= bounds.max_tokens * _TRUNCATION_BUDGET_FRACTION
+    return near_ceiling and not summary.endswith(_SENTENCE_TERMINATORS)
 
 
 def _provenance_model(payload: dict[str, Any]) -> str | None:
@@ -622,7 +677,10 @@ class DigestProducer:
             started = time.monotonic()
             payload = await asyncio.wait_for(
                 cognilens.summarize_payload(
-                    text, style=style, max_tokens=self._bounds.max_tokens
+                    text,
+                    style=style,
+                    max_tokens=self._bounds.max_tokens,
+                    preserve=list(self._bounds.preserve),
                 ),
                 timeout=self._bounds.summarize_timeout,
             )
@@ -735,7 +793,17 @@ class DigestProducer:
                 )
 
             summary = str(payload.get("summary", ""))
-            accepted, reject_reason = accept_digest(summary, source, self._bounds)
+            reported_output_tokens = payload.get("compressed_tokens")
+            accepted, reject_reason = accept_digest(
+                summary,
+                source,
+                self._bounds,
+                output_tokens=(
+                    reported_output_tokens
+                    if isinstance(reported_output_tokens, int)
+                    else None
+                ),
+            )
             if not accepted:
                 # A thread whose content reliably produces an echo should
                 # not be retried every cycle, so this counts as a failure.
