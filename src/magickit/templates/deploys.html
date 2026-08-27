@@ -8,10 +8,23 @@
     <p class="subtitle">
         何が、どの commit で live になったか。
         <span class="muted">
-            読み取り専用 — このページは tailnet 上で無認証なので、承認はここからはできません
-            （承認は認証済みの MCP から）。
+            {% if can_approve %}
+            承認者として認識されています（tailnet identity: <code>{{ viewer_login }}</code>）。
+            ref override と migration 解除はここには置いていません — 理由を書かせる必要があるので
+            MCP / host CLI のままです。
+            {% elif not approvers_configured %}
+            読み取り専用 — 承認者リスト（<code>deploy.approver_logins</code>）が空です。
+            {% elif viewer_login %}
+            読み取り専用 — <code>{{ viewer_login }}</code> は承認者リストにありません。
+            {% else %}
+            読み取り専用 — tailnet identity が付いていません。承認するには
+            <code>:8443</code>（tailscale serve 経由）で開いてください。
+            {% endif %}
         </span>
     </p>
+    {% if flash %}
+    <p class="flash {{ 'flash-ok' if flash_ok else 'flash-error' }}">{{ flash }}</p>
+    {% endif %}
 </div>
 
 <section class="card">
@@ -46,6 +59,7 @@
                 <th>承認</th>
                 <th>deployed sha</th>
                 <th>サービス</th>
+                {% if can_approve %}<th>承認</th>{% endif %}
             </tr>
         </thead>
         <tbody>
@@ -65,10 +79,24 @@
                 </td>
                 <td class="nowrap"><code>{{ row.deployed_sha or "—" }}</code></td>
                 <td>{{ row.service_state or "—" }}</td>
+                {% if can_approve %}
+                <td>
+                    {% if row.is_pending %}
+                    <form method="post"
+                          action="/dashboard/deploys/{{ row.request_id }}/approve"
+                          onsubmit="return confirm('{{ row.target }} を deploy します。よろしいですか？');">
+                        <input type="text" name="note" placeholder="note (任意)" class="inline-input">
+                        <button type="submit" class="btn btn-danger btn-sm">承認して開始</button>
+                    </form>
+                    {% else %}
+                    <span class="muted">—</span>
+                    {% endif %}
+                </td>
+                {% endif %}
             </tr>
             {% if row.error %}
             <tr class="detail-row">
-                <td colspan="7" class="error-detail">{{ row.error }}</td>
+                <td colspan="{{ 8 if can_approve else 7 }}" class="error-detail">{{ row.error }}</td>
             </tr>
             {% endif %}
             {% endfor %}

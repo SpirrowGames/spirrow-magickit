@@ -327,12 +327,25 @@ merge はどこからでもできるが、live にできるのは systemd と al
   名指しし、sha は magickit の記録から読む。migration を当てた deploy の rollback は拒否
 - **health check は本文を読まない**。cognilens/prismind に平の health は無く SSE mount が答える ∴
   `httpx.get` だと健全なサービスで必ずタイムアウトする(実測)。`httpx.stream` でステータス行のみ
-- 閲覧用に **`/dashboard/deploys`**(読み取り専用・承認ボタン無し)
-- **承認の扉は 2 つ**: 認証済み MCP(claude.ai 経由・`magickit.spirrowgames.dev` → :8114)と、
+- 閲覧用に **`/dashboard/deploys`**。**承認ボタンは条件付きで出る**(下記の扉 3)
+- **承認の扉は 3 つ**: 認証済み MCP(claude.ai 経由・`magickit.spirrowgames.dev` → :8114)と、
   ホスト上の `python -m magickit.deploy.approval <id> --by <name>`。**検査は 1 実装を共有**し、
   監査に `approved_via` が残る。後者が新しい権限を与えるわけではない — ホストのシェルは
   `sgadmin`(NOPASSWD:ALL)で要求 JSON を直接書けるので、**追跡できない迂回を記録された行為に
   変えているだけ**。ループはシェルを持たないので使えない(= ゲートが本物なのはそちら側)
+- **3 つ目はダッシュボードのボタン**(`approved_via=tailnet-identity`)。長らく
+  「ここにボタンがあってはならない」と書いてあり、その理由(無認証面に restart を渡すな)は
+  正しかった。**変わったのは危険許容度ではなく「行為者が分かるようになったこと」** —
+  `tailscale serve` は tailnet ユーザの identity を**クライアントが上書きできない形**で
+  ヘッダに載せる(実測 2026-08-27: proxy 経由の偽装ヘッダは本物に上書きされ、backend 直叩きでは
+  素通りした) ∴ **`server.host` を `127.0.0.1` に変えたことがこの認証の成立条件**。
+  0.0.0.0 に戻すと LAN の任意の端末が identity を名乗れて `web/identity.py` の検査が
+  全部飾りになる。承認は `deploy.approver_logins`(**既定は空 = 誰も承認できない**)に載る
+  **ユーザログイン**に限る ∴ ユーザログインを持たない **tagged device(= 自律ループ)は
+  構造的に除外**され、「ループは自分の deploy を承認できない」は保たれる。
+  **ref override と migration 解除はこのボタンに無い** — 理由を書かせる必要がある R-1/R-2 の
+  逃げ道を、一番押しやすい経路に置かないため。CSRF は別問題なので別に見る(identity は
+  「誰のブラウザか」であって「誰の意図か」ではない)
 - **4 対象すべて 2 面 + symlink 方式**(2026-08-16、cognilens をパイロットに横展開)。`services/spirrow/spirrow-cognilens`
   自体が symlink ∴ **unit は無改修**。runner は待機面で pin→backup→agent→**切り替え**→restart の順に
   なり、切り替え前は誰もサーブしていない ∴ 失敗しても live は無傷(自動 rollback が要らない理由)。
@@ -534,7 +547,8 @@ GITHUB_PROTECTED_BASE_BRANCHES=main        # この base への merge を拒否�
 Python は再起動まで反映されない。**
 
 ```bash
-sudo systemctl restart spirrow-magickit.service            # main.py @ 0.0.0.0:8113
+sudo systemctl restart spirrow-magickit.service            # main.py @ 127.0.0.1:8113
+                                                           #   (tailnet へは tailscale serve :8443 が proxy)
 sudo systemctl restart spirrow-magickit-mcp.service        # mcp_server.py @ 127.0.0.1:8114
                                                            #   (Cloudflare Tunnel → claude.ai, auth ON)
 sudo systemctl restart spirrow-magickit-mcp-local.service  # mcp_server.py @ 100.79.84.62:8117

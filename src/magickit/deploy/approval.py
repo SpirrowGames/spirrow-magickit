@@ -45,6 +45,12 @@ logger = get_logger(__name__)
 #: and only the second one is answerable by the system.
 VIA_MCP = "mcp-authenticated"
 VIA_HOST = "host-cli"
+#: The dashboard button, vouched for by the tailnet identity that
+#: `tailscale serve` attaches (see `magickit.web.identity`). A third door,
+#: not a widened one: it answers to a *named user*, which is the same
+#: standard as VIA_MCP and the reason a tagged device -- the development
+#: loop -- still cannot approve its own deploy.
+VIA_DASHBOARD = "tailnet-identity"
 
 
 def _error(error_type: str, message: str, **extra: Any) -> dict[str, Any]:

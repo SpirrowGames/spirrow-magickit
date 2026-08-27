@@ -1,7 +1,11 @@
 # Magickit Configuration for AIサーバー
 
 server:
-  host: "0.0.0.0"
+  # loopback のみ。tailnet からは tailscale serve (:8443) が 127.0.0.1:8113 に
+  # proxy する ∴ 到達性は変わらない。0.0.0.0 に戻すと LAN の任意の端末から無認証で
+  # 届き、同時に web/identity.py の Tailscale-* ヘッダが偽装可能になって
+  # deploy 承認の認証が丸ごと無意味になる (実測 2026-08-27)。
+  host: "127.0.0.1"
   port: 8113
   debug: false
 
@@ -48,6 +52,14 @@ ops:
   # かつ「夜中に落ちていた」を翌朝まで気づかない長さにはしない。
   # これは推測であって観測ではない (web/ops.py を参照)。
   stall_minutes: 30
+
+# deploy の承認をダッシュボードから行える tailnet ログイン。
+# 空 = 誰も承認できない (ページは従来どおり読み取り専用)。
+# tagged device (sg-tomtebo-01 = 自律ループ) はユーザログインを持たないので
+# ここに書いても一致しない ∴ ループの自己承認は構造的に起こらない。
+deploy:
+  approver_logins:
+    - "takayan0908@gmail.com"
 
 # チャットルーム要約 (digest)
 #
