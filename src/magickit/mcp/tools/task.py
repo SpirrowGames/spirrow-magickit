@@ -22,7 +22,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from magickit.adapters.cognilens import CognilensAdapter
+from magickit.adapters.cognilens import CognilensAdapter, CognilensError
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.mcp.tools.document import smart_create_document_impl
@@ -364,6 +364,43 @@ def _calculate_stats(tasks: list[dict[str, Any]]) -> dict[str, int]:
     return stats
 
 
+# Cap for the fallback excerpt when Cognilens cannot summarize an attachment.
+# Roughly the length a `max_tokens=300` summary comes out at, so the stored
+# document does not change size class depending on whether the summarizer
+# happened to be up.
+_ATTACHMENT_FALLBACK_CHARS = 1200
+
+
+async def _attachment_summary(cognilens: CognilensAdapter, content: str) -> str:
+    """Summarize an attachment, degrading to a *labelled* excerpt on failure.
+
+    Storing the head of the file, marked as the head of the file, beats both
+    alternatives. Dropping the attachment (what the callers' outer
+    ``except Exception`` did) loses a file the user explicitly asked to
+    attach. Storing something unlabelled would be worse still: the reader
+    cannot tell an excerpt from a summary without going back to the source.
+
+    Args:
+        cognilens: Adapter to summarize with.
+        content: Full file content.
+
+    Returns:
+        Either the summary, or an excerpt prefixed with a marker naming the
+        failure.
+    """
+    try:
+        return await cognilens.summarize(text=content, style="concise", max_tokens=300)
+    except CognilensError as e:
+        logger.warning(
+            "Attachment summary unavailable; storing a labelled excerpt",
+            error=str(e),
+            error_type=e.error_type,
+        )
+        excerpt = content[:_ATTACHMENT_FALLBACK_CHARS]
+        elided = "\n…(以下略)" if len(content) > _ATTACHMENT_FALLBACK_CHARS else ""
+        return f"(要約失敗 — 冒頭のみ: {e})\n\n{excerpt}{elided}"
+
+
 async def _process_file_attachments(
     settings: Settings,
     prismind: PrismindAdapter,
@@ -389,7 +426,7 @@ async def _process_file_attachments(
     warnings: list[str] = []
 
     cognilens = CognilensAdapter(
-        base_url=settings.cognilens_url,
+        sse_url=settings.cognilens_url,
         timeout=settings.cognilens_timeout,
     )
 
@@ -428,11 +465,7 @@ async def _process_file_attachments(
                 file_path=file_path,
                 file_size=file_size,
             )
-            summary = await cognilens.summarize(
-                text=content,
-                style="concise",
-                max_tokens=300,
-            )
+            summary = await _attachment_summary(cognilens, content)
 
             # Create document using smart_create_document
             doc_result = await smart_create_document_impl(
@@ -890,7 +923,7 @@ async def _refresh_task_attachments(
         return status
 
     cognilens = CognilensAdapter(
-        base_url=settings.cognilens_url,
+        sse_url=settings.cognilens_url,
         timeout=settings.cognilens_timeout,
     )
 
@@ -952,11 +985,7 @@ async def _refresh_task_attachments(
 
             try:
                 text_content = path.read_text(encoding="utf-8", errors="replace")
-                new_summary = await cognilens.summarize(
-                    text=text_content,
-                    style="concise",
-                    max_tokens=300,
-                )
+                new_summary = await _attachment_summary(cognilens, text_content)
 
                 # Update the document content
                 await prismind.call(

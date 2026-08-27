@@ -13,7 +13,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from magickit.adapters.cognilens import CognilensAdapter
+from magickit.adapters.cognilens import CognilensAdapter, CognilensError
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.adapters.phanthand import (
     PhanthandAdapter,
@@ -154,35 +154,63 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 content = file_data["content"]
                 size = file_data["size"]
 
-                # Process with Cognilens based on mode
-                if mode == "raw":
-                    processed = content
-                elif mode == "summarize":
-                    processed = await cognilens.summarize(content)
-                elif mode == "essence":
-                    focus_areas = [focus] if focus else None
-                    essence = await cognilens.extract_essence(
-                        content, focus_areas=focus_areas,
-                    )
-                    # extract_essence returns dict, convert to readable string
-                    if isinstance(essence, dict):
-                        processed = _format_essence(essence)
+                # Process with Cognilens based on mode.
+                #
+                # Guarded separately from the Phanthand read above: by this
+                # point the file has been read successfully, so a Cognilens
+                # failure should degrade this file to raw content rather than
+                # drop it into `errors` and lose the read. CognilensAdapter
+                # raises on an upstream rejection instead of returning the
+                # rejection text as if it were the summary, so this branch is
+                # where that rejection becomes visible.
+                effective_mode = mode
+                processing_error = ""
+                try:
+                    if mode == "raw":
+                        processed = content
+                    elif mode == "summarize":
+                        processed = await cognilens.summarize(content)
+                    elif mode == "essence":
+                        focus_areas = [focus] if focus else None
+                        essence = await cognilens.extract_essence(
+                            content, focus_areas=focus_areas,
+                        )
+                        # extract_essence returns dict, convert to readable string
+                        if isinstance(essence, dict):
+                            processed = _format_essence(essence)
+                        else:
+                            processed = str(essence)
+                    elif mode == "compress":
+                        preserve = [focus] if focus else None
+                        processed = await cognilens.compress(
+                            content, preserve=preserve,
+                        )
                     else:
-                        processed = str(essence)
-                elif mode == "compress":
-                    preserve = [focus] if focus else None
-                    processed = await cognilens.compress(
-                        content, preserve=preserve,
-                    )
-                else:
+                        processed = content
+                except CognilensError as e:
                     processed = content
+                    effective_mode = "raw"
+                    processing_error = str(e)
+                    logger.warning(
+                        "smart_read falling back to raw content",
+                        file=file_path,
+                        requested_mode=mode,
+                        error=str(e),
+                        error_type=e.error_type,
+                    )
 
-                results.append({
+                entry: dict[str, Any] = {
                     "file": file_path,
                     "size": size,
                     "processed": processed,
-                    "mode": mode,
-                })
+                    "mode": effective_mode,
+                }
+                if processing_error:
+                    # Name the requested mode too: "mode: raw" alone would
+                    # read as a choice rather than as a fallback.
+                    entry["requested_mode"] = mode
+                    entry["processing_error"] = processing_error
+                results.append(entry)
 
             except PhanthandConnectionError:
                 # Connection error affects all files, fail immediately
