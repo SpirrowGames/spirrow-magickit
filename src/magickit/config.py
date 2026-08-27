@@ -158,9 +158,15 @@ class Settings(BaseSettings):
     # Input ceiling, derived from a *timeout* rather than a context length.
     # The binding limit is not Lexora's light tier (60s) but Cognilens's own
     # `llm.timeout: 30` with `max_retries: 3` -- an over-long prompt spends
-    # ~120s of GPU and returns nothing. Japanese runs >= 1 token/char, so
-    # 24k chars is already a 24k-token prefill. Raise
-    # spirrow-cognilens/config.yaml's llm.timeout before raising this.
+    # ~120s of GPU and returns nothing.
+    #
+    # Context length is NOT the constraint, and it is worth saying so because
+    # the intuition runs the other way. Measured against the live backend
+    # (2026-08-27): mixed Japanese prose + identifiers + code costs ~0.40
+    # tokens/char, so 24k chars is ~9.6k prompt tokens against a 32768
+    # context -- roughly a third of it. Raise spirrow-cognilens/config.yaml's
+    # llm.timeout before raising this; the context has room, the clock does
+    # not.
     digest_max_input_chars: int = Field(default=24000)
     # Where the elision goes when a thread does not fit: keep the propose
     # (why the thread exists) and the latest exchange (where it is stuck).

@@ -81,9 +81,12 @@ digest:
 
   # 入力上限。context 長ではなく **timeout** から決めた値。律速は Lexora
   # light の 60s ではなく spirrow-cognilens の llm.timeout=30 / max_retries=3
-  # (= 失敗しても ~120s の GPU を食う)。日本語は 1 文字 ≧ 1 token ∴ 24k 文字
-  # で既に 24k token の prefill。上げるときは先に cognilens の llm.timeout を
-  # 上げること。
+  # (= 失敗しても ~120s の GPU を食う)。
+  #
+  # context 長は律速ではない。直感と逆なので明記しておく: 実測 (2026-08-27、
+  # 実バックエンド) で日本語の散文 + 識別子 + コードは **~0.40 token/文字** ∴
+  # 24k 文字 ≒ 9.6k prompt token で、context 32768 の 3 分の 1 程度しか使わない。
+  # 上げるときに見るべきは cognilens の llm.timeout であって context ではない。
   max_input_chars: 24000
   # 中略は真ん中に入れる。propose (なぜ) と直近 (どこで詰まったか) を残す。
   head_chars_ratio: 0.6
