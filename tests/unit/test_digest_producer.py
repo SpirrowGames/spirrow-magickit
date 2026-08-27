@@ -38,6 +38,7 @@ def _bounds(**overrides: Any) -> DigestBounds:
         "max_tokens": 400,
         "min_msg_count": 4,
         "min_input_chars": 1200,
+        "min_output_chars": 40,
         "max_input_chars": 24000,
         "head_chars_ratio": 0.6,
         "max_msg_chars": 4000,
@@ -284,8 +285,14 @@ def _source(text: str = "x" * 5000) -> DigestInput:
     )
 
 
+_REALISTIC = (
+    "seam 欠陥ではなく coarse-LOD のダウンサンプリング由来と診断され、"
+    "PR#156 のマージで決着した。可視修正は別スレッドへ移管。"
+)
+
+
 def test_a_normal_digest_is_accepted() -> None:
-    accepted, reason = accept_digest("3 行の要約です。", _source(), _bounds())
+    accepted, reason = accept_digest(_REALISTIC, _source(), _bounds())
 
     assert accepted is True
     assert reason == ""
@@ -296,6 +303,49 @@ def test_an_empty_digest_is_rejected() -> None:
         accepted, reason = accept_digest(summary, _source(), _bounds())
         assert accepted is False
         assert reason == "rejected_empty"
+
+
+def test_a_collapsed_one_token_digest_is_rejected() -> None:
+    """The exact shape that reached production: a single character.
+
+    A Cognilens whose ``llm.context_window`` understated the serving
+    backend clamped the completion budget to one token and returned
+    ``遠``. Every other rule here is about the upper end, so this one is
+    what stops a collapsed decode being stored as a summary.
+    """
+    accepted, reason = accept_digest("遠", _source(), _bounds())
+
+    assert accepted is False
+    assert reason == "rejected_too_short_output"
+
+
+def test_the_output_floor_is_measured_after_stripping() -> None:
+    """Whitespace is not summary. Padding must not buy past the floor."""
+    accepted, reason = accept_digest(
+        "  " + "あ" * 10 + "\n\n  ", _source(), _bounds(min_output_chars=40)
+    )
+
+    assert accepted is False
+    assert reason == "rejected_too_short_output"
+
+
+def test_a_digest_exactly_at_the_output_floor_is_accepted() -> None:
+    """The floor rejects below it, not at it."""
+    summary = "あ" * 40
+    accepted, reason = accept_digest(summary, _source(), _bounds(min_output_chars=40))
+
+    assert accepted is True
+    assert reason == ""
+
+
+def test_an_empty_digest_still_reads_as_empty_not_too_short() -> None:
+    """Order matters: "nothing came back" and "a fragment came back" are
+    different failures, and the reason token is what tells them apart in
+    the sweep log."""
+    accepted, reason = accept_digest("", _source(), _bounds(min_output_chars=40))
+
+    assert accepted is False
+    assert reason == "rejected_empty"
 
 
 def test_a_stringified_dict_is_rejected() -> None:
@@ -391,7 +441,7 @@ def _chatroom_mock(**overrides: Any) -> AsyncMock:
     return room
 
 
-def _cognilens_mock(summary: str = "これは要約です。") -> AsyncMock:
+def _cognilens_mock(summary: str = _REALISTIC) -> AsyncMock:
     lens = AsyncMock()
     lens.summarize_payload.return_value = {
         "summary": summary,
@@ -451,7 +501,7 @@ async def test_a_successful_digest_records_its_coverage_and_provenance() -> None
 
     assert outcome.action == "written"
     kwargs = room.put_thread_digest.await_args.kwargs
-    assert kwargs["digest"] == "これは要約です。"
+    assert kwargs["digest"] == _REALISTIC
     assert kwargs["source_last_msg_id"] == "msg-010"
     assert kwargs["source_msg_count"] == 10
     assert kwargs["producer"] == "magickit-digest-ondemand"
@@ -470,7 +520,7 @@ async def test_the_model_field_is_used_when_cognilens_reports_one() -> None:
     room = _chatroom_mock()
     lens = _cognilens_mock()
     lens.summarize_payload.return_value = {
-        "summary": "要約", "model": "Qwen3-32B", "original_tokens": 10,
+        "summary": _REALISTIC, "model": "Qwen3-32B", "original_tokens": 10,
     }
     producer = _producer()
 
@@ -824,7 +874,7 @@ async def test_summarize_calls_do_not_overlap_at_concurrency_one() -> None:
         peak = max(peak, inflight)
         await asyncio.sleep(0)
         inflight -= 1
-        return {"summary": "要約", "original_tokens": 10, "compressed_tokens": 2}
+        return {"summary": _REALISTIC, "original_tokens": 10, "compressed_tokens": 2}
 
     lens = AsyncMock()
     lens.summarize_payload = _slow
@@ -1061,7 +1111,8 @@ def test_a_long_but_finished_summary_is_accepted() -> None:
     long finished one.
     """
     accepted, reason = accept_digest(
-        "PR #184 は next_participant の消費側配線を実装した。",
+        "PR #184 は next_participant の消費側配線を実装し、msg-1802 で "
+        "Einstein の独立レビューを経て main にマージされた。",
         _source(),
         _bounds(max_tokens=400),
         output_tokens=395,
@@ -1075,7 +1126,8 @@ def test_an_unterminated_summary_well_under_the_ceiling_is_accepted() -> None:
     """That is a style problem, not a truncation -- and rejecting it would
     mean no digest at all for a thread that produced a usable one."""
     accepted, _ = accept_digest(
-        "PR #184 は next_participant の消費側配線を実装した",
+        "PR #184 は next_participant の消費側配線を実装し、msg-1802 で "
+        "Einstein の独立レビューを経て main にマージされた",
         _source(),
         _bounds(max_tokens=400),
         output_tokens=40,
@@ -1088,7 +1140,8 @@ def test_without_a_token_count_the_truncation_check_stands_down() -> None:
     """An older Cognilens that omits `compressed_tokens` must not make every
     digest look truncated."""
     accepted, _ = accept_digest(
-        "途中で切れているように見える文",
+        "PR #184 は next_participant の消費側配線を実装し、msg-1802 で "
+        "レビューを経てマージされた。ただしこの文は途中で切れているように見える",
         _source(),
         _bounds(max_tokens=400),
         output_tokens=None,
@@ -1120,7 +1173,7 @@ async def test_a_non_integer_token_count_does_not_crash_the_gate() -> None:
     room = _chatroom_mock()
     lens = _cognilens_mock()
     lens.summarize_payload.return_value = {
-        "summary": "要約です。",
+        "summary": _REALISTIC,
         "compressed_tokens": "580",  # a stringly-typed upstream
     }
     producer = _producer()
