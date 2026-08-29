@@ -1,4 +1,37 @@
-"""Approving a deploy: the checks, and the two doors that reach them.
+"""Approving a deploy: the checks, and the doors that reach them.
+
+What approval is for
+--------------------
+
+Not "a person looked at it". The thing this mechanism exists to prevent
+is code that is not on ``main`` reaching production, and that is not
+held here at all: it is held by the request path having nowhere to put a
+ref (:class:`~magickit.deploy.records.DeployStore.create` takes no
+``override_ref``; see ``tests/unit/test_deploy_ref_is_not_reachable.py``).
+An approval with the override arguments empty therefore cannot express
+anything except the branch the request already named, and approving one
+is a scheduling decision -- *should this go live now* -- rather than a
+review.
+
+So a plain approval does not require a human, and ``deploy_approve``'s
+docstring no longer says it does. Until 2026-08-17 it did, and that
+docstring and this one contradicted each other: this module described
+the MCP door as existing *for* the loop on sg-tomtebo-01, while the tool
+behind that door told its caller not to approve on an automated caller's
+behalf. spirrow-conclair#13 was merged, requested, and then sat pending
+with no door open to it -- the dashboard was read-only at the time, the
+host CLI is on a different machine, and the tool's own docstring closed
+the third. The deploy was correct and eventually happened by explicit
+human instruction. Nothing was broken except the rule.
+
+Where a person still matters is ``override_ref`` and
+``override_allows_migration``, which are the only way past the missing
+parameter, and which the request that is being approved never asked for.
+Those are marked HUMAN ACTION in ``deploy_approve``; the approval step
+as a whole is not.
+
+The doors
+---------
 
 Approval was originally reachable only through the OAuth-gated MCP
 instance, which is right for the actor it was built against -- the loop
@@ -25,6 +58,13 @@ recorded action, which is the only difference actually available here.
 The loop cannot use it, for the same reason it cannot use ssh: this is a
 process on the host, not a tool on the MCP surface. That is the boundary
 that was real to begin with, and it is unchanged.
+
+A third door was added later: the dashboard button (:data:`VIA_DASHBOARD`),
+vouched for by the tailnet identity. It is deliberately narrower than the
+other two -- the form offers no ref override and no migration unblock
+(see :mod:`magickit.web.deploys`) -- which is the same split as above,
+read from the other side: the decision that does not need a person is on
+a button, and the one that does is not.
 """
 
 from __future__ import annotations
