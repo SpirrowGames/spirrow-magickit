@@ -883,182 +883,62 @@ def _pick_checked_choice(
     return _FREEFORM_ONLY_VALUE
 
 
-async def _render_decision_error_page(
+async def _render_decision_page(
     request: Request,
     *,
     project: str,
     thread_id: str,
-    content_value: str,
-    freeform_value: str,
-    next_participant_value: str,
-    error_message: str,
-    status_code: int = 400,
-) -> HTMLResponse:
-    """判断 UI を D-31 のエラー再描画で使う。
-
-    ``chatroom_writes`` の POST ハンドラが `_check_next_participant` 系エラーを
-    受けた時にこれを呼ぶ。入力値をすべて保持したまま再描画する — モバイルで
-    長文を打った直後に消えるのが最悪の失敗 (msg-094 §5)。
-
-    thread 文脈 (parked author / 参加者一覧 / タイトル) は Conclair から取り直す。
-    Conclair も落ちていれば、最低限の form (single-entry select + textarea) に
-    フォールバックする ∴ 入力が消えることは無い。
-
-    S5'' 更新: material も取り直す。J-fresh / J-stale / J-absent の 3 状態は
-    D-31 でも維持する — POST 中に material 側が更新される可能性があり、
-    「送信時は J-fresh、再描画時は J-stale」という遷移が起こりうる。
-    その場合は再描画側の状態を出す (**入力は残す**)。
-
-    D-31 exhaustive fallback (Einstein msg-147 §3): the previously-chosen
-    ``content_value`` is fed through ``_pick_checked_choice`` so the
-    template always finds *some* radio to check. Otherwise the retry
-    submit sends no ``content=`` and stops at FastAPI's 422 (msg-146
-    §5(a) trap).
-
-    I-19 / D-36 / D-37 / D-38 (msg-146 §3): the ``next_participant``
-    select is built from the *registered* subset of the thread's
-    candidates, verified through the exact function the POST-time gate
-    calls (``_lookup_identity``). Unknown-verdict names are dropped
-    fail-closed; the caller is told when at least one drop happened so
-    the template can render the "verification unavailable" notice.
-    """
-    # 文脈の復元は best-effort。落ちても入力保持が優先。
-    parked_author = next_participant_value
-    thread_title = thread_id
-    head_msg_id: str | None = None
-    verification_unavailable = False
-    parked_author_unregistered = False
-    unknown_names: set[str] = set()
-    context_messages: list[dict[str, Any]] = []
-    try:
-        result = await _load_judgement_context(project, thread_id)
-    except Exception as e:  # noqa: BLE001 - 復元失敗は最低限 form に落ちる
-        logger.warning(
-            "decision error re-render: get_thread raised, falling back",
-            project=project, thread_id=thread_id, error=str(e),
-        )
-        # Fallback: no context. Do NOT call Prismind at all (the user's
-        # verification budget is finite; wasting it on a lookup we cannot
-        # trust would be strictly worse than the empty select we already
-        # decided is acceptable). D-31 hard promise (input preservation)
-        # takes precedence.
-        participant_choices: list[str] = []
-        verification_unavailable = True
-        # No lookup happened ∴ D-37 line stays silent (see the
-        # orthogonality note on _participant_choices_registered).
-        parked_author_unregistered = False
-    else:
-        if not _is_error(result):
-            context_messages = result.get("messages") or []
-            thread_meta = result.get("thread") or {}
-            thread_title = thread_meta.get("title") or thread_id
-            head_msg_id = _head_msg_id_from_thread(thread_meta)
-            if context_messages:
-                last = context_messages[-1]
-                candidate_parked = _parked_author(last)
-                if candidate_parked:
-                    parked_author = candidate_parked
-            (
-                participant_choices,
-                unknown_names,
-                verification_unavailable,
-                parked_author_unregistered,
-            ) = await _participant_choices_registered(
-                context_messages, parked_author
-            )
-        else:
-            # Conclair envelope on re-render: same treatment as the raise
-            # branch above — no candidates, mark verification unavailable.
-            participant_choices = []
-            verification_unavailable = True
-            # We could not verify; do NOT claim the parked author is
-            # unregistered. D-37 line only fires when Prismind actively
-            # answered "not registered" — silence otherwise (D-38 line
-            # is what covers "we could not verify").
-            parked_author_unregistered = False
-
-    # I-20 (single source of truth): the *selected* value in the re-render
-    # is the user's last choice iff it survived verification; otherwise
-    # demote to the "宛先を送らない" sentinel per D-37, so the user has to
-    # look at the field and decide again (rather than silently landing on
-    # a value the gate will reject).
-    if next_participant_value and next_participant_value in participant_choices:
-        selected_target = next_participant_value
-    elif next_participant_value == NO_TARGET_VALUE:
-        # User explicitly asked to not send a target. Preserve that intent.
-        selected_target = NO_TARGET_VALUE
-    else:
-        selected_target = _resolve_default_target(parked_author, participant_choices)
-
-    # Material lookup is best-effort. A store outage falls to J-absent
-    # (safer than pretending we have material) rather than 500. ``ok`` is
-    # unused here — the judgement UI keeps the pre-N-* behavior (store outage
-    # is J-absent). msg-137 §6: the shared helper deliberately does not change
-    # observable behavior for the judgement branch.
-    material, _material_ok = await _load_material(project, thread_id)
-
-    material_state = _classify_judgement_state(material, head_msg_id)
-    # J-stale 描画では材料テキストを template に渡さない (I-14 / spec §4-1)。
-    # サーバ側で描画しないと言うことは、テンプレートに文字列を渡さないこと
-    # で担保する (テンプレート側の if で「隠す」実装は I-14 を通さない)。
-    material_for_render = material if material_state == "fresh" else None
-    choice_options = _choice_options_from_material(material_for_render)
-
-    # D-31 exhaustive fallback: pick the radio the template will check.
-    checked_choice_value = _pick_checked_choice(content_value, choice_options)
-
-    return templates.TemplateResponse(
-        request,
-        "decisions_thread.html",
-        {
-            "mode": "judgement",
-            "project": project,
-            "thread_id": thread_id,
-            "thread_ui_url": _thread_page_url(project, thread_id),
-            "thread_title": thread_title,
-            "parked_author": parked_author,
-            "participant_choices": participant_choices,
-            "content_value": content_value,
-            "checked_choice_value": checked_choice_value,
-            "freeform_value": freeform_value,
-            "next_participant_value": selected_target,
-            "error_message": error_message,
-            "material_state": material_state,
-            "material": material_for_render,
-            "material_head_msg_id": (material or {}).get("head_msg_id"),
-            "thread_head_msg_id": head_msg_id,
-            "choice_options": choice_options,
-            "verification_unavailable": verification_unavailable,
-            "unknown_participant_count": len(unknown_names),
-            # D-37: Prismind is up, but *this exact* parked author is not a
-            # registered identity ∴ the default was demoted to NO_TARGET.
-            # Template renders a dedicated 1-line reason so the user knows
-            # WHY they landed on "宛先を送らない" (msg-146 §3 / msg-155 §5).
-            "parked_author_unregistered": parked_author_unregistered,
-            "no_target_value": NO_TARGET_VALUE,
-            "no_target_label": NO_TARGET_LABEL,
-            "freeform_only_value": _FREEFORM_ONLY_VALUE,
-        },
-        status_code=status_code,
-        headers={"Cache-Control": _NO_STORE},
-    )
-
-
-@router.get("/dashboard/decisions/{project}/{thread_id}", response_class=HTMLResponse)
-async def decision_page(
-    request: Request, project: str, thread_id: str
+    submitted: dict[str, str] | None = None,
+    post_error_message: str | None = None,
 ) -> Response:
-    """D-26' の 4 分岐で判断ページを返す (spec §1)。
+    """R-9 (msg-186 §2): single source of truth for the decision page render.
 
-    ``ChatroomAdapter.get_thread`` を叩き:
+    Both the GET handler (`decision_page`) and the D-31 POST error path
+    (`_render_decision_error_page`) route through this function. There is
+    exactly ONE place in the process where the page's ``mode`` is decided,
+    and that decision is derived from a fresh read of world state — never
+    carried over from a client-supplied field or a POST-time snapshot
+    (R-5, msg-186 §0).
 
-    - 例外 / それ以外の error envelope → **503** + `/ui` 直リンク
-    - error envelope の中身が NotFound 相当 → **404**
-    - 成功 (thread + messages) → 駐機なら判断 UI (200) / 駐機でないなら
-      「判断待ちではありません」(200)
+    ``submitted`` is present iff this is a D-31 POST error re-render. It
+    carries the user's just-typed input for input preservation:
 
-    404 と 503 の判別は `_is_not_found` に集約する。
+    - ``content_value``: selected choice-button value (or the I-12 sentinel).
+    - ``freeform_value``: the textarea contents.
+    - ``next_participant_value``: the select's value.
+
+    ``post_error_message`` is the reason the POST was rejected (populated
+    together with ``submitted``). It surfaces as an "送信できませんでした"
+    banner on whichever mode we land in.
+
+    Behaviour matrix (msg-186 §1 contract):
+
+    - **fetch succeeds, parked to human** → ``mode="judgement"`` with the
+      J-fresh / J-stale / J-absent split. On POST re-render, banner + input
+      preserved. Status 200 (GET) / 400 (POST error).
+    - **fetch succeeds, not parked to human** → ``mode="not_waiting"``
+      with the answered / advanced / undetermined split. On POST re-render,
+      banner + input preserved on the "書き足す" form. Status 200 / 400.
+      This is the R-3 branch: today's fixed-to-``judgement`` re-render
+      showed a real form to someone whose turn it was not; deriving the
+      mode from fresh state closes that hole.
+    - **fetch fails (exception / envelope) on a POST re-render** →
+      ``mode="unavailable"`` with input echoed read-only, no submit
+      button, and no material (R-8 / R-10). Status 400. The page names
+      neither ``judgement`` nor ``not_waiting`` — reading failed, so no
+      mode may be claimed.
+    - **fetch fails on a GET** → same as before D-26': 503 unavailable
+      or 404 not_found.
+    - **not-found envelope on a POST re-render** → also routes to the
+      unavailable-with-echo branch: a POST-time "not found" is usually
+      transient and losing the user's input to a fleeting 404 is exactly
+      what R-10 exists to prevent.
     """
+    is_post_rerender = submitted is not None
+    submitted = submitted or {}
+    submitted_content_value = submitted.get("content_value", "")
+    submitted_freeform_value = submitted.get("freeform_value", "")
+    submitted_next_participant_value = submitted.get("next_participant_value", "")
     thread_ui_url = _thread_page_url(project, thread_id)
 
     adapter = chatroom_tools._adapter()
@@ -1067,32 +947,51 @@ async def decision_page(
             result = await adapter.get_thread(
                 project=project, thread_id=thread_id, mode="full"
             )
-        except Exception as e:  # noqa: BLE001 - 取得できなかったを 503 に丸める
+        except Exception as e:  # noqa: BLE001 - R-8: fetch failed ∴ unavailable
             logger.warning(
                 "decision page: get_thread raised",
+                project=project, thread_id=thread_id, error=str(e),
+            )
+            return _render_unavailable_view(
+                request,
                 project=project,
                 thread_id=thread_id,
-                error=str(e),
-            )
-            return templates.TemplateResponse(
-                request,
-                "decisions_thread.html",
-                {
-                    "mode": "unavailable",
-                    "project": project,
-                    "thread_id": thread_id,
-                    "thread_ui_url": thread_ui_url,
-                    "error_message": f"Conclair に接続できませんでした ({e})",
-                },
-                status_code=503,
-                headers={"Cache-Control": _NO_STORE},
+                thread_ui_url=thread_ui_url,
+                fetch_error_message=f"Conclair に接続できませんでした ({e})",
+                post_error_message=post_error_message,
+                is_post_rerender=is_post_rerender,
+                submitted_content_value=submitted_content_value,
+                submitted_freeform_value=submitted_freeform_value,
+                submitted_next_participant_value=submitted_next_participant_value,
             )
     finally:
         await adapter.close()
 
     if _is_error(result):
+        fetch_error_message = (
+            f"Conclair からエラーが返りました: "
+            f"{result.get('error_type', '?')}: {result.get('error', '')}"
+        )
+        if is_post_rerender:
+            # R-10 §2: on a POST re-render, do NOT tell the user their thread
+            # "doesn't exist" and drop their input. A NotFound envelope during
+            # a POST re-render is often transient (Conclair blip between the
+            # POST and the re-fetch); losing the just-typed input to that is
+            # what this branch exists to prevent. Route to unavailable-with-echo.
+            return _render_unavailable_view(
+                request,
+                project=project,
+                thread_id=thread_id,
+                thread_ui_url=thread_ui_url,
+                fetch_error_message=fetch_error_message,
+                post_error_message=post_error_message,
+                is_post_rerender=True,
+                submitted_content_value=submitted_content_value,
+                submitted_freeform_value=submitted_freeform_value,
+                submitted_next_participant_value=submitted_next_participant_value,
+            )
         if _is_not_found(result):
-            # 「存在しない」の明示的回答 → 404 (spec §1 / D-26')。
+            # GET-only: explicit "not found" answer → 404 (D-26').
             return templates.TemplateResponse(
                 request,
                 "decisions_thread.html",
@@ -1101,130 +1000,97 @@ async def decision_page(
                     "project": project,
                     "thread_id": thread_id,
                     "thread_ui_url": thread_ui_url,
-                    "error_message": (
-                        f"スレッド {thread_id!r} は存在しません。"
-                    ),
+                    "error_message": f"スレッド {thread_id!r} は存在しません。",
                 },
                 status_code=404,
                 headers={"Cache-Control": _NO_STORE},
             )
-        # NotFound 以外の envelope → 「取得できなかった」= 503。
-        # 404 に丸めると「Conclair 障害中に『そんなスレッドは無い』と言う」ことになる
-        # (msg-093 §2 の一般則の実体)。
-        return templates.TemplateResponse(
+        return _render_unavailable_view(
             request,
-            "decisions_thread.html",
-            {
-                "mode": "unavailable",
-                "project": project,
-                "thread_id": thread_id,
-                "thread_ui_url": thread_ui_url,
-                "error_message": (
-                    f"Conclair からエラーが返りました: "
-                    f"{result.get('error_type', '?')}: {result.get('error', '')}"
-                ),
-            },
-            status_code=503,
-            headers={"Cache-Control": _NO_STORE},
+            project=project,
+            thread_id=thread_id,
+            thread_ui_url=thread_ui_url,
+            fetch_error_message=fetch_error_message,
+            post_error_message=None,
+            is_post_rerender=False,
+            submitted_content_value="",
+            submitted_freeform_value="",
+            submitted_next_participant_value="",
         )
 
-    # 成功形。messages が無いのは駐機ではない (open されただけの thread など)。
     messages = result.get("messages") or []
     thread_meta = result.get("thread") or {}
 
     if not messages or not _is_parked_to_human(messages[-1]):
-        # N-*: 「判断待ちではありません」を 3 状態に割る (msg-136 / msg-137).
-        # 材料と messages を元に、answered / advanced / undetermined を判定して
-        # 根拠を添える。判定できないもの (材料が無い・窓が届かない・末尾不完全
-        # など) は全部 undetermined に落ちる — 「回答済み」を根拠なく言わない、
-        # という中心規律 (msg-137 §2 の不変条件)。
-        material, material_ok = await _load_material(project, thread_id)
-        thread_head = _head_msg_id_from_thread(thread_meta)
-        nw_state, nw_evidence = _classify_not_waiting(
-            material=material,
-            material_ok=material_ok,
-            messages=messages,
-            thread_head=thread_head,
-        )
-        # Einstein Objection: closed スレッドではフォームを描画しない
-        # (Conclair が ChatroomStateError で拒否する ∴ 送信可能な form を
-        # 出すと嘘の導線になる)。
-        thread_closed = _thread_is_closed(thread_meta)
-        # I-19 / D-36 / D-37 / D-38: same registered-target filter as the
-        # judgement branch. Consistency matters: pr-gate-relay would
-        # otherwise still leak into the "書き足す" secondary form's
-        # select and reproduce the msg-140 defect on that path.
-        default_next = _default_next_participant_for_not_waiting(messages)
-        (
-            nw_participant_choices,
-            _nw_unknown_names,
-            nw_verification_unavailable,
-            nw_parked_author_unregistered,
-        ) = await _participant_choices_registered(messages, default_next)
-        nw_default_target = _resolve_default_target(default_next, nw_participant_choices)
-        return templates.TemplateResponse(
+        return await _render_not_waiting_view(
             request,
-            "decisions_thread.html",
-            {
-                "mode": "not_waiting",
-                "project": project,
-                "thread_id": thread_id,
-                "thread_ui_url": thread_ui_url,
-                "thread_title": thread_meta.get("title") or thread_id,
-                "not_waiting_state": nw_state,
-                "not_waiting_evidence": nw_evidence,
-                "thread_closed": thread_closed,
-                "thread_status": str(thread_meta.get("status") or ""),
-                # I-12: フォームは 3 状態すべてで残す (msg-136 §4)。ただし
-                # closed スレッドでは template 側で描画しない。既定は最終
-                # msg の next_participant、無ければ最終 msg の著者
-                # (msg-137 §5 N-7)。
-                "next_participant_value": nw_default_target,
-                "participant_choices": nw_participant_choices,
-                "verification_unavailable": nw_verification_unavailable,
-                # D-37 (msg-146 §3 / msg-155 §5): same one-line reason on
-                # the not_waiting "書き足す" form ∴ the "why did I land on
-                # 宛先を送らない" question has the same answer on both
-                # forms. Keeping this per-form so a future template split
-                # cannot leave one form silent. ``parked_author`` here is
-                # the not_waiting form's default_next (the last msg's own
-                # next_participant / author) — the name the D-37 line
-                # points at.
-                "parked_author": default_next,
-                "parked_author_unregistered": nw_parked_author_unregistered,
-                "no_target_value": NO_TARGET_VALUE,
-                "no_target_label": NO_TARGET_LABEL,
-                "freeform_only_value": _FREEFORM_ONLY_VALUE,
-            },
-            status_code=200,
-            headers={"Cache-Control": _NO_STORE},
+            project=project,
+            thread_id=thread_id,
+            thread_ui_url=thread_ui_url,
+            messages=messages,
+            thread_meta=thread_meta,
+            post_error_message=post_error_message,
+            is_post_rerender=is_post_rerender,
+            submitted_freeform_value=submitted_freeform_value,
+            submitted_next_participant_value=submitted_next_participant_value,
         )
+    return await _render_judgement_view(
+        request,
+        project=project,
+        thread_id=thread_id,
+        thread_ui_url=thread_ui_url,
+        messages=messages,
+        thread_meta=thread_meta,
+        post_error_message=post_error_message,
+        is_post_rerender=is_post_rerender,
+        submitted_content_value=submitted_content_value,
+        submitted_freeform_value=submitted_freeform_value,
+        submitted_next_participant_value=submitted_next_participant_value,
+    )
 
-    # 駐機中 → 判断 UI (200)。S5'' で 3 状態に切り分ける。
+
+async def _render_judgement_view(
+    request: Request,
+    *,
+    project: str,
+    thread_id: str,
+    thread_ui_url: str,
+    messages: list[dict[str, Any]],
+    thread_meta: dict[str, Any],
+    post_error_message: str | None,
+    is_post_rerender: bool,
+    submitted_content_value: str,
+    submitted_freeform_value: str,
+    submitted_next_participant_value: str,
+) -> Response:
+    """Render the ``mode="judgement"`` branch for both GET and POST re-render.
+
+    Called from ``_render_decision_page`` only. All state is derived from
+    the just-fetched ``messages`` / ``thread_meta``; no field is carried
+    over from a POST snapshot beyond ``submitted_*`` (which are input
+    preservation only, never state claims — R-5).
+
+    Preserves the S5'' J-fresh / J-stale / J-absent 3-state material split
+    and the D-37 / D-38 registered-target filter regardless of whether
+    this is a fresh GET or a POST re-render (I-19 consistency).
+    """
     last = messages[-1]
     parked_author = _parked_author(last)
     head_msg_id = _head_msg_id_from_thread(thread_meta)
 
-    # Material lookup is best-effort. spec §3.2 fail-to-stale の一貫適用:
-    # store が落ちても J-absent (「材料が無い」) に倒す。J-fresh には決して
-    # 落ちない — 我々が確認できなかったことを「新しい」と言わない
-    # (msg-093 §2 一般則 / msg-109 §7)。判断 UI 側は ``ok`` を読まない
-    # (既存挙動を維持) — store 例外は J-absent のまま。
+    # Material lookup is best-effort (msg-137 §6). The judgement UI keeps the
+    # pre-N-* behaviour: a store outage falls to J-absent (safer than
+    # pretending we have material) rather than 500.
     material, _material_ok = await _load_material(project, thread_id)
 
     material_state = _classify_judgement_state(material, head_msg_id)
     # I-14 (spec §4-1): J-stale では材料テキストを template に渡さない。
-    # 「隠す」ではなく「渡さない」で担保する — 隠された文字列は view-source
-    # / コピペ / スクリーンリーダに届く。J-fresh のみ渡す。
     material_for_render = material if material_state == "fresh" else None
     choice_options = _choice_options_from_material(material_for_render)
 
-    # I-19 / D-36 / D-37 / D-38 (msg-146 §3): filter the candidate list
-    # through the exact registry the POST-time gate consults, so every
-    # option in the select is guaranteed to be an accepted target. The
-    # UNKNOWN verdicts are dropped fail-closed; the caller learns whether
-    # any drop happened via the ``verification_unavailable`` flag so the
-    # template can render the D-38 degradation notice.
+    # I-19 / D-36 / D-37 / D-38: registered-target filter is the same rule
+    # the POST-time gate applies. Runs on both GET and POST re-render so
+    # the select's contents never drift between the two.
     (
         participant_choices,
         _unknown_names,
@@ -1232,6 +1098,36 @@ async def decision_page(
         parked_author_unregistered,
     ) = await _participant_choices_registered(messages, parked_author)
     default_target = _resolve_default_target(parked_author, participant_choices)
+
+    if is_post_rerender:
+        # I-20 (msg-146 §3): keep the user's chosen target iff it survived
+        # verification; otherwise demote to the "宛先を送らない" sentinel so
+        # they have to look at the field again rather than silently landing
+        # on a value the gate will reject.
+        if (
+            submitted_next_participant_value
+            and submitted_next_participant_value in participant_choices
+        ):
+            selected_target = submitted_next_participant_value
+        elif submitted_next_participant_value == NO_TARGET_VALUE:
+            selected_target = NO_TARGET_VALUE
+        else:
+            selected_target = default_target
+        content_value = submitted_content_value
+        freeform_value = submitted_freeform_value
+        # D-31 exhaustive fallback (Einstein msg-147 §3): pick the radio the
+        # template will check. Falls to the I-12 sentinel when the previous
+        # choice is not in the current option set.
+        checked_choice_value = _pick_checked_choice(
+            submitted_content_value, choice_options
+        )
+        status_code = 400
+    else:
+        selected_target = default_target
+        content_value = ""
+        freeform_value = ""
+        checked_choice_value = _FREEFORM_ONLY_VALUE
+        status_code = 200
 
     return templates.TemplateResponse(
         request,
@@ -1244,33 +1140,249 @@ async def decision_page(
             "thread_title": thread_meta.get("title") or thread_id,
             "parked_author": parked_author,
             "participant_choices": participant_choices,
-            # 空の初期状態 (D-31 再描画ではないので入力保持なし)。
-            "content_value": "",
-            "checked_choice_value": _FREEFORM_ONLY_VALUE,
-            "freeform_value": "",
-            "next_participant_value": default_target,
-            "error_message": None,
+            "content_value": content_value,
+            "checked_choice_value": checked_choice_value,
+            "freeform_value": freeform_value,
+            "next_participant_value": selected_target,
+            "error_message": post_error_message,
             "material_state": material_state,
             "material": material_for_render,
             "material_head_msg_id": (material or {}).get("head_msg_id"),
             "thread_head_msg_id": head_msg_id,
-            # 汎用 2 択は廃止 (spec §4.1 / msg-117 §5). J-fresh のときだけ
-            # composer の option 由来のカードを出す。J-stale / J-absent は
-            # 空配列 ∴ template は「自由記述だけで送る」ラジオだけを出す。
             "choice_options": choice_options,
             "verification_unavailable": verification_unavailable,
-            # D-37 (msg-146 §3 / msg-155 §5): 1-line reason when Prismind
-            # is up but the parked author itself is not a registered
-            # identity ∴ the default was demoted to "宛先を送らない".
-            # Distinct from D-38 (Prismind unreachable) — see the docstring
-            # on _participant_choices_registered for the orthogonality.
             "parked_author_unregistered": parked_author_unregistered,
             "no_target_value": NO_TARGET_VALUE,
             "no_target_label": NO_TARGET_LABEL,
             "freeform_only_value": _FREEFORM_ONLY_VALUE,
         },
-        status_code=200,
+        status_code=status_code,
         headers={"Cache-Control": _NO_STORE},
+    )
+
+
+async def _render_not_waiting_view(
+    request: Request,
+    *,
+    project: str,
+    thread_id: str,
+    thread_ui_url: str,
+    messages: list[dict[str, Any]],
+    thread_meta: dict[str, Any],
+    post_error_message: str | None,
+    is_post_rerender: bool,
+    submitted_freeform_value: str,
+    submitted_next_participant_value: str,
+) -> Response:
+    """Render the ``mode="not_waiting"`` branch for both GET and POST re-render.
+
+    Called from ``_render_decision_page`` only. R-3 (msg-186 §0):
+    routing a POST re-render through this branch — rather than the
+    fixed-to-``judgement`` re-render the old code always did — is the
+    whole point of this refactor. When a POST was rejected and the world
+    has since moved past "waiting for a human", we must NOT hand the
+    caller a fresh judgement form: that is the "手番でない者に嘘の導線を
+    描く" hole this thread was written to close.
+
+    Input preservation still applies: the "書き足す" secondary form
+    already reads ``freeform_value`` / ``next_participant_value`` from the
+    template context, so passing the submitted values here surfaces them
+    unchanged. ``content_value`` has no analogue on this form (it is a
+    hidden sentinel), so it does not appear here.
+    """
+    material, material_ok = await _load_material(project, thread_id)
+    thread_head = _head_msg_id_from_thread(thread_meta)
+    nw_state, nw_evidence = _classify_not_waiting(
+        material=material,
+        material_ok=material_ok,
+        messages=messages,
+        thread_head=thread_head,
+    )
+    thread_closed = _thread_is_closed(thread_meta)
+    default_next = _default_next_participant_for_not_waiting(messages)
+    (
+        nw_participant_choices,
+        _nw_unknown_names,
+        nw_verification_unavailable,
+        nw_parked_author_unregistered,
+    ) = await _participant_choices_registered(messages, default_next)
+    nw_default_target = _resolve_default_target(default_next, nw_participant_choices)
+
+    if is_post_rerender:
+        freeform_value = submitted_freeform_value
+        if (
+            submitted_next_participant_value
+            and submitted_next_participant_value in nw_participant_choices
+        ):
+            selected_target = submitted_next_participant_value
+        elif submitted_next_participant_value == NO_TARGET_VALUE:
+            selected_target = NO_TARGET_VALUE
+        else:
+            selected_target = nw_default_target
+        status_code = 400
+    else:
+        freeform_value = ""
+        selected_target = nw_default_target
+        status_code = 200
+
+    return templates.TemplateResponse(
+        request,
+        "decisions_thread.html",
+        {
+            "mode": "not_waiting",
+            "project": project,
+            "thread_id": thread_id,
+            "thread_ui_url": thread_ui_url,
+            "thread_title": thread_meta.get("title") or thread_id,
+            "not_waiting_state": nw_state,
+            "not_waiting_evidence": nw_evidence,
+            "thread_closed": thread_closed,
+            "thread_status": str(thread_meta.get("status") or ""),
+            "next_participant_value": selected_target,
+            "participant_choices": nw_participant_choices,
+            "verification_unavailable": nw_verification_unavailable,
+            "parked_author": default_next,
+            "parked_author_unregistered": nw_parked_author_unregistered,
+            "no_target_value": NO_TARGET_VALUE,
+            "no_target_label": NO_TARGET_LABEL,
+            "freeform_only_value": _FREEFORM_ONLY_VALUE,
+            "freeform_value": freeform_value,
+            # R-3 (msg-186): surface the POST rejection reason on this
+            # branch too. The old fixed-mode re-render only showed the
+            # banner on the judgement page ∴ a POST that was rejected
+            # AND landed here (because the world moved past waiting-for-
+            # human between submit and re-render) silently lost the error.
+            "error_message": post_error_message,
+        },
+        status_code=status_code,
+        headers={"Cache-Control": _NO_STORE},
+    )
+
+
+def _render_unavailable_view(
+    request: Request,
+    *,
+    project: str,
+    thread_id: str,
+    thread_ui_url: str,
+    fetch_error_message: str,
+    post_error_message: str | None,
+    is_post_rerender: bool,
+    submitted_content_value: str,
+    submitted_freeform_value: str,
+    submitted_next_participant_value: str,
+) -> Response:
+    """R-8 / R-10 (msg-186 §1 / msg-188): the state-unknown / echo-only page.
+
+    Reached whenever the current-state re-fetch fails (exception or
+    error envelope). The contract (msg-186 §1 / R-8): **no mode may be
+    named** — reading world state failed, so we do not claim
+    ``judgement`` or ``not_waiting``. The current ``mode="unavailable"``
+    template branch is that "no mode named" page.
+
+    On a POST re-render (msg-188 R-10 + Einstein's ADVISORY): the page
+    additionally echoes the submitted values read-only so the user can
+    copy the text back out, but **shows no submit button and no material**.
+    A form that could be submitted while state is unknown would be a
+    導線 for a decision made without material — exactly the hole R-3
+    closed on the derive path, mirrored here on the fetch-failure path.
+
+    GET-time 503 (Conclair down) is the pre-R-9 behaviour: no echo, no
+    banner, just the "cannot verify state" copy and the chatroom link.
+    """
+    return templates.TemplateResponse(
+        request,
+        "decisions_thread.html",
+        {
+            "mode": "unavailable",
+            "project": project,
+            "thread_id": thread_id,
+            "thread_ui_url": thread_ui_url,
+            # error_message is the pre-existing hook the template already
+            # renders. Keeping its meaning ("why we are on this page") gives
+            # us GET-time 503 behaviour unchanged.
+            "error_message": fetch_error_message,
+            # R-10 additions: only meaningful on POST re-render.
+            "is_post_rerender": is_post_rerender,
+            "post_error_message": post_error_message,
+            "submitted_content_value": submitted_content_value,
+            "submitted_freeform_value": submitted_freeform_value,
+            "submitted_next_participant_value": submitted_next_participant_value,
+        },
+        # Status: 400 on POST re-render (D-31 contract preserved), 503 on
+        # a plain GET where Conclair is unreachable (pre-R-9 behaviour).
+        status_code=400 if is_post_rerender else 503,
+        headers={"Cache-Control": _NO_STORE},
+    )
+
+
+async def _render_decision_error_page(
+    request: Request,
+    *,
+    project: str,
+    thread_id: str,
+    content_value: str,
+    freeform_value: str,
+    next_participant_value: str,
+    error_message: str,
+    status_code: int = 400,
+) -> Response:
+    """D-31 POST-error re-render (back-compat shim over ``_render_decision_page``).
+
+    R-9 (msg-186 §2): the mode-decision is moved into
+    ``_render_decision_page`` so there is exactly ONE place in the process
+    that decides the page's mode. This function stays as a stable entry
+    point for ``chatroom_writes`` (which imports it by name), forwarding
+    the caller's submitted values as the ``submitted`` dict and the
+    rejection reason as ``post_error_message``.
+
+    ``status_code`` is accepted for signature stability; the R-9 pipeline
+    now chooses the status per branch (400 on any POST re-render, 503 on
+    a GET-time unavailable, 404 on GET-time not_found). Callers that
+    previously passed ``status_code=400`` see exactly the same status on
+    the mainline judgement / not_waiting / unavailable branches.
+    """
+    del status_code  # see docstring: status is now chosen per branch
+    return await _render_decision_page(
+        request,
+        project=project,
+        thread_id=thread_id,
+        submitted={
+            "content_value": content_value,
+            "freeform_value": freeform_value,
+            "next_participant_value": next_participant_value,
+        },
+        post_error_message=error_message,
+    )
+
+
+@router.get("/dashboard/decisions/{project}/{thread_id}", response_class=HTMLResponse)
+async def decision_page(
+    request: Request, project: str, thread_id: str
+) -> Response:
+    """D-26' の 4 分岐で判断ページを返す (spec §1)。
+
+    R-9 (msg-186 §2): the implementation lives in
+    ``_render_decision_page``, which is also what the D-31 POST error path
+    goes through. Having one function decide the page's mode means the
+    same-day guarantee "GET and POST re-render land on the SAME mode for
+    the SAME thread state" is structural, not a coincidence — closing
+    the R-3 hole (msg-186 §0) that the fixed-mode POST re-render used to
+    open on 「対象は在るが手番でない」threads.
+
+    Branch matrix (unchanged from before R-9):
+
+    - 例外 / それ以外の error envelope → **503** + `/ui` 直リンク
+    - error envelope の中身が NotFound 相当 → **404**
+    - 成功 (thread + messages) → 駐機なら判断 UI (200) / 駐機でないなら
+      「判断待ちではありません」(200)
+    """
+    return await _render_decision_page(
+        request,
+        project=project,
+        thread_id=thread_id,
+        submitted=None,
+        post_error_message=None,
     )
 
 
@@ -1481,6 +1593,7 @@ __all__ = [
     "_has_standalone_next_line",
     "_is_not_found",
     "_render_decision_error_page",
+    "_render_decision_page",
     "_thread_page_url",
     "_participant_choices",
     "_head_msg_id_from_thread",

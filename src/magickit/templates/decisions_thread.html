@@ -520,6 +520,15 @@
       **Einstein Objection**: closed スレッドではフォームを描画しない
       (Conclair が ChatroomStateError で拒否 ∴ 嘘の導線になる)。
     #}
+    {% if error_message %}
+      {# R-3 (msg-186): the POST-error re-render can now land here (when
+         the world moved past waiting-for-human between submit and
+         re-fetch). Surface the rejection reason instead of silently
+         losing it. Input is preserved in the "書き足す" form below. #}
+      <div class="decision-error" role="alert">
+        <strong>送信できませんでした。</strong> {{ error_message }}
+      </div>
+    {% endif %}
     {% if not_waiting_state == "answered" %}
       <h1>この判断は回答済みです</h1>
       <p>スレッド <code>{{ thread_id }}</code> にはすでに判断が投稿されています.</p>
@@ -643,8 +652,63 @@
     存在しません. URL に typo が無いか確かめてください.</p>
 
   {% elif mode == "unavailable" %}
+    {#
+      R-8 / R-10 (msg-186 §1 / msg-188): the state-unknown page.
+      Heading names no mode — the re-fetch of world state failed, so we
+      do not claim "判断" or "判断待ちではありません". Whatever we knew
+      about the thread at POST time is stale by definition and is not
+      used as a fallback (R-5 forbids server-side carry too).
+
+      When we got here from a POST error re-render, echo the just-typed
+      input read-only so it can be copied back out. No form, no material,
+      and specifically no submit button — a decision導線 without material
+      is exactly the R-3 hole this whole thread was written to close,
+      mirrored on the fetch-failure side.
+    #}
     <h1>現在このスレッドの状態を確認できません</h1>
-    <p>{{ error_message }}</p>
+    {% if is_post_rerender %}
+      {% if post_error_message %}
+        <div class="decision-error" role="alert">
+          <strong>送信できませんでした。</strong> {{ post_error_message }}
+        </div>
+      {% endif %}
+      <div class="decision-stale-warning" role="status">
+        <strong>スレッドの現在の状態も取得できませんでした。</strong>
+        {{ error_message }}<br>
+        あなたが送信した内容は下に残しています (再送はできません)。
+        chatroom でスレッドの状態を確認してから、必要なら再度送信してください。
+      </div>
+
+      {#
+        Read-only echo of the submitted values. No <form>, no submit
+        button — this is a copy destination, not a re-submission导線.
+        (msg-188 Einstein ADVISORY: 「判断材料がない場所には、判断を送信
+        する導線もまた存在してはならない」— そのまま固定。)
+      #}
+      {% if submitted_content_value or submitted_freeform_value or submitted_next_participant_value %}
+        <div class="decision-absent" role="status" style="margin-top:1rem;">
+          <strong>送信内容 (コピー用の控え):</strong>
+          <dl style="margin:0.5rem 0 0;">
+            {% if submitted_content_value %}
+              <dt style="font-weight:600;margin-top:0.5rem;">選択したボタン</dt>
+              <dd style="margin:0.2rem 0 0 1rem;"><code>{{ submitted_content_value }}</code></dd>
+            {% endif %}
+            {% if submitted_freeform_value %}
+              <dt style="font-weight:600;margin-top:0.5rem;">自由記述</dt>
+              <dd style="margin:0.2rem 0 0 1rem;">
+                <textarea readonly rows="6" style="width:100%;font-family:inherit;padding:0.5rem 0.6rem;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;color:#24292f;box-sizing:border-box;">{{ submitted_freeform_value }}</textarea>
+              </dd>
+            {% endif %}
+            {% if submitted_next_participant_value %}
+              <dt style="font-weight:600;margin-top:0.5rem;">次の担当</dt>
+              <dd style="margin:0.2rem 0 0 1rem;"><code>{{ submitted_next_participant_value }}</code></dd>
+            {% endif %}
+          </dl>
+        </div>
+      {% endif %}
+    {% else %}
+      <p>{{ error_message }}</p>
+    {% endif %}
     <p style="color:#57606a;">chatroom の方からは直接読めるかもしれません:</p>
     <div class="decision-links">
       <a href="{{ thread_ui_url }}">chatroom でスレッドを開く →</a>
