@@ -132,6 +132,21 @@ body {
     padding: 20px;
 }
 
+/* A one-line "where does this panel's data come from?" note that sits
+   between the card header and the card body. Each dashboard panel names
+   its own provenance so the same word (e.g. "project") does not sit on
+   the same page meaning two different things -- see the Chatroom panel
+   next to the Task Queue panel for the case this exists to prevent. */
+.card-provenance {
+    padding: 10px 20px 0;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+}
+.card-provenance code {
+    font-size: 12px;
+}
+
 /* Stats Grid */
 .stats-grid {
     display: grid;
