@@ -25,6 +25,11 @@
         <h2>Chatroom</h2>
         <a class="btn btn-sm" href="/ui/">Open UI</a>
     </div>
+    <p class="card-provenance muted">
+        Conclair から。行は project で、リンクは
+        <code>/ui/projects/&lt;project&gt;/threads</code>。
+        このページで project を名指ししているのはこの表だけ。
+    </p>
     <div class="card-body" id="chatroom-summary"
          hx-get="/dashboard/chatroom"
          hx-trigger="load, every 30s"
@@ -46,6 +51,10 @@
                 Refresh
             </button>
         </div>
+        <p class="card-provenance muted">
+            上の Task Queue の状態遷移ログ。
+            <code>POST /v1/tasks</code> で登録された task が動いたときだけ増える。
+        </p>
         <div class="card-body" id="events-list"
              hx-get="/dashboard/events"
              hx-trigger="load, every 10s"
@@ -65,6 +74,11 @@
                 Refresh
             </button>
         </div>
+        <p class="card-provenance muted">
+            <code>POST /v1/locks</code> の resource ロック。
+            <code>resource_type</code>/<code>resource_id</code> は呼び出し側の任意文字列で、
+            resource → project の写像は定義されていない。
+        </p>
         <div class="card-body" id="locks-list"
              hx-get="/dashboard/locks"
              hx-trigger="load, every 15s"
@@ -79,6 +93,10 @@
     <div class="card-header">
         <h2>Task Queue</h2>
     </div>
+    <p class="card-provenance muted">
+        <code>POST /v1/tasks</code> で登録された Magickit 自身のキュー。
+        自律ループのタスクは Prismind 側にあり、ここには入らない。
+    </p>
     <div class="card-body" id="task-queue"
          hx-get="/dashboard/queue"
          hx-trigger="load, every 5s"
