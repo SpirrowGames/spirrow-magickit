@@ -1,0 +1,136 @@
+{#
+  板の中身。poll でも、カードを動かした POST でも、この 1 ファイルが
+  描かれる ∴ カードの言うことが経路によって変わることはない。
+
+  エラーは板を置き換えるのではなく板の *中* に出す: 失敗の表示で板ごと
+  差し替えると、poll の trigger と移動ボタンがページから消えて、やり直す
+  手段が無くなる (ops_table.html と同じ理由)。
+#}
+
+{% if flash_error %}
+<div class="alert alert-error">{{ flash_error }}</div>
+{% endif %}
+
+{% for notice in notices %}
+{#
+  「読めなかった」は 0 件ではない。判定できなかった列を黙って空で出すと、
+  片付いたのか読めなかったのか区別がつかない ∴ 何が読めなかったかを名指す。
+#}
+<div class="alert alert-warn">{{ notice }}</div>
+{% endfor %}
+
+<div class="board-meta muted">
+    待ち <strong>{{ total }}</strong> 件
+    <span class="board-checked">{{ checked_at | iso }} 時点</span>
+</div>
+
+<div class="board-columns">
+    {% for lane, heading, blurb in lane_columns %}
+    <section class="board-col board-col-{{ lane }}"
+             data-lane="{{ lane }}"
+             aria-label="{{ heading }}">
+        <header class="board-col-head">
+            <h2>{{ heading }} <span class="board-count">{{ columns[lane] | length }}</span></h2>
+            <p class="muted">{{ blurb }}</p>
+        </header>
+
+        <div class="board-col-body" data-dropzone="{{ lane }}">
+            {% for card in columns[lane] %}
+            <article class="board-card board-card-{{ card.kind }}"
+                     draggable="true"
+                     data-item-key="{{ card.key }}"
+                     data-fingerprint="{{ card.fingerprint }}"
+                     data-lane="{{ lane }}">
+                <div class="board-card-top">
+                    <span class="board-kind board-kind-{{ card.kind }}">{{ card.kind_label }}</span>
+                    {% if card.since %}
+                    <span class="board-age" title="{{ card.since | iso }}">{{ card.since | ago }}</span>
+                    {% endif %}
+                </div>
+
+                <a class="board-card-title" href="{{ card.href }}">{{ card.title }}</a>
+
+                {% if card.project %}
+                <div class="muted board-card-sub">{{ card.project }}{% if card.detail %} · {{ card.detail }}{% endif %}</div>
+                {% elif card.detail %}
+                <div class="muted board-card-sub">{{ card.detail }}</div>
+                {% endif %}
+
+                {% if card.note %}
+                <p class="board-card-note" title="{{ card.note_full }}">{{ card.note }}</p>
+                {% endif %}
+
+                {% if card.changed %}
+                {#
+                  動かした後に中身が入れ替わったカード。「対応中」に置いた
+                  ものが別の問いに化けていることがあるので、同じ顔をさせない。
+                #}
+                <p class="board-changed">
+                    置いたときから中身が変わっています（新しい判断依頼かもしれません）
+                </p>
+                {% endif %}
+
+                {% if card.moved_at %}
+                <div class="muted board-card-sub">
+                    {{ heading }}へ {{ card.moved_at | ago }}{% if card.moved_by %}（{{ card.moved_by }}）{% endif %}
+                </div>
+                {% endif %}
+
+                {#
+                  ボタンが本体で、ドラッグはその上乗せ。HTML5 のドラッグは
+                  タッチでもキーボードでも動かない ∴ ここを飾りにすると
+                  スマホから板が触れなくなる。
+                #}
+                <div class="board-move" role="group" aria-label="{{ card.title }} の列">
+                    {% for target, target_heading, _ in lane_columns %}
+                    <button type="button"
+                            class="board-move-btn{% if target == lane %} is-current{% endif %}"
+                            {% if target == lane %}disabled aria-current="true"{% endif %}
+                            hx-post="/dashboard/decisions/_lane"
+                            hx-vals='{"item_key": {{ card.key | tojson }}, "lane": "{{ target }}", "fingerprint": {{ card.fingerprint | tojson }}}'
+                            hx-target="#board"
+                            hx-swap="innerHTML">{{ target_heading }}</button>
+                    {% endfor %}
+                </div>
+            </article>
+            {% else %}
+            <p class="board-empty muted">なし</p>
+            {% endfor %}
+        </div>
+    </section>
+    {% endfor %}
+
+    {#
+      完了列。dropzone を持たない = ドラッグの落とし先が構造的に存在しない。
+      「実際には誰も答えていないのに完了列にあるカード」を作れないという
+      性質は、この一点で保たれている。
+    #}
+    <section class="board-col board-col-done" aria-label="{{ done_column[1] }}">
+        <header class="board-col-head">
+            <h2>{{ done_column[1] }} <span class="board-count">{{ done | length }}</span></h2>
+            <p class="muted">{{ done_column[2] }}・直近 {{ done_days }} 日</p>
+        </header>
+
+        <div class="board-col-body">
+            {% if done_error %}
+            <p class="board-empty muted">完了列を読めませんでした（{{ done_error }}）</p>
+            {% endif %}
+            {% for card in done %}
+            <article class="board-card board-card-done">
+                <div class="board-card-top">
+                    <span class="board-kind board-kind-{{ card.kind }}">{{ card.kind_label }}</span>
+                    {% if card.last_seen_at %}
+                    <span class="board-age" title="{{ card.last_seen_at | iso }}">{{ card.last_seen_at | ago }}</span>
+                    {% endif %}
+                </div>
+                <a class="board-card-title" href="{{ card.href }}">{{ card.title }}</a>
+                <p class="board-card-note">{{ card.reason }}</p>
+            </article>
+            {% else %}
+            {% if not done_error %}
+            <p class="board-empty muted">なし</p>
+            {% endif %}
+            {% endfor %}
+        </div>
+    </section>
+</div>

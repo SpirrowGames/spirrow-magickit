@@ -931,3 +931,163 @@ textarea {
 }
 
 .ops-trust { margin-top: 16px; font-size: 12px; }
+
+/* ==========================================================================
+   やること board (/dashboard/decisions)
+   ==========================================================================
+   列は横に 4 本並ぶが、狭い画面では縦に積む。板の意味は「左から右へ流れ
+   る」ではなく「どの塊がどれだけあるか」なので、積んでも情報は落ちない。
+
+   完了列だけ地の色を変えてある。動かせる 3 列とは性質が違う（ドラッグの
+   落とし先が無い）ことを、注意書きより先に見た目で言うため。 */
+
+.alert-warn { background: #FEF3C7; color: #B45309; }
+
+.board-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    margin-bottom: 10px;
+}
+.board-checked { margin-left: auto; }
+
+.board-columns {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
+}
+
+.board-col {
+    background: var(--gray-100);
+    border-radius: var(--border-radius);
+    padding: 10px;
+    min-width: 0;
+}
+.board-col-done { background: transparent; border: 1px dashed var(--gray-300); }
+
+.board-col-head { margin-bottom: 8px; }
+.board-col-head h2 {
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.board-col-head p { font-size: 11px; line-height: 1.4; }
+
+.board-count {
+    background: var(--gray-200);
+    color: var(--gray-700);
+    border-radius: 10px;
+    padding: 0 7px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.board-col-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* 空の列にも落とせるだけの高さ。潰れた列はドラッグの的にならない。 */
+    min-height: 60px;
+    border-radius: var(--border-radius);
+}
+.board-col-body.is-drop-target {
+    outline: 2px dashed var(--primary-color);
+    outline-offset: 2px;
+    background: rgba(79, 70, 229, 0.06);
+}
+
+.board-card {
+    background: #fff;
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow);
+    padding: 10px;
+    font-size: 13px;
+    cursor: grab;
+}
+.board-card.is-dragging { opacity: 0.45; cursor: grabbing; }
+.board-card-done { cursor: default; box-shadow: none; border: 1px solid var(--gray-200); }
+
+/* 種別の帯。ops の状態色とは別系統にしてある — あちらは「動いているか」、
+   こちらは「何の待ちか」で、同じ色を使うと片方の意味が濁る。 */
+.board-card-decision { box-shadow: inset 3px 0 0 var(--primary-color), var(--shadow); }
+.board-card-deploy   { box-shadow: inset 3px 0 0 var(--danger-color), var(--shadow); }
+.board-card-loop     { box-shadow: inset 3px 0 0 var(--warning-color), var(--shadow); }
+
+.board-card-top {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+.board-age { margin-left: auto; font-size: 11px; color: var(--gray-500); white-space: nowrap; }
+
+.board-kind {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.board-kind-decision { background: #E0E7FF; color: #3730A3; }
+.board-kind-deploy   { background: #FEE2E2; color: #B91C1C; }
+.board-kind-loop     { background: #FEF3C7; color: #B45309; }
+
+.board-card-title {
+    display: block;
+    font-weight: 600;
+    color: var(--gray-900);
+    text-decoration: none;
+    line-height: 1.35;
+}
+.board-card-title:hover { text-decoration: underline; }
+
+.board-card-sub { font-size: 11px; margin-top: 3px; }
+
+.board-card-note {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--gray-600);
+    line-height: 1.45;
+}
+
+.board-changed {
+    margin-top: 6px;
+    padding: 4px 7px;
+    border-radius: 4px;
+    background: #FEF3C7;
+    color: #B45309;
+    font-size: 11px;
+}
+
+.board-move {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+.board-move-btn {
+    flex: 1 1 auto;
+    padding: 3px 6px;
+    font-size: 11px;
+    border: 1px solid var(--gray-300);
+    border-radius: 4px;
+    background: #fff;
+    color: var(--gray-700);
+    cursor: pointer;
+}
+.board-move-btn:hover:not(:disabled) { background: var(--gray-100); }
+.board-move-btn.is-current {
+    background: var(--gray-200);
+    color: var(--gray-500);
+    cursor: default;
+}
+
+.board-empty { font-size: 12px; padding: 4px 2px; }
+.board-trust { margin-top: 16px; font-size: 12px; line-height: 1.6; }
+
+@media (max-width: 900px) {
+    .board-columns { grid-template-columns: minmax(0, 1fr); }
+}

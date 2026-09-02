@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}やること - Magickit{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>やること</h1>
+    <p class="subtitle">
+        僕を待って止まっているもの。
+        <span class="muted">列はドラッグ、またはカード下のボタンで動かせます。</span>
+    </p>
+</div>
+
+{#
+  板は 20 秒ごとに描き直る。ドラッグ中に描き直すとカードが手から消える
+  ので、HTMX の trigger filter で掴んでいる間だけ poll を止める
+  (`board.js` が window.__boardDragging を立てる)。ボタン経由の移動は
+  この fragment 自身を swap するので、次の tick を待たずに反映される。
+#}
+<section id="board"
+         hx-get="/dashboard/decisions/_board"
+         hx-trigger="load, every 20s[!window.__boardDragging]"
+         hx-target="this"
+         hx-swap="innerHTML">
+    <p class="loading">やることを集めています...</p>
+</section>
+
+<p class="board-trust muted">
+    <strong>完了列はドラッグでは作れません。</strong>
+    決裁・deploy 承認・RESUME が実際に起きて、板から落ちたカードだけが入ります
+    （直近 {{ done_days }} 日）。
+    列（新着 / 対応中 / 保留）は僕用の付箋で、AI 側の状態は動かしません。
+</p>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/board.js"></script>
+{% endblock %}

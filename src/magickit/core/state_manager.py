@@ -880,11 +880,26 @@ class StateManager:
         assert self._connection is not None
         now = datetime.now(timezone.utc)
 
-        # Clean up expired locks
+        # Clean up expired locks.
+        #
+        # The commit is not bookkeeping -- it is what keeps this database
+        # writable. `aiosqlite` inherits sqlite3's deferred isolation, so
+        # this DELETE opens a write transaction, and the connection here is
+        # long-lived and process-wide. An uncommitted DELETE therefore holds
+        # a RESERVED lock on the file forever, and every other writer --
+        # including the ones in other modules that open their own short
+        # connections (`decision_materials`, `board_lanes`) -- fails with
+        # "database is locked" until the service is restarted.
+        #
+        # Measured 2026-09-02: `data/magickit.db-journal` had been sitting
+        # since 01:45 and no process could write to the database at all.
+        # This is a *read* method, which is exactly why the missing commit
+        # survived -- nothing about calling it looks like a write.
         await self._connection.execute(
             "DELETE FROM locks WHERE expires_at IS NOT NULL AND expires_at < ?",
             (now.isoformat(),),
         )
+        await self._connection.commit()
 
         cursor = await self._connection.execute(
             """
@@ -905,11 +920,26 @@ class StateManager:
         assert self._connection is not None
         now = datetime.now(timezone.utc)
 
-        # Clean up expired locks
+        # Clean up expired locks.
+        #
+        # The commit is not bookkeeping -- it is what keeps this database
+        # writable. `aiosqlite` inherits sqlite3's deferred isolation, so
+        # this DELETE opens a write transaction, and the connection here is
+        # long-lived and process-wide. An uncommitted DELETE therefore holds
+        # a RESERVED lock on the file forever, and every other writer --
+        # including the ones in other modules that open their own short
+        # connections (`decision_materials`, `board_lanes`) -- fails with
+        # "database is locked" until the service is restarted.
+        #
+        # Measured 2026-09-02: `data/magickit.db-journal` had been sitting
+        # since 01:45 and no process could write to the database at all.
+        # This is a *read* method, which is exactly why the missing commit
+        # survived -- nothing about calling it looks like a write.
         await self._connection.execute(
             "DELETE FROM locks WHERE expires_at IS NOT NULL AND expires_at < ?",
             (now.isoformat(),),
         )
+        await self._connection.commit()
 
         if holder_id:
             cursor = await self._connection.execute(

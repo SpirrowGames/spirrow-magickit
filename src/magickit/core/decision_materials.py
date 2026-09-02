@@ -199,5 +199,37 @@ class DecisionMaterialStore:
             "stored_at": row["stored_at"],
         }
 
+    async def list_materials(self) -> list[dict[str, Any]]:
+        """Every material row, newest first. Cross-project.
+
+        ``get_material`` answers "what is the material for this one
+        thread", which is what the judgement page asks. The board asks the
+        opposite question -- "which threads have material at all" -- and
+        answering it by walking projects and calling ``get_material`` per
+        thread would be a round trip per thread to learn that most of them
+        have nothing.
+
+        **Rows here are not "waiting for a human".** The store never
+        deletes: a row survives the decision it was written for. Freshness
+        is ``head_msg_id`` vs the thread's ``last_msg_id`` and only the
+        caller, holding live thread state, can decide it (spec
+        ``S5-decision-materials.md`` §3.1). ``options`` / ``unknowns`` are
+        deliberately not decoded here -- the board shows the question, and
+        parsing JSON for every row to throw it away is work for nothing.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            await self._create_tables(conn)
+            cursor = await conn.execute(
+                """
+                SELECT project, thread_id, head_msg_id, signature, question,
+                       recommendation, stored_at
+                FROM decision_materials
+                ORDER BY stored_at DESC
+                """
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
 
 __all__ = ["DecisionMaterialStore"]

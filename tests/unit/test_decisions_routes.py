@@ -59,11 +59,16 @@ def test_thread_page_is_registered_to_this_module():
     ) == "magickit.web.decisions.decision_page"
 
 
-def test_index_redirect_is_registered_to_this_module():
-    """`/dashboard/decisions` (list URL) stays a redirect stub in 増分 2
-    (msg-096 §4). The real list is 増分 3."""
+def test_the_index_url_belongs_to_the_board_now():
+    """増分 3: the 302 stub became the real board (``web/board.py``).
+
+    Pinned from this side too, because the stub used to live here: if the
+    board's router is ever dropped from ``create_app``, this file is where
+    somebody would think to restore a redirect, and that would be the
+    wrong repair.
+    """
     assert sole_handler(create_app(), "GET", "/dashboard/decisions") == (
-        "magickit.web.decisions.decisions_index_redirect"
+        "magickit.web.board.board_page"
     )
 
 
@@ -81,16 +86,19 @@ def test_dashboard_decisions_paths_are_single_handler():
         )
 
 
-# --- the index redirect (still stubbed in 増分 2) ------------------------
+# --- the index URL (a real board since 増分 3) ---------------------------
 
 
 @pytest.mark.asyncio
-async def test_index_redirect_is_302_to_dashboard():
-    """`/dashboard/decisions` is still a stub in 増分 2 (msg-096 §4)."""
+async def test_the_index_url_answers_with_a_page_not_a_redirect():
+    """The Discord alerts and the nav both land here; a 302 that outlived
+    the stub would send readers back to a page that does not answer 「僕は
+    何を待たせているか」. The board's own behaviour is tested in
+    ``test_board.py`` -- this pins only that the URL stopped bouncing.
+    """
     r = await _get("/dashboard/decisions")
 
-    assert r.status_code == 302
-    assert r.headers["location"] == "/dashboard"
+    assert r.status_code == 200
     assert "no-store" in r.headers.get("cache-control", "").lower()
 
 

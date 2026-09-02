@@ -1386,17 +1386,11 @@ async def decision_page(
     )
 
 
-@router.get("/dashboard/decisions")
-async def decisions_index_redirect() -> Response:
-    """一覧 URL は据え置き (増分 3)。302 → `/dashboard`。
-
-    増分 1 と同一の挙動。増分 3 で本物の一覧に差し替える。それまで判断待ちを
-    見に来た人が少なくとも何かに着地するようにする (msg-084 §1)。
-    """
-    return Response(
-        status_code=302,
-        headers={"Location": "/dashboard", "Cache-Control": _NO_STORE},
-    )
+# ``GET /dashboard/decisions`` は増分 3 で本物の一覧になり、
+# :mod:`magickit.web.board` が持っている。ここに 302 の置き石は残さない
+# ——— 同じ URL に 2 つのハンドラがあると、勝つのは router の登録順という
+# 見えない事実になる。個別の判断ページ (`/{project}/{thread_id}`) は
+# 2 セグメントで、板の `/_board` `/_lane` とは衝突しない。
 
 
 # --- S5'' 材料 API (spec spec/slices/S5-decision-materials.md §1) ---------
