@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     # This is a *suspicion* threshold, not a fact -- see web/ops.py.
     ops_stall_minutes: int = Field(default=30)
 
+    # Board (`/dashboard/decisions`): how far back the 完了 column looks.
+    # The column is not a log -- it exists so that acting on a card gives
+    # visible feedback that it left the board, and so a card that vanished
+    # because *someone else* moved it is still findable for a while. A week
+    # covers "what happened while I was away" without turning the board
+    # into an archive nobody scrolls.
+    board_done_days: int = Field(default=7)
+
     # Chatroom thread digests. Magickit is the producer (Cognilens -> Lexora
     # `light`); Conclair stores and renders. See core/digest_producer.py.
     #
@@ -392,6 +400,10 @@ class Settings(BaseSettings):
         # Ops view settings
         if ops := yaml_config.get("ops"):
             flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
+
+        # Board view settings
+        if board := yaml_config.get("board"):
+            flat_config["board_done_days"] = board.get("done_days")
 
         # Who may approve a deploy from the dashboard. An explicit empty
         # list is meaningful (nobody), so this reads the key rather than

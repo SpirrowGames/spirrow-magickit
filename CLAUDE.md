@@ -49,7 +49,8 @@ src/magickit/
 ├── adapters/       base(HTTP) / mcp_base(MCP SSE) を継承した各サービスクライアント
 │                   lexora, cognilens, prismind, chatroom, unrealwise,
 │                   phanthand (開発PC・独立クラス)
-├── web/            人間向け HTML。ops(稼働状況) / chatroom_dashboard /
+├── web/            人間向け HTML。ops(稼働状況) / board(やること) /
+│                   decisions(判断ページ) / chatroom_dashboard /
 │                   chatroom_proxy / chatroom_writes / chatroom_digest /
 │                   mojibake / deps
 ├── templates/ static/
@@ -359,6 +360,63 @@ merge はどこからでもできるが、live にできるのは systemd と al
   `start.sh` を ignore している** ∴ pin は blob hash で検出して拒否する
   (`pin.would_silently_overwrite`)。内容同一なら通す
 
+## やること board (`web/board.py`)
+
+`/dashboard/decisions` = **僕を待って止まっているもの**。稼働状況ページの隣の問いで、
+片方の答えでもう片方を推し量ることはできない —— 全 project が「稼働中」でも判断依頼が
+8 件溜まっていることはあるし、その逆もある。以前ここは `/dashboard` への 302 の置き石
+だった (「増分 3 で本物の一覧に差し替える」)。
+
+板に載るのは 3 種だけ。**owner=human の thread は載せていない** (実測 29 件、取りこぼしは
+少ないがノイズが多く、板の意味が薄まる):
+
+| 種別 | live の定義 | データ源 |
+|---|---|---|
+| 判断待ち | 材料の `head_msg_id` == thread の `last_msg_id` | `decision_materials` × Conclair `list_threads` |
+| 承認待ち | `status == pending_approval` | `deploy/records` (ローカル file store) |
+| 停止ループ | `ops.classify()` が `held` / `stalled` | Conclair summary + `GET /control` |
+
+**判断は「材料がある」ではなく「材料の head が thread の末尾のまま」で選ぶ。**
+materials table は削除しない (答えた後も行が残る) ので、存在だけで並べると回答済みで
+埋まる —— 実測で 33 行中 live は 8 件。判定規則は判断ページの
+`_classify_judgement_state` と同じで、**片方が読めないときは fresh に倒さない**向きも同じ。
+
+**停止ループの判定は `ops.classify` をそのまま呼ぶ。** 2 箇所で「停止」を定義すると
+2 つのページが違うことを言い始める。event / digest の取得 (ops の N+1 の重い側) はしない
+—— 板は「何を話しているか」ではなく「誰が僕を待っているか」の板。
+
+### 列は 2 種類の性質を持つ (ここが設計の要)
+
+`新着 / 対応中 / 保留` は**僕の状態**でどこにも既存の表現が無い ∴ magickit が持つ
+(`core/board_lanes.py`)。Conclair の thread status は「AI 側が誰の番だと思っているか」で、
+僕が着手したかどうかとは別の問い。ドラッグで動く。
+
+`完了` は**世界の状態**で、live 集合から落ちたことの言い換えでしかない ∴ **ドラッグでは
+作れない**。`POST /_lane` は `lane=done` を名指しで拒否し、テンプレートの完了列は
+`data-dropzone` を持たない —— 規則とその構造的表現の両方がある。決裁すれば材料が stale に
+なり、承認すれば pending でなくなり、RESUME すれば held でなくなる、そのとき初めて移る。
+**「完了に置いたのに誰も答えていない」が構造的に作れない**のがこの板を信用できる理由で、
+これは見た目の話ではない。
+
+- `new` は**行の不在**で表す。板を見ただけでは 1 行も書かれない
+- 完了列のために `board_seen` に live 項目を毎描画 UPSERT する。**GET で書く**のは承知の上で、
+  消えた後に控えることは原理的にできないため
+- 完了カードの理由は判るときだけ言う。**「あなたが対応しました」とは書かない** —— 別の誰かが
+  答えた可能性が常にある
+- lane 移動時の `fingerprint` (判断なら `head_msg_id`) を控え、次の描画で変わっていたら
+  「置いたときから中身が変わっています」を出す。同じ顔で別の問いに化けたカードに答えさせない
+- ドラッグは上乗せで、**本体はカード下のボタン**。HTML5 の DnD はタッチでもキーボードでも
+  動かないので、ここを飾りにするとスマホから板が触れない。移動の口は 1 本 (`POST /_lane`) で、
+  `board.js` も `htmx.ajax` で同じ口を通る
+- poll (20s) は掴んでいる間だけ止まる (`hx-trigger` の `[!window.__boardDragging]`)。
+  掴んだカードが手の中で消えるのは UI の不具合ではなく操作の喪失
+
+URL の分割は**形**であって登録順ではない: 板は 1 セグメント (`/_board` `/_lane`)、
+判断ページは 2 セグメント (`/{project}/{thread_id}`)。
+
+**読めないものは空欄にしない。** Conclair が読めなければ判断待ちは「0 件」ではなく判定不能で、
+何が読めなかったかを板の上に書く。承認待ちはローカル file store ∴ chatroom が落ちていても出る。
+
 ## 稼働状況ページ (`web/ops.py`)
 
 `/dashboard` = **稼働状況**。「自律ループが今回っているのか、止まっているのか、何を待っているのか」に
@@ -520,6 +578,7 @@ MAGICKIT_MCP_PORT=8114        # MCP server (Streamable HTTP)
 MAGICKIT_TRANSPORT_MODE=http  # http (default) | sse (legacy)
 MAGICKIT_AUTH_DISABLED=0      # 1 to bypass Google OAuth on the MCP endpoint
 MAGICKIT_OPS_STALL_MINUTES=30 # 稼働状況ページの「停止疑い」しきい値
+MAGICKIT_BOARD_DONE_DAYS=7   # やること board の完了列がさかのぼる日数
 
 MAGICKIT_DIGEST_ON_DEMAND_ENABLED=1    # 「要約生成」ボタン (既定 on)
 MAGICKIT_DIGEST_SWEEPER_ENABLED=0      # 無人の定期生成 (既定 off)

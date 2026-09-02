@@ -221,3 +221,42 @@ async def test_same_holder_cannot_double_lock(lock_manager):
     # Same holder trying to lock again should fail
     with pytest.raises(LockAcquisitionError):
         await lock_manager.acquire("task", "task-1", "user-1")
+
+
+# --- the write lock the read paths used to leave open ---------------------
+#
+# `get_lock` / `get_active_locks` clean up expired rows with a DELETE, and
+# `aiosqlite` inherits sqlite3's deferred isolation: that DELETE opens a
+# write transaction on a connection `StateManager` keeps for the life of
+# the process. Without a commit the transaction never ends, the RESERVED
+# lock is held forever, and *every other writer against that file* --
+# including the short-lived connections in `decision_materials` and
+# `board_lanes` -- fails with "database is locked".
+#
+# Measured 2026-09-02 on the running service: `data/magickit.db-journal`
+# had been sitting since 01:45 and nothing could write to the database.
+# Both offenders are read methods, which is why the missing commit went
+# unnoticed for so long -- nothing about calling them looks like a write.
+
+
+@pytest.mark.asyncio
+async def test_reading_locks_does_not_leave_a_write_transaction_open(
+    state_manager,
+):
+    """A second connection must still be able to write after a read.
+
+    The assertion is deliberately about *another connection*, not about any
+    internal flag: "the database is still writable" is the property that
+    broke, and it is only observable from outside the connection that broke
+    it.
+    """
+    import aiosqlite
+
+    await state_manager.get_active_locks()
+    await state_manager.get_lock("project", "nothing-here")
+
+    # The *same file* the manager holds open -- a different path would
+    # make this pass no matter what the manager does.
+    async with aiosqlite.connect(state_manager.db_path, timeout=2.0) as other:
+        await other.execute("CREATE TABLE probe (x)")
+        await other.commit()
