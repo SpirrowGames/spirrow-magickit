@@ -48,12 +48,10 @@
                     {% endif %}
                 </div>
 
-                <a class="board-card-title" href="{{ card.href }}">{{ card.title }}</a>
+                <a class="board-card-title" href="{{ card.href }}" title="{{ card.title }}">{{ card.title }}</a>
 
-                {% if card.project %}
-                <div class="muted board-card-sub">{{ card.project }}{% if card.detail %} · {{ card.detail }}{% endif %}</div>
-                {% elif card.detail %}
-                <div class="muted board-card-sub">{{ card.detail }}</div>
+                {% if card.subline %}
+                <div class="muted board-card-sub">{{ card.subline }}</div>
                 {% endif %}
 
                 {% if card.note %}
@@ -123,7 +121,7 @@
                     <span class="board-age" title="{{ card.last_seen_at | iso }}">{{ card.last_seen_at | ago }}</span>
                     {% endif %}
                 </div>
-                <a class="board-card-title" href="{{ card.href }}">{{ card.title }}</a>
+                <a class="board-card-title" href="{{ card.href }}" title="{{ card.title }}">{{ card.title }}</a>
                 <p class="board-card-note">{{ card.reason }}</p>
             </article>
             {% else %}

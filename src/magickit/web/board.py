@@ -89,6 +89,19 @@ _KIND_ORDER = {"deploy": 0, "decision": 1, "loop": 2}
 #: 全文は ``title`` 属性に入れる。
 _QUESTION_CHARS = 140
 
+def _actor(request: Request) -> str | None:
+    """列を動かした人。名乗りが無ければ ``None`` で、``"unknown"`` とは書かない。
+
+    ``identity.tailnet_name`` は最後の手段として ``"unknown"`` を返すが、
+    それはカードに「対応中へ たった今（unknown）」と印字されるということ。
+    誰も名乗っていないことと、``unknown`` という名前の人が動かしたことは
+    別 ∴ 前者は行を出さない (テンプレートは ``moved_by`` の有無で分岐する)。
+    """
+    if identity.tailnet_login(request) is None:
+        return None
+    return identity.tailnet_name(request)
+
+
 #: ループ状態のうち「僕が動かさないと進まない」もの。``unmanaged`` は
 #: 板に出さない: conductor が居ないプロジェクト (古い scratch 等) が
 #: 恒久的にカードとして居座り、板の意味を薄める。
@@ -125,6 +138,17 @@ class Card:
     @property
     def kind_label(self) -> str:
         return KIND_LABELS.get(self.kind, self.kind)
+
+    @property
+    def subline(self) -> str:
+        """title の下の 1 行。**title に出ている語は繰り返さない。**
+
+        ループカードの title は project 名そのもの ∴ 副題にもう一度出すと
+        カード 1 枚で同じ語を 2 回読ませることになる。判断カードの title は
+        スレッドのタイトルなので project は新しい情報。
+        """
+        parts = [p for p in (self.project, self.detail) if p and p != self.title]
+        return " · ".join(parts)
 
 
 @dataclass
@@ -338,11 +362,14 @@ async def _collect_loops(
                 "長いターンの途中でも同じに見えます。"
             )
             detail = row.blocked_note or ""
+        # 状態は副題に置き、title は project 名だけにする。両方に入れると
+        # カード 1 枚で同じ語を 2 回読ませることになり、板の走査が遅くなる。
+        detail = f"{row.status_label}{' · ' + detail if detail else ''}"
         live.cards.append(
             Card(
                 key=f"loop:{row.project}",
                 kind="loop",
-                title=f"{row.project} — {row.status_label}",
+                title=row.project,
                 href="/dashboard",
                 since=row.heartbeat_at,
                 note=note,
@@ -397,9 +424,17 @@ def _gone_reason(row: dict[str, Any], live: _Live) -> str:
 
 
 def _sort_key(card: Card) -> tuple[int, float]:
-    """種別の優先、その中は待たせている順 (古いものが上)。"""
+    """種別の優先、その中は**待たせている順 (古いものが上)**。
+
+    新着順ではない。板の目的は腐らせないことで、8 日前から待っている項目が
+    新しい依頼に押し下げられて画面外に出るのが、まさに避けたい形。新着は
+    件数と各カードの経過時間で分かる (どのカードにも「何日前」が出ている)。
+
+    ``since`` を持たないカードは末尾。時刻が読めないことを「たった今」とも
+    「大昔」とも解釈しない。
+    """
     kind_rank = _KIND_ORDER.get(card.kind, len(_KIND_ORDER))
-    age = -card.since.timestamp() if card.since else 0.0
+    age = card.since.timestamp() if card.since else float("inf")
     return (kind_rank, age)
 
 
@@ -611,7 +646,7 @@ async def board_set_lane(
                 item_key=item_key,
                 lane=lane,
                 fingerprint=fingerprint or None,
-                actor=identity.tailnet_name(request),
+                actor=_actor(request),
             )
         except Exception as e:  # noqa: BLE001 - 板は描いたまま失敗を見せる
             logger.warning(

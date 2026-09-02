@@ -1035,8 +1035,20 @@ textarea {
 .board-kind-deploy   { background: #FEE2E2; color: #B91C1C; }
 .board-kind-loop     { background: #FEF3C7; color: #B45309; }
 
+/* title と note は行数で切る。**板の主張は「一目で全体が見える」**で、
+   スレッドのタイトルは 5 行になることがあり、12 枚並ぶと 1 列 6000px の
+   縦長リストになって、列が 4 本ある意味が消える。全文はカードのリンク先と
+   `title` 属性にあるので、ここで失われる情報は無い。
+
+   `-webkit-line-clamp` は Chrome / Safari / Firefox すべてが対応する
+   (`display: -webkit-box` の接頭辞つき記法のまま標準化された)。効かない
+   ブラウザでは切られずに全文が出るだけで、壊れはしない。 */
 .board-card-title {
-    display: block;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
     font-weight: 600;
     color: var(--gray-900);
     text-decoration: none;
@@ -1047,6 +1059,11 @@ textarea {
 .board-card-sub { font-size: 11px; margin-top: 3px; }
 
 .board-card-note {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
     margin-top: 6px;
     font-size: 12px;
     color: var(--gray-600);

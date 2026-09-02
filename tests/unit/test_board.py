@@ -646,3 +646,87 @@ async def test_a_title_carrying_html_is_escaped(temp_db_path, monkeypatch):
     assert "<img src=x" not in html
     assert "<script>alert(1)</script>" not in html
     assert "&lt;img src=x" in html
+
+
+@pytest.mark.asyncio
+async def test_an_unvouched_move_records_no_actor(temp_db_path, monkeypatch):
+    """"nobody named themselves" and "someone named `unknown`" are different.
+
+    `identity.tailnet_name` falls back to the literal "unknown", which would
+    print on the card as 「対応中へ たった今（unknown）」 -- a name that is
+    not a name.
+    """
+    _no_deploys(monkeypatch)
+    settings = _settings(temp_db_path)
+
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with patch.object(board, "get_settings", return_value=settings), \
+         patch.object(board, "ChatroomAdapter", return_value=_adapter()):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            await client.post(
+                "/dashboard/decisions/_lane",
+                data={"item_key": "k", "lane": "doing", "fingerprint": ""},
+            )
+
+    lanes = await BoardLaneStore(db_path=temp_db_path).read_lanes()
+    assert lanes["k"]["moved_by"] is None
+
+
+def test_cards_are_ordered_oldest_first_within_a_kind():
+    """The board exists to stop things rotting, so what has waited longest
+    is what you see first. New arrivals are visible from the count and from
+    the age printed on every card."""
+    def _card(kind, minutes):
+        return board.Card(
+            key=f"{kind}:{minutes}", kind=kind, title="t", href="#",
+            since=NOW - timedelta(minutes=minutes),
+        )
+
+    cards = [
+        _card("decision", 10),
+        _card("loop", 9999),
+        _card("decision", 5000),
+        _card("deploy", 1),
+    ]
+    cards.sort(key=board._sort_key)
+
+    assert [c.key for c in cards] == [
+        "deploy:1",        # 承認は本番が止まって待っている種類 ∴ 先頭
+        "decision:5000",   # 判断は古い順
+        "decision:10",
+        "loop:9999",
+    ]
+
+
+def test_a_card_with_no_timestamp_sorts_last_rather_than_first():
+    """Unreadable is not "just now" and not "ancient"."""
+    dated = board.Card(key="a", kind="decision", title="t", href="#", since=NOW)
+    undated = board.Card(key="b", kind="decision", title="t", href="#")
+
+    cards = [undated, dated]
+    cards.sort(key=board._sort_key)
+
+    assert [c.key for c in cards] == ["a", "b"]
+
+
+def test_a_loop_card_does_not_print_its_project_twice():
+    """The loop card's title *is* the project name."""
+    card = board.Card(
+        key="loop:p", kind="loop", title="p", href="/dashboard",
+        project="p", detail="停止疑い · 返答待ち 2",
+    )
+
+    assert card.subline == "停止疑い · 返答待ち 2"
+
+
+def test_a_decision_card_keeps_the_project_in_its_subline():
+    """There the title is the thread's, so the project is new information."""
+    card = board.Card(
+        key="decision:p:T-1", kind="decision", title="スレッドのタイトル",
+        href="#", project="p",
+    )
+
+    assert card.subline == "p"
