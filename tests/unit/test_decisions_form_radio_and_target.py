@@ -107,7 +107,7 @@ async def test_d35_choice_cards_are_radio_not_submit_buttons():
     """★ msg-139 実機欠陥修正: 選択肢カードは ``<button type="submit">`` では
     なく ``<input type="radio">`` である。押した瞬間に POST されない。"""
     adapter = _adapter_returning({
-        "thread": {"title": "T-d35"},
+        "thread": {"title": "T-d35", "status": "active"},
         "messages": [{"author": "Bohr", "content": "please decide",
                        "next_participant": "human"}],
         "mode": "full",
@@ -133,7 +133,7 @@ async def test_d35_i12_sentinel_radio_is_checked_by_default_on_fresh_render():
     so ``<form>`` will always send a non-empty ``content=`` at submit.
     """
     adapter = _adapter_returning({
-        "thread": {"title": "T-d35-checked"},
+        "thread": {"title": "T-d35-checked", "status": "active"},
         "messages": [{"author": "Bohr", "content": "please decide",
                        "next_participant": "human"}],
         "mode": "full",
@@ -175,7 +175,7 @@ async def test_d35_choice_option_radios_carry_option_value(
         recommendation=None, recommendation_reason=None, unknowns=None,
     )
     adapter = _adapter_returning({
-        "thread": {"title": "T-d35-fresh", "last_msg_id": "msg-1"},
+        "thread": {"title": "T-d35-fresh", "last_msg_id": "msg-1", "status": "active"},
         "messages": [{
             "author": "Bohr", "content": "please decide",
             "next_participant": "human",
@@ -261,7 +261,7 @@ async def test_d31_rerender_after_bad_target_checks_matching_option(
     }
     adapter = AsyncMock()
     adapter.get_thread = AsyncMock(return_value={
-        "thread": {"title": "T", "last_msg_id": "msg-9"},
+        "thread": {"title": "T", "last_msg_id": "msg-9", "status": "active"},
         "messages": [{
             "author": "Bohr", "content": "please decide",
             "next_participant": "human", "msg_id": "msg-9",
@@ -330,7 +330,7 @@ async def test_d31_rerender_when_option_disappeared_falls_back_to_sentinel(
     }
     adapter = AsyncMock()
     adapter.get_thread = AsyncMock(return_value={
-        "thread": {"title": "T", "last_msg_id": "msg-99"},
+        "thread": {"title": "T", "last_msg_id": "msg-99", "status": "active"},
         "messages": [{
             "author": "Bohr", "content": "please decide",
             "next_participant": "human", "msg_id": "msg-99",
@@ -386,7 +386,7 @@ async def test_d36_pr_gate_relay_is_absent_from_the_select():
     """
     # Simulate a thread whose distinct authors include the orchestrator.
     payload = {
-        "thread": {"title": "T-d36"},
+        "thread": {"title": "T-d36", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "propose", "next_participant": "human"},
             {"author": "pr-gate-relay", "content": "review posted",
@@ -456,7 +456,7 @@ async def test_d36_uses_shared_lookup_identity_not_a_new_registry(monkeypatch):
     monkeypatch.setattr(decision_page, "_resolve_identity", _real_resolve)
 
     payload = {
-        "thread": {"title": "T-i19"},
+        "thread": {"title": "T-i19", "status": "active"},
         "messages": [{"author": "Bohr", "content": "propose",
                        "next_participant": "human"}],
         "mode": "full",
@@ -510,7 +510,7 @@ async def test_d37_default_is_no_target_when_parked_author_is_pr_gate_relay():
     the select with "宛先を送らない" selected (not ``human``, not
     ``pr-gate-relay``). Direct fixture for the msg-131 case."""
     payload = {
-        "thread": {"title": "T-d37"},
+        "thread": {"title": "T-d37", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "propose", "next_participant": "human"},
             {"author": "pr-gate-relay", "content": "review posted",
@@ -656,7 +656,7 @@ async def test_d37_line_appears_when_parked_author_is_unregistered():
     message trips this test — the reason line is the whole point of D-37.
     """
     payload = {
-        "thread": {"title": "T-d37-line"},
+        "thread": {"title": "T-d37-line", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "propose", "next_participant": "human"},
             {"author": "pr-gate-relay", "content": "review posted",
@@ -697,7 +697,7 @@ async def test_d37_line_stays_silent_when_parked_author_is_registered():
     registered. A false-positive here would make the page shout at users
     for a normal handoff — much worse than staying silent."""
     payload = {
-        "thread": {"title": "T-d37-silent"},
+        "thread": {"title": "T-d37-silent", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "propose", "next_participant": "human"},
         ],
@@ -729,7 +729,7 @@ async def test_d37_line_stays_silent_when_prismind_is_unavailable():
     NO_TARGET for reasons that look adjacent.
     """
     payload = {
-        "thread": {"title": "T-d37-vs-d38"},
+        "thread": {"title": "T-d37-vs-d38", "status": "active"},
         "messages": [
             {"author": "pr-gate-relay", "content": "x", "next_participant": "human"},
         ],
@@ -762,7 +762,7 @@ async def test_d38_unknown_verdicts_drop_candidate_and_flag_verify_unavailable()
     """UNKNOWN (Prismind outage / timeout) → candidate is dropped and
     the template renders the "verification unavailable" notice."""
     payload = {
-        "thread": {"title": "T-d38"},
+        "thread": {"title": "T-d38", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "propose", "next_participant": "human"},
             {"author": "Heisenberg", "content": "reply",
@@ -798,7 +798,7 @@ async def test_d38_all_unknown_reduces_select_to_no_target_only():
     ∴ dropped. The select has only the "宛先を送らない" option, and the
     notice fires."""
     payload = {
-        "thread": {"title": "T-d38-all"},
+        "thread": {"title": "T-d38-all", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "propose", "next_participant": "human"},
         ],
@@ -875,7 +875,7 @@ async def test_i20_no_target_and_no_body_next_line_is_rejected():
         return_value={"msg": {"msg_id": "unused", "type": "decide"}}
     )
     adapter.get_thread = AsyncMock(return_value={
-        "thread": {"title": "T"},
+        "thread": {"title": "T", "status": "active"},
         "messages": [{"author": "Bohr", "content": "please decide",
                        "next_participant": "human"}],
         "mode": "full",
