@@ -413,13 +413,15 @@ def test_classify_head_not_in_window_beats_apparent_answered():
 # ---------------------------------------------------------------------------
 
 
-def test_msg_timestamp_prefers_created_at():
-    assert decision_page._msg_timestamp(
-        {"created_at": "2026-08-23T00:00:00Z", "timestamp": "later"}
-    ) == "2026-08-23T00:00:00Z"
+# G-2 (T-not-waiting-conclair-contract-assumptions §4): 旧 fallback 連鎖
+# ``("created_at", "timestamp")`` は message dict に無い ``created_at`` を先に
+# 引く形になっていた。実測 (schemas/message.py:24) で message 側の時刻 field
+# は ``timestamp`` の 1 本 ∴ 中間の推測段を落とす。詳細な pin は下の
+# ``test_msg_timestamp_*`` 群 (G-2 section) を見よ。
 
 
-def test_msg_timestamp_falls_back_to_timestamp():
+def test_msg_timestamp_returns_str_timestamp_when_present():
+    """timestamp が非空 str なら返す。"""
     assert decision_page._msg_timestamp(
         {"timestamp": "2026-08-23T00:00:00Z"}
     ) == "2026-08-23T00:00:00Z"
@@ -431,8 +433,6 @@ def test_msg_timestamp_returns_none_when_no_known_field():
     assert decision_page._msg_timestamp(
         {"msg_id": "msg-1", "author": "human", "type": "decide"}
     ) is None
-    # 空文字は「未取得」と等価
-    assert decision_page._msg_timestamp({"created_at": ""}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -440,26 +440,49 @@ def test_msg_timestamp_returns_none_when_no_known_field():
 # ---------------------------------------------------------------------------
 
 
-def test_thread_is_closed_true_for_resolved():
-    assert decision_page._thread_is_closed({"status": "resolved"}) is True
+def test_thread_write_state_closed_for_resolved():
+    assert decision_page._thread_write_state({"status": "resolved"}) == "closed"
 
 
-def test_thread_is_closed_true_for_superseded():
-    assert decision_page._thread_is_closed({"status": "superseded"}) is True
+def test_thread_write_state_closed_for_superseded():
+    assert decision_page._thread_write_state({"status": "superseded"}) == "closed"
 
 
-def test_thread_is_closed_false_for_active():
-    assert decision_page._thread_is_closed({"status": "active"}) is False
+def test_thread_write_state_open_for_active():
+    assert decision_page._thread_write_state({"status": "active"}) == "open"
 
 
-def test_thread_is_closed_false_for_awaiting_reply():
-    assert decision_page._thread_is_closed({"status": "awaiting_reply"}) is False
+def test_thread_write_state_open_for_awaiting_reply():
+    assert (
+        decision_page._thread_write_state({"status": "awaiting_reply"}) == "open"
+    )
 
 
-def test_thread_is_closed_false_when_status_missing():
-    """Unknown status = "active" と等価に扱う (Einstein 安全側の default:
-    フォームを描画する)。「クローズされたと言えない」= 描画するのが正しい。"""
-    assert decision_page._thread_is_closed({}) is False
+def test_thread_write_state_open_for_parked():
+    """G-1 政策 P (Bohr §2): 駐機は「条件が満たされたら再起動する」ためにあり、
+    書き込みが正常運転 ∴ open に残す (Conclair 自身の UI とも整合)。"""
+    assert decision_page._thread_write_state({"status": "parked"}) == "open"
+
+
+def test_thread_write_state_unknown_when_status_missing():
+    """G-1 政策 P: 状態不明を「クローズされた」と断定しない (§1 N-2 の完全性)。
+    active と推測もしない (未知 status で嘘の導線を出すのが旧 denylist の穴)。"""
+    assert decision_page._thread_write_state({}) == "unknown"
+
+
+def test_thread_write_state_unknown_for_novel_status_string():
+    """G-1 政策 P / §3: Conclair が enum を増やしたとき magickit は open と
+    推測せず unknown に落ちる。この 1 本が「検証不能→検証可能」置換の pin。"""
+    assert (
+        decision_page._thread_write_state({"status": "some-new-status"})
+        == "unknown"
+    )
+
+
+def test_thread_write_state_unknown_for_non_str_status():
+    """G-1 政策 P: 型違反 (Conclair contract 違反) も unknown に集約。"""
+    assert decision_page._thread_write_state({"status": None}) == "unknown"
+    assert decision_page._thread_write_state({"status": 42}) == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -752,14 +775,21 @@ async def test_form_is_present_in_all_three_states(isolated_material_store):
 
 
 # ---------------------------------------------------------------------------
-# Einstein Objection: closed thread must not render the form
+# G-1 (T-not-waiting-conclair-contract-assumptions): thread status 3 値判定
+# — Einstein Objection の原意を保存しつつ denylist → allowlist に反転。
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_form_is_not_rendered_when_thread_is_closed(isolated_material_store):
-    """★ Einstein Objection: closed スレッドではフォームを描画しない
-    (Conclair が ChatroomStateError で拒否 ∴ 嘘の導線になる)。"""
+    """★ Einstein Objection: closed スレッドではフォームを描画しない。
+
+    G-1 (Bohr §1(b)(d) 一次照合): Conclair 側は closed への post を実際には
+    弾いていない (services/status_transition.py:45-54 の carve-out は
+    ``closes_thread == thread.thread_id`` のみ) ∴ form が黙って通り、
+    resolved スレッドに追加 decide が書き込まれて archive を汚す経路が
+    あった。ここが真の壊れ方で、政策 P (form を出さない) の根拠。
+    """
     payload = _thread_payload(
         [
             _msg("msg-100", author="Bohr", next_participant="Einstein"),
@@ -794,6 +824,191 @@ async def test_form_still_rendered_for_active_thread(isolated_material_store):
 
     assert r.status_code == 200
     assert 'name="_decision_form" value="1"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_form_rendered_for_parked_thread(isolated_material_store):
+    """★ G-1 政策 P (Bohr §2, Einstein 支持): parked は open — 駐機は「条件が
+    満たされたら再起動する」ためにあり、書き込みが正常運転。"""
+    payload = _thread_payload(
+        [
+            _msg("msg-100", author="Bohr", next_participant="Einstein"),
+        ],
+        status="parked",
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert 'name="_decision_form" value="1"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_form_not_rendered_for_unknown_status(isolated_material_store):
+    """★ G-1 政策 P / §3: Conclair が enum を増やして未知 status が来ても、
+    magickit は open と推測せず form を描かない。
+
+    ただし「クローズされた」とも書かない — magickit が持っていない断定に
+    落とさない (§1 N-2)。代わりに「解釈できない」文言と chatroom 導線を出す。
+    """
+    payload = _thread_payload(
+        [
+            _msg("msg-100", author="Bohr", next_participant="Einstein"),
+        ],
+        status="some-new-status-conclair-added",
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # フォームが描画されないこと。
+    assert 'name="_decision_form"' not in r.text
+    # 「クローズされた」とは書かない (§1 N-2 の完全性)。
+    assert "クローズされています" not in r.text
+    # 代わりに「解釈できない」+ 未知 status 値を晒す。
+    assert "解釈できません" in r.text
+    assert "some-new-status-conclair-added" in r.text
+
+
+@pytest.mark.asyncio
+async def test_form_not_rendered_when_status_missing(isolated_material_store):
+    """★ G-1 政策 P: status field が無いときも unknown 扱い (旧 default の
+    「active 相当」= 描画するを反転) — 未知を open と推測しない。"""
+    # _thread_payload の status default は "active" なので、直接組み立て。
+    payload = {
+        "thread": {
+            "title": "T thread",
+            "last_msg_id": "msg-100",
+            # status field なし
+        },
+        "messages": [
+            _msg("msg-100", author="Bohr", next_participant="Einstein"),
+        ],
+        "mode": "full",
+    }
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert 'name="_decision_form"' not in r.text
+    assert "解釈できません" in r.text
+
+
+# ---------------------------------------------------------------------------
+# G-1 / R4 (Einstein BLOCKING): judgement 分岐でも form を出さないこと。
+# not_waiting だけを塞いでも resolved スレッドを judgement 経路で開いて
+# type=decide を送れる穴 (Bohr §1 (b)(d)) が残る ∴ 弱い方の経路が結論を
+# 決めてしまう。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_judgement_form_not_rendered_when_thread_is_closed(
+    isolated_material_store,
+):
+    """★ R4: resolved スレッドを judgement 分岐 (last msg が parked_to_human)
+    で開いても form を描画しない。"""
+    payload = _thread_payload(
+        [
+            # last msg が human 宛の駐機 → judgement 分岐に落ちる
+            _msg("msg-100", author="Bohr", next_participant="human"),
+        ],
+        status="resolved",
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # judgement mode で描かれる form の hidden field も描画されないこと。
+    assert 'name="_decision_form"' not in r.text
+    assert "クローズされています" in r.text
+
+
+@pytest.mark.asyncio
+async def test_judgement_form_not_rendered_when_thread_status_unknown(
+    isolated_material_store,
+):
+    """★ R4 + §3: judgement 分岐でも未知 status では form を描かず、
+    「クローズ」とも書かない (「解釈できない」文言を出す)。"""
+    payload = _thread_payload(
+        [
+            _msg("msg-100", author="Bohr", next_participant="human"),
+        ],
+        status="some-brand-new-conclair-status",
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert 'name="_decision_form"' not in r.text
+    assert "クローズされています" not in r.text
+    assert "解釈できません" in r.text
+    assert "some-brand-new-conclair-status" in r.text
+
+
+@pytest.mark.asyncio
+async def test_judgement_form_still_rendered_for_active(isolated_material_store):
+    """★ R4 裏: active スレッドの判断分岐は従来どおり form を描く。"""
+    payload = _thread_payload(
+        [
+            _msg("msg-100", author="Bohr", next_participant="human"),
+        ],
+        status="active",
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert 'name="_decision_form" value="1"' in r.text
+
+
+# ---------------------------------------------------------------------------
+# G-2 (T-not-waiting-conclair-contract-assumptions §4): msg の時刻 field は
+# ``timestamp`` の 1 本 (Conclair schemas/message.py 実測)。旧 fallback 連鎖
+# ``("created_at", "timestamp")`` は Thread 側の field を先に引く形になって
+# いた。``created_at`` を message 側に置いても読まない、が本 test の主張。
+# ---------------------------------------------------------------------------
+
+
+def test_msg_timestamp_uses_timestamp_field():
+    """G-2: timestamp が権威 field。"""
+    assert (
+        decision_page._msg_timestamp({"timestamp": "2026-09-03T00:00:00Z"})
+        == "2026-09-03T00:00:00Z"
+    )
+
+
+def test_msg_timestamp_ignores_created_at_on_message_dict():
+    """★ G-2: message dict に ``created_at`` があっても読まない。
+    実測 (Bohr §4): ``created_at`` は Thread metadata の field で message
+    には存在しない (``schemas/message.py:24`` = timestamp のみ)。旧実装は
+    Thread 側の key を message から引こうとしていた ∴ 削る。"""
+    assert (
+        decision_page._msg_timestamp({"created_at": "2026-09-03T00:00:00Z"})
+        is None
+    )
+
+
+def test_msg_timestamp_returns_none_when_no_field():
+    """G-2 / §5 N-6: 見つからないときは None を返し、UI 側で欄ごと省く。"""
+    assert decision_page._msg_timestamp({}) is None
+
+
+def test_msg_timestamp_returns_none_for_non_str_value():
+    """G-2: 契約違反 (Conclair が str 以外を返した) は最終安全弁で None。"""
+    assert decision_page._msg_timestamp({"timestamp": 12345}) is None
+    assert decision_page._msg_timestamp({"timestamp": None}) is None
+
+
+def test_msg_timestamp_returns_none_for_empty_str():
+    """G-2: 空文字も None 扱い (「時刻欄ごと省く」を発火させる)。"""
+    assert decision_page._msg_timestamp({"timestamp": ""}) is None
 
 
 # ---------------------------------------------------------------------------
