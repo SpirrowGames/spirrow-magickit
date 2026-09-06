@@ -422,7 +422,7 @@ async def _lookup_one_with_budget(
             "identity lookup raised", name=name, error=str(e)
         )
         return _LookupVerdict.UNKNOWN
-    if lookup.unavailable_reason is not None:
+    if lookup.is_unavailable:
         return _LookupVerdict.UNKNOWN
     return _LookupVerdict.REGISTERED if lookup.found else _LookupVerdict.UNREGISTERED
 
