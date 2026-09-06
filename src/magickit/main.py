@@ -402,21 +402,12 @@ def create_app() -> FastAPI:
     # fails loudly if that ever changes.
     @app.get("/dashboard/_stats")
     async def dashboard_stats_html(request: Request) -> HTMLResponse:
-        """Return stats cards HTML for HTMX.
-
-        Only the four task counters remain. `Workspaces` and `Projects`
-        were dropped: they counted rows in Magickit's own SQLite (the
-        `workspaces` / `projects` tables written by `POST /v1/*`), and on
-        this page they sat directly above the Chatroom summary, which
-        lists the loop's real projects out of Conclair. Two counters
-        labelled "Projects" -- one showing 1, one showing 8 named
-        entries -- was the confusion that motivated T-dashboard-panels-
-        do-not-name-the-project. Labelling the difference would only
-        confess the discrepancy; removing the misleading counter is what
-        stops it. The four task counters are honest under their own
-        provenance -- they mirror the Task Queue panel below -- and are
-        kept.
-        """
+        """Return stats cards HTML for HTMX."""
+        # Only the four task counters remain here. `Workspaces` and
+        # `Projects` were dropped because they collided in meaning with
+        # the Chatroom summary below them; see PR #45 and thread
+        # T-dashboard-panels-do-not-name-the-project for the Tier-C
+        # decision and its evidence.
         state_manager = request.app.state.state_manager
         stats = await state_manager.get_dashboard_stats()
 
