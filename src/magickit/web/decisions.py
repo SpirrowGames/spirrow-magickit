@@ -285,9 +285,10 @@ def _candidate_authors(
     The registry filter answers the same question with the actual
     authority (I-19 / D-36) — keeping a spelled-out denylist here would
     reintroduce the "two implementations of the same rule" trap that
-    msg-140 §4 named. When the filter is bypassed (the sync-legacy call
-    site — see the wrapper below), those tokens fall through to the
-    consumer and the POST-time gate rejects them just as it does today.
+    msg-140 §4 named. Every render path now goes through
+    ``_participant_choices_registered`` (the D-31 error rerender was
+    unified onto ``_render_decision_page`` — msg-186 R-9 / msg-252 §1),
+    so the filter is no longer bypassable.
     """
     seen: dict[str, None] = {}
     if parked_author:
@@ -306,21 +307,6 @@ def _candidate_authors(
         if h not in seen:
             seen[h] = None
     return list(seen.keys())
-
-
-def _participant_choices(
-    messages: list[dict[str, Any]], parked_author: str
-) -> list[str]:
-    """Backwards-compatible sync wrapper around ``_candidate_authors``.
-
-    ``_render_decision_error_page`` used to call this synchronously, and
-    the fallback path (Conclair failed → we build the form with a
-    single-entry select) still needs a synchronous list. In the normal
-    path the async ``_participant_choices_registered`` is used instead
-    (I-19). Keeping the same name so tests / callers that only ever exit
-    through the fallback path do not shift.
-    """
-    return _candidate_authors(messages, parked_author)
 
 
 #: I-20 sentinel value for the "宛先を送らない" select option (msg-146 §3).
@@ -1589,7 +1575,6 @@ __all__ = [
     "_render_decision_error_page",
     "_render_decision_page",
     "_thread_page_url",
-    "_participant_choices",
     "_head_msg_id_from_thread",
     "_classify_judgement_state",
     "_choice_options_from_material",
