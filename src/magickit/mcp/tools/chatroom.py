@@ -83,6 +83,83 @@ MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
 # is deliberately not in this change's scope.
 CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 
+
+# --- close detection (T-close-detection-truthiness-seam) --------------
+#
+# "Does this ``chatroom_post_message`` call resolve its thread?" is a
+# yes/no question whose answer decides which role gate fires
+# (``_check_close_permitted`` vs ``_check_role_allowed``) and whether the
+# close policies run (``_enforce_close_policies``). The answer had been
+# expressed inline as ``msg_type == "decide" and bool(closes_thread)`` at
+# two ingress sites (MCP tool and the browser POST handler). Two copies
+# of the same predicate is dual management (Principle 2) — the two can
+# drift, and a drift here is the "gate exists but the caller-path never
+# reaches it" class of defect the close gate exists to prevent.
+#
+# Einstein's advisory (msg-244): don't paper over the seam by measuring
+# and mimicking Conclair's own string-parsing rules on the far side of
+# the wire — remove the ambiguity at Magickit's ingress instead. So this
+# is what these two helpers do, and they are the only place close
+# detection lives on the Magickit side:
+#
+#   ``_normalize_closes_thread`` collapses the raw ingress string
+#   (which the MCP schema and the FastAPI form both spell as ``str = ""``)
+#   into the canonical ``str | None`` — ``None`` when the field is empty,
+#   the string itself otherwise. Everything downstream reasons in
+#   ``is None`` / ``is not None`` terms, not ``bool()`` terms.
+#
+#   ``_is_close_post`` is the single-source-of-truth predicate. Both
+#   ingress paths call this exact function after normalizing. There is no
+#   second copy anywhere; ``test_close_detection_ssot.py`` pins that.
+#
+# Conclair-side baseline (spirrow-conclair @ current main, recorded here
+# so a future reader can see the "what we chose not to mimic"):
+#   - ``services.integrity.assert_closes_thread_rule``: ``closes_thread is
+#     None`` short-circuits as "not a close"; anything else (including
+#     the empty string ``""``) is treated as a close attempt and then
+#     checked against ``thread_id``.
+#   - ``services.status_transition.compute_transition``:
+#     ``new_msg.type == "decide" and new_msg.closes_thread ==
+#     thread.thread_id`` — only an exact thread_id match actually
+#     resolves the thread.
+#   - ``schemas.message.PostMessageRequest``: ``closes_thread: str | None
+#     = None`` with ``str_strip_whitespace=True``.
+# Because Magickit normalizes at ingress and the adapter forwards the
+# normalized value verbatim, Conclair only ever sees ``None`` or a
+# non-empty string — never ``""`` — so the empty-string edge case Conclair
+# tolerates cannot arise on this wire in the first place. That is what
+# lets these helpers stop where they stop: they don't need to know what
+# Conclair does with ``""`` because Magickit never sends it.
+
+
+def _normalize_closes_thread(value: str | None) -> str | None:
+    """Collapse the ingress ``closes_thread`` string into ``str | None``.
+
+    The MCP tool and the FastAPI form both declare ``closes_thread`` as
+    ``str = ""`` (a required string with an empty default), so ``value``
+    here is either ``None`` (from a Python caller that omits the kwarg
+    entirely) or a ``str``. Empty ``str`` and ``None`` collapse to
+    ``None`` — the canonical "not a close" marker. Any non-empty string
+    is returned verbatim; the string's *meaning* (matches ``thread_id``?
+    matches some other thread? garbage?) is Conclair's to judge and is
+    not our concern at this seam.
+    """
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _is_close_post(msg_type: str, closes_thread: str | None) -> bool:
+    """The single-source-of-truth "is this a close?" predicate.
+
+    ``closes_thread`` MUST already be normalized (``_normalize_closes_thread``).
+    A close is exactly a ``decide`` msg carrying a non-None normalized
+    ``closes_thread``. Both ingress paths call this and no other; a copy
+    elsewhere is the dual-management fault this helper exists to prevent.
+    """
+    return msg_type == "decide" and closes_thread is not None
+
+
 # --- design-decide naysayer gate ---------------------------------------
 #
 # Binding design threads (those carrying the configured gate tag) may only
@@ -1386,7 +1463,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         # would leave `closes_thread` as the documented way around the second
         # stage -- the same reasoning that already routes this path through
         # `_enforce_close_policies` below.
-        closes = msg_type == "decide" and bool(closes_thread)
+        #
+        # Normalize the raw ingress ``closes_thread`` string once, at the
+        # top of the handler, then reason in ``is None`` / ``is not None``
+        # terms below. This kills the ``bool(str)`` truthiness seam
+        # (T-close-detection-truthiness-seam / Einstein msg-244): every
+        # ``closes_thread`` reference downstream — the gate switch, the
+        # ``_enforce_close_policies`` call, the adapter kwarg — sees the
+        # same canonical value.
+        closes_thread_norm = _normalize_closes_thread(closes_thread)
+        closes = _is_close_post(msg_type, closes_thread_norm)
         gate = await (
             _check_close_permitted(author=author, role=role)
             if closes
@@ -1409,7 +1495,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             # so it can't be a bypass.
             owner_override = False
             owner_override_reason_out: str | None = None
-            if msg_type == "decide" and closes_thread:
+            if closes:
                 policy = await _enforce_close_policies(
                     adapter,
                     project=project,
@@ -1434,7 +1520,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 reply_to=reply_to or None,
                 references_threads=references_threads,
                 related_tasks=related_tasks,
-                closes_thread=closes_thread or None,
+                closes_thread=closes_thread_norm,
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
