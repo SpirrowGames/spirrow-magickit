@@ -94,6 +94,7 @@ S5'' — 判断材料の 3 状態 (spec ``S5-decision-materials.md`` §3)
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 import time
 from typing import Annotated, Any
@@ -116,12 +117,45 @@ router = APIRouter(tags=["decisions"])
 #: temp file の store を注入できる (module-level defaults を触らずに済む形)。
 #: 通常運用では ``get_settings().db_path`` を読み、``StateManager`` と同じ
 #: SQLite file を共有する。
+#:
+#: **process-lifetime cache** (``lru_cache(maxsize=1)``, T-material-store-
+#: per-request-sync-io / msg-255 §4). 判断ページの endpoint は各 request で
+#: この関数を呼ぶ ∴ 未 cache 時代は「1 request ごとに ``get_settings()`` が
+#: ``config/magickit_config.yaml`` を stat / 場合により read+parse し、続いて
+#: ``DecisionMaterialStore.__init__`` が同期 ``mkdir`` を event loop 上で走
+#: らせる」形になっていた。gate (T-pr-review-spirrow-magickit-32 msg-130 =
+#: PR #32 の非ブロッキング advisory、msg-255 で回収) 指摘。
+#:
+#: **なぜ ``mkdir`` を残すか** (msg-255 §4 の凍らずに残った制約): ``mkdir``
+#: を消して ``StateManager.initialize()`` が startup で作る dir に依存させると
+#: 「動く理由が起動順にしか無く、壊れたときに原因が画面に出ない」形になる。
+#: singleton 化で ``mkdir`` は process 1 回に落ちる ∴ 頻度問題は解け、起動順
+#: への暗黙依存は作らない (msg-255 §4 の推奨形と一致)。
+#:
+#: **なぜ引数を追加しないか** (naysayer Einstein 指示、T-material-store-per-
+#: request-sync-io の naysayer message): FastAPI の ``Depends`` 経由で呼ぶ
+#: 場合、引数追加は query parameter injection として拾われ 422 を招く。また
+#: 「settings を cache key にする」も呼び出し側が事前に ``get_settings()`` を
+#: 走らせねばならず、per-request YAML read という元の問題を呼び出し元に転嫁
+#: するだけ。∴ signature は **無引数のまま**。テスト側の isolation は既存の
+#: ``tests/unit/conftest.py`` の ``monkeypatch.setattr`` が関数まるごと差し
+#: 替える形 ∴ cache は素通しで済む。
+@functools.lru_cache(maxsize=1)
 def _get_material_store() -> DecisionMaterialStore:
-    """Return a fresh ``DecisionMaterialStore`` bound to the configured db.
+    """Return the process-singleton ``DecisionMaterialStore`` bound to the
+    configured db.
 
-    Called per-request; the store itself is stateless in Python and opens
-    a new aiosqlite connection per call. Tests patch this function to inject
-    a temp-file store (see ``tests/unit/test_decision_materials_*.py``).
+    Cached with ``functools.lru_cache(maxsize=1)`` so the underlying
+    ``get_settings()`` YAML lookup and ``DecisionMaterialStore.__init__``
+    ``mkdir`` are performed once per process rather than once per HTTP
+    request. The store itself opens a new aiosqlite connection per call
+    (see ``DecisionMaterialStore``), so sharing one Python instance is safe.
+
+    Tests patch this function whole (``monkeypatch.setattr(decisions_module,
+    "_get_material_store", lambda: store)`` in ``tests/unit/conftest.py``)
+    ∴ the cache on the original is inert while patched. ``conftest`` also
+    calls ``_get_material_store.cache_clear()`` defensively at teardown for
+    any code path that reaches the real function.
     """
     settings = get_settings()
     return DecisionMaterialStore(db_path=settings.db_path)
