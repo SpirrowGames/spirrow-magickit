@@ -446,7 +446,15 @@ async def post_message(
     # `RoleValidationUnavailableError`, whose documented remedy ("retry
     # without role") stage 2 is guaranteed to refuse. The close path owes the
     # caller the stage-2 envelope instead (msg-041 Q3).
-    closes = type == "decide" and bool(closes_thread)
+    #
+    # ``_normalize_closes_thread`` + ``_is_close_post`` are the single-source-
+    # of-truth close-detection helpers on the Magickit side
+    # (T-close-detection-truthiness-seam / Einstein msg-244). The browser
+    # form and the MCP tool both normalize at ingress and call the same
+    # predicate; there is exactly one definition of "is this a close?" on
+    # this repo, and the same normalized value flows to the adapter below.
+    closes_thread_norm = chatroom_tools._normalize_closes_thread(closes_thread)
+    closes = chatroom_tools._is_close_post(type, closes_thread_norm)
     gate = await (
         chatroom_tools._check_close_permitted(author=author, role=role)
         if closes
@@ -526,7 +534,7 @@ async def post_message(
             reply_to=reply_to or None,
             references_threads=_parse_csv(references_threads),
             related_tasks=_parse_csv(related_tasks),
-            closes_thread=closes_thread or None,
+            closes_thread=closes_thread_norm,
             tags=_parse_csv(tags),
             commit_ref=commit_ref or None,
             embodiment=embodiment or None,
