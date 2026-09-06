@@ -75,7 +75,22 @@ def isolated_material_store(monkeypatch) -> Callable[[], DecisionMaterialStore]:
     success/failure) via a finalizer. We use a plain ``NamedTemporaryFile``
     rather than pytest's ``tmp_path`` so the fixture stays usable in
     non-async tests that don't take ``tmp_path`` directly.
+
+    **cache_clear safety net** (T-material-store-per-request-sync-io): the
+    production ``_get_material_store`` is now ``functools.lru_cache``-
+    wrapped so `get_settings()` / `mkdir` run once per process. Every test
+    replaces the function whole via ``monkeypatch.setattr`` below ∴ the
+    cache on the original is inert during patched calls, but we still
+    clear it around each test as defence in depth (any test that reaches
+    the real function must not observe a store cached from an earlier
+    test whose settings differed).
     """
+    # Defence in depth: reset the singleton cache before patching. Guard
+    # with ``hasattr`` so this fixture keeps working if the production
+    # cache decorator is ever removed / replaced.
+    if hasattr(decisions_module._get_material_store, "cache_clear"):
+        decisions_module._get_material_store.cache_clear()
+
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     store = DecisionMaterialStore(db_path=db_path)
@@ -97,3 +112,10 @@ def isolated_material_store(monkeypatch) -> Callable[[], DecisionMaterialStore]:
             # still holds (each test got its own file) ∴ leave it for the
             # OS temp reaper rather than failing the run.
             pass
+
+    # Clear again after teardown: monkeypatch restores the original
+    # function object, and any state it accreted during this test's
+    # non-patched code paths (rare, but possible for tests that spawn
+    # subprocesses or bypass the module attribute) must not leak.
+    if hasattr(decisions_module._get_material_store, "cache_clear"):
+        decisions_module._get_material_store.cache_clear()
