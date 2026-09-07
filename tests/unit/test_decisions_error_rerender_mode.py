@@ -94,7 +94,7 @@ def _unknown_target_envelope() -> dict[str, Any]:
 def _parked_thread_payload() -> dict[str, Any]:
     """Thread state: parked to human — the POST-time origin for all tests."""
     return {
-        "thread": {"title": "T-parked", "last_msg_id": "msg-9", "status": "active"},
+        "thread": {"title": "T-parked", "last_msg_id": "msg-9", "status": "parked"},
         "messages": [{
             "author": "Bohr",
             "content": "please decide",
