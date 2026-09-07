@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -19,12 +21,111 @@ import pytest
 
 from magickit.config import Settings
 from magickit.main import create_app
-from magickit.web import ops
+from magickit.web import deps, ops
 from magickit.web.deps import humanize_age, parse_ts
 from tests.route_table import route_table
 
 NOW = datetime(2026, 8, 10, 16, 0, 0, tzinfo=timezone.utc)
 STALL = 30 * 60
+
+
+# ---------------------------------------------------------------------------
+# The recording clock.
+#
+# There are two clocks in this file if the production side reads the wall:
+# a ``NOW`` literal that the fixtures anchor to, and ``datetime.now(...)``
+# inside ``magickit.web.ops.collect`` (line 362, hit by every HTTP route
+# below) and ``magickit.web.deps.age_seconds`` (line 62, reached through the
+# ``|ago`` filter in ``partials/ops_table.html``). Fresh CI stayed green for
+# exactly as long as both clocks happened to agree; ``test_board.py`` was
+# the same fault in the same shape (see msg-343 §1). The fix is to move
+# ownership of both production reads to this file so a wall-clock shift
+# cannot change what an assertion sees.
+#
+# The clock is a recorder rather than an exception-thrower: we want to know
+# *whether* the seam was read, not to shatter tests that happen to swallow
+# exceptions. Every read is stamped with the caller's ``file:line`` -- so
+# the reach proof at the end of the module can verify both that the tests
+# listed as "reaches" actually reach it (guards against a decoy patch) and
+# that no unlisted test does (guards against a hidden time dependency, the
+# way 9 tests in ``test_board.py`` sat quietly on the same seam until the
+# 10th failed).
+#
+# ``monkeypatch.setattr`` on the module's ``datetime`` reference is used
+# rather than ``unittest.mock.patch`` on ``.now``: the latter injects
+# ``unittest/mock.py`` frames between the production call site and this
+# recorder, and skipping them here just to work around a needless indirection
+# is exactly the "列挙して潰す" shape msg-422 argues against.
+
+_CLOCK_READS: list[tuple[str, int]] = []
+
+
+class _RecordingClock(datetime):
+    """``datetime`` whose ``now()`` returns :data:`NOW` and records the caller.
+
+    Subclassing ``datetime`` keeps ``isinstance(x, datetime)`` checks in
+    production code true; the only override is ``now``. Every read appends
+    ``(caller file, caller line)`` to :data:`_CLOCK_READS`, which the fixture
+    below resets per test and the proof at the end of the module reads back.
+    """
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        frame = sys._getframe(1)
+        _CLOCK_READS.append((frame.f_code.co_filename, frame.f_lineno))
+        if tz is None:
+            return NOW.astimezone(timezone.utc).replace(tzinfo=None)
+        return NOW.astimezone(tz)
+
+
+#: Tests that must reach the production wall-clock seam at least once. A
+#: test not listed here must reach it zero times. Declared BEFORE the run
+#: (in source order that also puts it above the fixture that reads it) so
+#: a mismatch is a finding rather than a self-fulfilling classification --
+#: see msg-420 §3 for why "declare after the fact" would let a decoy patch
+#: silently satisfy the proof.
+_REACHES_PRODUCTION_SEAM: frozenset[str] = frozenset(
+    {
+        # `_get` -> GET /dashboard/_ops -> collect(get_settings()) with no
+        # `now=`, so `magickit.web.ops:362` reads. Some also render row
+        # timestamps, which reach `magickit.web.deps:62` through `|ago`.
+        "test_fragment_renders_the_state_and_the_elapsed_time",
+        "test_project_name_is_escaped",
+        "test_outage_notice_does_not_read_as_a_verdict",
+        "test_labels_match_headers",
+        "test_table_opts_into_stacking",
+        "test_the_digest_is_escaped_in_the_rendered_page",
+        # `_post_control` -> POST .../control -> collect(settings) after the
+        # write, same read.
+        "test_control_button_sets_desired_and_records_the_actor",
+        "test_an_empty_actor_still_writes",
+        "test_control_post_returns_the_whole_table",
+        "test_a_rejected_control_write_renders_inside_the_table",
+        "test_a_control_write_that_raises_still_answers_with_the_page",
+        # The sanity test drives the seam on purpose.
+        "test_the_recording_clock_reports_the_production_module_as_caller",
+    }
+)
+
+_RECORDED_READS: dict[str, list[tuple[str, int]]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _own_the_production_wall_clock(monkeypatch, request):
+    """Install :class:`_RecordingClock` on the two production modules whose
+    clock reads this file exercises.
+
+    Both are patched even when a given test would only reach one of them:
+    the reach proof below reads a single per-test bucket, and patching
+    both keeps the *unlisted* side honest -- a future edit that starts
+    hitting the deps seam from a currently quiet test will be flagged as
+    a declaration mismatch rather than absorbed silently.
+    """
+    monkeypatch.setattr(ops, "datetime", _RecordingClock)
+    monkeypatch.setattr(deps, "datetime", _RecordingClock)
+    _CLOCK_READS.clear()
+    yield
+    _RECORDED_READS[request.node.name] = list(_CLOCK_READS)
 
 
 def _row(**kw) -> ops.ProjectOps:
@@ -381,7 +482,13 @@ async def test_fragment_renders_the_state_and_the_elapsed_time():
             "configured": True,
             "observed_state": "run",
             "observed_actor": "mindwire-conductor",
-            "observed_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            # NOW rather than ``datetime.now(timezone.utc)``: with the
+            # production seam pinned to :data:`NOW` by the module fixture,
+            # a real-time offset here would race the pin -- ``idle_seconds``
+            # would be measured between two different clocks and this test
+            # would swing between "2時間" and "たった今" as the wall drifted
+            # against the literal.
+            "observed_at": (NOW - timedelta(hours=2)).isoformat(),
         },
     )
 
@@ -782,3 +889,102 @@ async def test_the_digest_is_escaped_in_the_rendered_page():
     assert response.status_code == 200
     assert "<script>alert(1)</script>" not in response.text
     assert "&lt;script&gt;" in response.text
+
+
+# ---------------------------------------------------------------------------
+# The reach proof and its sanity check.
+#
+# These two tests exist to make the recording clock's guarantees checkable
+# rather than asserted. The sanity test proves the recorder catches a call
+# from ``magickit/web/ops.py`` when the production ``collect()`` is invoked
+# -- without it, a broken recorder could report anything and the proof
+# below would happily agree. The reach proof compares the observed reach
+# set against :data:`_REACHES_PRODUCTION_SEAM`; a mismatch in either
+# direction is a finding, as msg-420 §3 requires.
+#
+# They are named to sort last within the module because the proof reads
+# per-test buckets that the autouse fixture only fills as tests finish, so
+# it needs to run after every test it summarises.
+
+
+@pytest.mark.asyncio
+async def test_the_recording_clock_reports_the_production_module_as_caller():
+    """When the seam is called from ``ops.collect``, the recorder must
+    report ``magickit/web/ops.py`` as the caller -- not this test file, not
+    ``unittest/mock.py``. Without this bare-metal check, the reach proof
+    below can be satisfied by any decoy that happens to increment the
+    counter."""
+    _CLOCK_READS.clear()
+    with patch.object(
+        ops, "ChatroomAdapter", return_value=_adapter(httpx.ConnectError("sanity"))
+    ):
+        await ops.collect(Settings())  # no `now=`; the seam is exercised.
+
+    assert _CLOCK_READS, "the recording clock captured no reads at all"
+
+    # Component-wise suffix on a POSIX-normalized, repo-root-relative path
+    # -- raw `==` would fail on CI's `/app/src/magickit/web/ops.py` vs local
+    # `C:\\...\\ops.py`, and a raw string `.endswith` would falsely match
+    # `.../vendor/other/web/ops.py`. See rev.6 §2.
+    caller_file, _line = _CLOCK_READS[0]
+    parts = Path(caller_file).resolve().parts
+    assert parts[-3:] == ("magickit", "web", "ops.py"), (
+        f"expected recorder caller under magickit/web/ops.py, got {parts[-3:]}"
+    )
+
+
+def test_the_reach_declaration_matches_observation():
+    """Every test's observed reach agrees with :data:`_REACHES_PRODUCTION_SEAM`.
+
+    Two mismatches are both findings, not just the first:
+
+    - A declared-reaches test that captured no reads means the patch is a
+      decoy: something else is providing the value, or the seam has moved
+      out from under this file.
+    - An undeclared-reaches test that captured a read means we found a
+      time dependency we did not know about -- the same shape as the 9
+      quiet-but-mined tests in ``test_board.py``.
+
+    Also asserts DoD (iv): the "reaches" side of the declaration is
+    non-empty. An edit that patches the seam but has no test that reads
+    it is a patch nobody uses.
+    """
+    observed_reaches: set[str] = {
+        name
+        for name, reads in _RECORDED_READS.items()
+        if reads and name != "test_the_reach_declaration_matches_observation"
+    }
+
+    # Under `pytest -k <subset>` that filters out the declared reachers,
+    # the observation is not the whole population and a mismatch here would
+    # be a false positive. Require the sanity test at minimum -- it is
+    # named in the declaration and is what proves the recorder itself
+    # works, so if it did not run, comparing observations to the whole
+    # declaration is meaningless.
+    if "test_the_recording_clock_reports_the_production_module_as_caller" not in {
+        name for name, reads in _RECORDED_READS.items() if reads
+    }:
+        pytest.skip(
+            "the recorder sanity test did not run in this session; the "
+            "reach proof needs the full file to be meaningful."
+        )
+
+    declared: set[str] = set(_REACHES_PRODUCTION_SEAM)
+    missed = declared - observed_reaches
+    unexpected = observed_reaches - declared
+
+    detail_missed = sorted(missed)
+    detail_unexpected = sorted(unexpected)
+    assert not missed and not unexpected, (
+        f"reach declaration disagrees with observation.\n"
+        f"declared but not observed (decoy patch or moved seam): "
+        f"{detail_missed}\n"
+        f"observed but not declared (unknown time dependency): "
+        f"{detail_unexpected}"
+    )
+    # DoD (iv): editing a file for the recorder means at least one test
+    # must actually reach the patched seam.
+    assert observed_reaches, (
+        "no test observed a production wall-clock read; the patch is a "
+        "no-op and the file's `NOW` literal did not need the recorder."
+    )
