@@ -948,30 +948,45 @@ def test_the_reach_declaration_matches_observation():
     Also asserts DoD (iv): the "reaches" side of the declaration is
     non-empty. An edit that patches the seam but has no test that reads
     it is a patch nobody uses.
+
+    Scoped to tests that actually ran in this session/worker. A test that
+    was filtered out (``pytest -k``, an explicit subset) or dispatched to
+    a different ``pytest-xdist`` worker is neither a decoy nor a hidden
+    dependency -- it is simply absent, and pretending otherwise would
+    turn every subset invocation into a false failure. The full-population
+    guarantee comes from the gate's single-process invocation of the whole
+    file; each partial invocation still verifies its own slice.
     """
+    ran: set[str] = set(_RECORDED_READS)
     observed_reaches: set[str] = {
         name
         for name, reads in _RECORDED_READS.items()
         if reads and name != "test_the_reach_declaration_matches_observation"
     }
 
-    # Under `pytest -k <subset>` that filters out the declared reachers,
-    # the observation is not the whole population and a mismatch here would
-    # be a false positive. Require the sanity test at minimum -- it is
-    # named in the declaration and is what proves the recorder itself
-    # works, so if it did not run, comparing observations to the whole
-    # declaration is meaningless.
-    if "test_the_recording_clock_reports_the_production_module_as_caller" not in {
-        name for name, reads in _RECORDED_READS.items() if reads
-    }:
-        pytest.skip(
-            "the recorder sanity test did not run in this session; the "
-            "reach proof needs the full file to be meaningful."
-        )
+    # Static check: every declared name must exist as a callable test in
+    # this module. Otherwise a typo in the declaration would look like a
+    # test that was simply filtered out under subset execution and slip
+    # past silently. Cheap because it does not depend on which tests ran.
+    module_test_names = {
+        name
+        for name, obj in globals().items()
+        if name.startswith("test_") and callable(obj)
+    }
+    unknown_declarations = _REACHES_PRODUCTION_SEAM - module_test_names
+    assert not unknown_declarations, (
+        f"declared reach names are not test functions in this module "
+        f"(typo, moved test, or stale entry): "
+        f"{sorted(unknown_declarations)}"
+    )
 
-    declared: set[str] = set(_REACHES_PRODUCTION_SEAM)
-    missed = declared - observed_reaches
-    unexpected = observed_reaches - declared
+    # Only the declared tests that actually ran can be "missed". Tests
+    # that were never scheduled cannot be decoys.
+    declared_that_ran = _REACHES_PRODUCTION_SEAM & ran
+    missed = declared_that_ran - observed_reaches
+    # A read from a test that wasn't declared is always a finding, no
+    # matter which subset is running.
+    unexpected = observed_reaches - _REACHES_PRODUCTION_SEAM
 
     detail_missed = sorted(missed)
     detail_unexpected = sorted(unexpected)
@@ -983,8 +998,11 @@ def test_the_reach_declaration_matches_observation():
         f"{detail_unexpected}"
     )
     # DoD (iv): editing a file for the recorder means at least one test
-    # must actually reach the patched seam.
-    assert observed_reaches, (
-        "no test observed a production wall-clock read; the patch is a "
-        "no-op and the file's `NOW` literal did not need the recorder."
-    )
+    # must actually reach the patched seam -- but only meaningful when a
+    # declared reacher was scheduled to run in this slice. In a subset
+    # that excludes every declared reacher there is nothing to floor.
+    if declared_that_ran:
+        assert observed_reaches, (
+            "no test observed a production wall-clock read; the patch is a "
+            "no-op and the file's `NOW` literal did not need the recorder."
+        )
