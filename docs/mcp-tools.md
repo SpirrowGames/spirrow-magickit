@@ -20,6 +20,7 @@ Claudeセッション間でコンテキストを維持するためのツール�
 | `update_progress` | 進捗更新（phase/task/blockers）軽量版 |
 | `list_context_authors` | プロジェクトにコンテキストを保存済みの author 一覧 |
 | `upsert_identity` | クロスプロジェクト identity レコード (actor 宣言) の作成/更新 |
+| `get_identity` | 同レコードの read-only 取得 (診断用)。gate の畳み込みをしない |
 
 **セッション引き継ぎの仕組み:**
 - `handoff`で`summary`と`next_action`を保存
@@ -32,6 +33,21 @@ Claudeセッション間でコンテキストを維持するためのツール�
 - 用途: 複数ロール（例 `claude.ai` / `claude-code`）が同じプロジェクトで別々の引き継ぎを持つ
 - `list_context_authors` で保存済み author 一覧を取得し、**表記揺れによる重複を防止**・**自分の author のコンテキスト有無を確認** してから checkpoint/resume すること
 - `checkpoint`/`handoff` が抽出する knowledge には `author:{name}` タグが付与される
+
+**`get_identity`（read-only 診断）:**
+- gate（`chatroom._lookup_identity`）が実際に突き合わせる値を、**gate が運用される面から読むための道具**。read のみで、write 経路を一切持たない。
+- **gate と同じ畳み方をしない。** gate は読めない応答を 1 つの「判定不能」に潰すが、この tool は 4 状態を区別して返す:
+
+  | `status` | 意味 |
+  |---|---|
+  | `found` | レコードあり。`identity` は Prismind の応答**そのまま**（選別・補完なし）+ `present_keys` |
+  | `not_found` | `found` が存在して `false`（＝確定回答） |
+  | `lookup_failed` | 到達不能・例外・`success` が真でない |
+  | `contract_violation` | 200 だが契約違反（`found` 欠落 / 非 bool、`found=true` で `identity` 無し、`allowed_roles` が非 `list[str]`）。`raw` と `violations` を添える |
+
+- 値は **coerce しない**。`allowed_roles: "naysayer"` を文字分解せず、`allowed_roles=[]` を捏造しない（`[]` 自体は「allowed roles 無し」の正当な値 ∴ `found`）。
+- 全応答に `user_partition` を含める。「未登録」と「partition ずれ」は同じ `not_found` に見える ∴ **どの partition を読んだかを言わない限り `not_found` は解釈できない**。`user` 省略時は upstream の既定 user に委ねるため、`resolved` は**レコードが返ってきた場合にのみ**そこから埋める（推測しない）。
+- `embodiment` の**キー欠落と値 null を畳まない**（ADR-2026-05-29-12 の段階移行で「Prismind が列を落とした」と「保持して null にした」を区別する必要があるため）。
 
 ```python
 # 使用例

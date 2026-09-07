@@ -1076,6 +1076,167 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "message": result.get("message", ""),
         }
 
+    @mcp.tool()
+    async def get_identity(
+        identity_name: str,
+        user: str = "",
+    ) -> dict[str, Any]:
+        """Read one cross-project identity record. Read-only diagnostic.
+
+        Returns the record exactly as Prismind sent it, and does NOT apply the
+        gate's folding: a response the gate would reduce to "unusable" is
+        reported here as `contract_violation` with the raw payload, so the
+        tool can explain gate behaviour instead of reproducing its blind spot.
+
+        Args:
+            identity_name: Stable identity slug (e.g. "Heisenberg").
+            user: Owning user. Empty resolves the same way the gate and
+                `upsert_identity` do (upstream's configured user).
+
+        Returns:
+            `{status, identity_name, user_partition, ...}` where status is
+            `found` / `not_found` / `lookup_failed` / `contract_violation`.
+        """
+        if _settings is None:
+            raise RuntimeError("Settings not initialized")
+
+        # Every envelope carries the partition, because "not_found" is
+        # uninterpretable without knowing which partition was asked: an
+        # unregistered identity and a partition mismatch are the same answer
+        # otherwise. `resolved` is never invented -- when the caller defers to
+        # upstream's configured user, Magickit does not know that value, and
+        # the only honest place it can come from is the record itself.
+        def _envelope(
+            status: str, record: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
+            resolved: Any = user if user else None
+            source = "argument" if user else "upstream_default"
+            if not user and isinstance(record, dict) and "user" in record:
+                resolved = record["user"]
+                source = "record"
+            return {
+                "status": status,
+                "identity_name": identity_name,
+                "user_partition": {
+                    "requested": user,
+                    "resolved": resolved,
+                    "source": source,
+                },
+            }
+
+        if not identity_name:
+            return {
+                **_envelope("lookup_failed"),
+                "error": "identity_name is required",
+            }
+
+        prismind = PrismindAdapter(
+            sse_url=_settings.prismind_url,
+            timeout=_settings.prismind_timeout,
+        )
+
+        logger.info("Reading identity", identity_name=identity_name, user=user or "")
+
+        try:
+            result = await prismind.get_identity(identity_name=identity_name, user=user)
+        except Exception as e:
+            logger.warning(
+                "Identity read failed", identity_name=identity_name, error=str(e)
+            )
+            return {
+                **_envelope("lookup_failed"),
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+        if not isinstance(result, dict):
+            return {
+                **_envelope("lookup_failed"),
+                "error": "unexpected response from Prismind",
+                "raw": result,
+            }
+        if "error_type" in result:
+            return {
+                **_envelope("lookup_failed"),
+                "error": f"{result['error_type']}: {result.get('error', '')}",
+                "raw": result,
+            }
+        if result.get("success") is not True:
+            return {
+                **_envelope("lookup_failed"),
+                "error": result.get("message") or "lookup did not report success",
+                "raw": result,
+            }
+
+        violations: list[str] = []
+
+        # isinstance, not truthiness: JSON null / 0 / "" are all falsy and
+        # would each be read as a confirmed "not registered". That default is
+        # the reachable fail-open of msg-044 6.4, and a tool built to diagnose
+        # it must not repeat it.
+        found = result.get("found")
+        if not isinstance(found, bool):
+            violations.append(
+                "found: expected bool, got "
+                + ("<missing>" if "found" not in result else repr(found))
+            )
+            return {
+                **_envelope("contract_violation"),
+                "violations": violations,
+                "raw": result,
+            }
+
+        if not found:
+            return _envelope("not_found")
+
+        identity = result.get("identity")
+        if not isinstance(identity, dict):
+            # No manufactured allowed_roles=[]: a record that never arrived
+            # must not be reported as one that granted nothing.
+            violations.append(
+                "identity: expected dict on found=true, got "
+                + ("<missing>" if "identity" not in result else repr(identity))
+            )
+            return {
+                **_envelope("contract_violation"),
+                "violations": violations,
+                "raw": result,
+            }
+
+        # Reported, never coerced. tuple("naysayer") becomes ('n','a',...)
+        # and tuple(True) raises; both are how the value the gates compare
+        # against stops meaning what the record said. [] is a legal record
+        # value ("no allowed roles"), not a violation.
+        if "allowed_roles" in identity:
+            allowed_roles = identity["allowed_roles"]
+            if not isinstance(allowed_roles, list):
+                violations.append(
+                    f"identity.allowed_roles: expected list, got {allowed_roles!r}"
+                )
+            elif not all(isinstance(item, str) for item in allowed_roles):
+                violations.append(
+                    "identity.allowed_roles: expected list[str], got "
+                    f"{allowed_roles!r}"
+                )
+
+        if violations:
+            return {
+                **_envelope("contract_violation", identity),
+                "violations": violations,
+                "raw": result,
+            }
+
+        # `identity` is passed through unchanged, and `present_keys` states
+        # which keys were actually on it. The ADR-2026-05-29-12 (iii)
+        # migration turns on telling an absent `embodiment` key apart from a
+        # null one -- omitted means Prismind dropped the field, null means it
+        # kept it and cleared it -- so the distinction is reported explicitly
+        # and cannot be lost to a serializer that elides nulls.
+        return {
+            **_envelope("found", identity),
+            "identity": identity,
+            "present_keys": sorted(identity),
+        }
+
 
 def _parse_result(result: Any) -> dict[str, Any]:
     """Parse tool result to dict."""
