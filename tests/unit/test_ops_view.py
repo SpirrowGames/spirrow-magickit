@@ -69,21 +69,37 @@ _CLOCK_READS: list[tuple[str, int]] = []
 class _RecordingClock(datetime):
     """``datetime`` whose ``now()`` returns :data:`NOW` and records the caller.
 
-    Subclassing ``datetime`` keeps ``isinstance(x, datetime)`` checks in
-    production code true; the only override is ``now``. Every read appends
-    ``(caller file, caller line)`` to :data:`_CLOCK_READS`, which the
-    fixture below resets before each test and reads back on teardown.
+    Subclassing ``datetime`` matters because the monkeypatch rebinds
+    ``magickit.web.ops.datetime`` and ``magickit.web.deps.datetime`` to
+    this class. Any ``isinstance(x, datetime)`` in patched-scope
+    production code (e.g. ``deps.parse_ts`` at ``deps.py:37``) therefore
+    reads as ``isinstance(x, _RecordingClock)`` -- so ``x`` must actually
+    be an instance of this class for the check to hold. Two paths make
+    that true:
 
-    Naive calls (``tz=None``) are rejected loudly. Every production reader
-    in this file's patched scope calls ``datetime.now(timezone.utc)``, and
-    a new reader that drops the timezone is a design violation whether it
-    would break in tests or not: on the standard-library contract, a naive
-    ``now()`` returns *local* time, which is host-timezone dependent, so
-    silently emulating stdlib semantics would reintroduce the wall-clock
-    non-determinism this file exists to remove. Silently returning UTC as
-    naive would be non-standard and could feed wrong values to production
-    code that expected local time. Failing loud puts the choice at the
-    call site rather than in a mock's opinion.
+    - **Inherited classmethods**. ``_RecordingClock.fromisoformat(text)``
+      returns a ``_RecordingClock`` instance, not a bare ``datetime``;
+      any value that flows in as an ISO string and is parsed under the
+      patched name comes out as this class.
+    - **``.now()`` return type**. ``datetime.astimezone`` returns a
+      *bare* ``datetime`` even when called on a subclass instance, so
+      ``NOW.astimezone(tz)`` alone would give production code a plain
+      ``datetime`` -- and a plain ``datetime`` is not an instance of a
+      subclass. The result is rebuilt via ``cls(...)`` below so the
+      returned object is a ``_RecordingClock``, and downstream
+      ``isinstance`` checks against the patched name stay true.
+
+    Naive calls (``tz=None``) are rejected loudly. Every production
+    reader in this file's patched scope calls
+    ``datetime.now(timezone.utc)``, and a new reader that drops the
+    timezone is a design violation whether it would break in tests or
+    not: on the standard-library contract, a naive ``now()`` returns
+    *local* time, which is host-timezone dependent, so silently
+    emulating stdlib semantics would reintroduce the wall-clock
+    non-determinism this file exists to remove. Silently returning UTC
+    as naive would be non-standard and could feed wrong values to
+    production code that expected local time. Failing loud puts the
+    choice at the call site rather than in a mock's opinion.
     """
 
     @classmethod
@@ -99,7 +115,17 @@ class _RecordingClock(datetime):
             )
         frame = sys._getframe(1)
         _CLOCK_READS.append((frame.f_code.co_filename, frame.f_lineno))
-        return NOW.astimezone(tz)
+        # ``NOW.astimezone(tz)`` returns a bare ``datetime`` -- see the
+        # docstring. Rebuild as ``cls`` so production code that stores or
+        # forwards the value keeps ``isinstance(x, datetime) is True`` when
+        # ``datetime`` is bound to the patched (subclass) reference.
+        aware = NOW.astimezone(tz)
+        return cls(
+            aware.year, aware.month, aware.day,
+            aware.hour, aware.minute, aware.second, aware.microsecond,
+            tzinfo=aware.tzinfo,
+            fold=aware.fold,
+        )
 
 
 #: Tests that must reach the production wall-clock seam at least once. A
