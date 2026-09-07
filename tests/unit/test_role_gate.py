@@ -1073,6 +1073,78 @@ async def test_a_confirmed_negative_still_skips_and_only_it_does(wired) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_confirmed_negative_still_posts_and_only_it_does(wired) -> None:
+    """I-3 non-regression, stated as the distinction itself (stage-1 mirror).
+
+    Twin of ``test_a_confirmed_negative_still_skips_and_only_it_does``, moved
+    onto the post path (T-i3-i9-pin-sufficiency-unadjudicated msg-270 §3). Same
+    author, same call payload, only the identity service's response differs:
+
+    - well-formed ``found=false`` → the post proceeds AND the caller's ``role``
+      is dropped to ``None`` before it reaches Conclair. This second half is
+      load-bearing: asserting only that the call succeeded would leave the
+      exact regression the pin exists to catch (an unregistered author's
+      unverified role being persisted verbatim) invisible, and that regression
+      is reachable simply by choosing an unregistered author name -- the
+      invariant "``messages.role`` non-null ⇔ ``allowed_roles`` verified" then
+      goes red on the traffic that names the author on purpose.
+    - the malformed shape is not a verdict, so it must not take the same
+      branch: the write refuses with the exact
+      ``RoleValidationUnavailableError`` and Conclair is not contacted.
+
+    Coupled into one test so that a future change weakening one arm has to
+    move the other visibly -- the point of §3's pin transplanted here (I-3
+    used to have no such pin, msg-269 Objection). Two separate tests would let
+    a later edit relax the malformed branch on stage 1 (re-buying the
+    ``found``-defaults-to-False fail-open) while
+    ``test_a_success_without_found_is_an_absent_verdict_not_a_negative_one``
+    still passes on a different author's arm.
+
+    Fixture symmetry: the malformed response is ``_malformed_success()``
+    unchanged, i.e. the same 200-OK-missing-``found`` shape the stage-2 pin
+    uses (msg-270 §5-2). A fix that suppressed one shape but not the other
+    would fail here as well.
+
+    Why there is no matching pair on ``chatroom_open_thread``: it delegates to
+    the same ``_check_role_allowed`` helper on the same branch, with no
+    bespoke call-site or wrapping (chatroom.py L1250). The distinction pinned
+    here is a property of that helper's stage-1 return, so covering the post
+    entry covers the open entry too; a refactor that gives open its own path
+    is the trigger to add a matching pair, not now.
+
+    Embodiment defence (msg-270 §4 / ADR-2026-05-29-12): ``msg_type="report"``
+    is outside ``MANDATORY_EMBODIMENT_MSG_TYPES``, AND a valid ``embodiment``
+    is supplied. Belt-and-suspenders: were the mandatory set to widen tomorrow
+    the pin still isolates the role gate without the embodiment gate firing
+    for a different reason. Should the two ever collide anyway, the error
+    types are distinct (``EmbodimentRequiredError`` ≠
+    ``RoleValidationUnavailableError``), so any masking shows up RED, not GREEN
+    -- which is why the assertion is on the exact ``error_type``, not on "any
+    error".
+    """
+    tools, chat, prismind = wired
+
+    prismind.get_identity.return_value = _UNREGISTERED
+    confirmed = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="claude-code",
+        content="c", embodiment="terminal_coding_agent", role="anything",
+    )
+    assert "error_type" not in confirmed
+    chat.post_message.assert_awaited_once()
+    # Load-bearing: the well-formed found=false path must drop the unverified
+    # role rather than pass it through -- see the docstring.
+    assert chat.post_message.call_args.kwargs["role"] is None
+
+    prismind.get_identity.return_value = _malformed_success()
+    undetermined = await tools["chatroom_post_message"](
+        project="p", thread_id="T-2", msg_type="report", author="claude-code",
+        content="c", embodiment="terminal_coding_agent", role="anything",
+    )
+    assert undetermined["error_type"] == "RoleValidationUnavailableError"
+    chat.post_message.assert_awaited_once()  # still the first one
+
+
+@pytest.mark.asyncio
 async def test_a_malformed_success_leaves_the_post_remedy_intact(wired) -> None:
     """The stage-1 remedy must stay true for the case that now produces it.
 
