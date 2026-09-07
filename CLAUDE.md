@@ -78,7 +78,7 @@ Adapter で抽象化。命名は class=PascalCase, 関数変数=snake_case, 定�
 
 | モジュール | ツール |
 |---|---|
-| `session.py` | `begin_task` `resume` `checkpoint` `handoff` `update_progress` `list_context_authors` `upsert_identity` |
+| `session.py` | `begin_task` `resume` `checkpoint` `handoff` `update_progress` `list_context_authors` `upsert_identity` `get_identity` |
 | `task.py` | `add_task` `list_tasks` `get_task` `start_task` `complete_task` `block_task` `delete_task` `update_task` `move_task_to_phase` `set_task_priority` `set_task_blockers` |
 | `project.py` | `list_projects` `init_project` `get_project_status` `clone_project` `delete_project` `restore_project` |
 | `lifecycle.py` | `advance_phase` `set_phase` `get_phase_status` `add_milestone` `update_milestone` `list_milestones` `check_milestone_status` |
