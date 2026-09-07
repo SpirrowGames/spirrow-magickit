@@ -353,6 +353,16 @@
          (`_pick_checked_choice`) が sentinel radio を選ぶ ∴ 空 radio group
          で 422 に落ちる穴を塞ぐ.
     #}
+    {# G-1 / R4 (T-not-waiting-conclair-contract-assumptions, Einstein
+       BLOCKING): judgement 分岐でも thread_write_state を通して form を
+       描く/描かないを決める. not_waiting だけを塞いでも、判定済み
+       (resolved) スレッドを judgement 経路で開いて form から type=decide
+       を送れる穴 (Bohr §1 (b)(d)) が残る ∴ 弱い方の経路が結論を決めて
+       しまう. 材料 (質問 / 推奨 / 未確定事項) は form の外にあり、閉じた
+       スレッドでも「何が起きたか」の読み物としては意味がある ∴ ここは
+       form ブロックだけを差し替える (材料表示は残す).
+    #}
+    {% if thread_write_state == "open" %}
     <form method="post"
           action="/ui/projects/{{ project }}/threads/{{ thread_id }}/messages"
           class="decision-form"
@@ -494,6 +504,19 @@
       #}
       <button type="submit" class="decision-submit">送信</button>
     </form>
+    {% elif thread_write_state == "closed" %}
+      <p style="margin-top:1.5rem;color:#57606a;">
+        このスレッドはすでにクローズされています ({{ thread_status }}).
+        追加のメッセージは投稿できません.
+      </p>
+    {% else %}
+      {# unknown: 断定しない. 何がわからないかは書く. #}
+      <p style="margin-top:1.5rem;color:#57606a;">
+        このスレッドの状態 (<code>{{ thread_status or "(空)" }}</code>) を
+        magickit は解釈できません ∴ 投稿フォームを出しません.
+        chatroom で開いてください (下のリンク).
+      </p>
+    {% endif %}
 
     <div class="decision-links">
       <a href="{{ thread_ui_url }}">chatroom でスレッド全体を読む →</a>
@@ -580,15 +603,25 @@
     </div>
 
     {# I-12: フォームは 3 状態すべてで残す (msg-136 §4). 回答済みでも「追加で
-       書きたいこと」があるかもしれない. ただし closed スレッドでは Conclair が
-       送信を確実に拒否する ∴ 描画しない (Einstein Objection).
+       書きたいこと」があるかもしれない.
+
+       G-1 (T-not-waiting-conclair-contract-assumptions §2 政策 P): thread
+       status を 3 値で分ける.
+        * open (active / awaiting_reply / parked): フォームを描く. parked を
+          open に残すのは「駐機は再起動するためにある」 = 書き込みが正常運転.
+        * closed (resolved / superseded): フォームを描かない +「クローズされて
+          います」文言 (現行と同一の断定).
+        * unknown (未知の status / 欠落 / 非 str): フォームを描かない + 別文言
+          (magickit が解釈できない状態を「クローズ」と断定に落とさない —
+          §1 N-2 の「否定の主張には完全性が要る」の実装). 失うのは chatroom
+          への 1 タップで、リンクは同じ画面に常設.
 
        D-35 (msg-146 §2): この not_waiting form には元々選択肢が無く (自由記述
        のみ), 単一 submit 一本で機能する. `content` は hidden で sentinel を送り,
        ``<button type="submit">`` は content を運ばない — D-35 の「選択と送信の
        分離」を satisfy している (物理的に選択肢が無いので trivially).
     #}
-    {% if not thread_closed %}
+    {% if thread_write_state == "open" %}
       <details style="margin-top:1.5rem;">
         <summary style="cursor:pointer;color:#57606a;">それでも書き足す (自由記述で送る)</summary>
         <form method="post"
@@ -638,10 +671,17 @@
           <button type="submit" class="decision-submit">送信</button>
         </form>
       </details>
-    {% else %}
+    {% elif thread_write_state == "closed" %}
       <p style="margin-top:1.5rem;color:#57606a;">
         このスレッドはすでにクローズされています ({{ thread_status }}).
         追加のメッセージは投稿できません.
+      </p>
+    {% else %}
+      {# unknown: 断定しない. 何がわからないかは書く. #}
+      <p style="margin-top:1.5rem;color:#57606a;">
+        このスレッドの状態 (<code>{{ thread_status or "(空)" }}</code>) を
+        magickit は解釈できません ∴ 投稿フォームを出しません.
+        chatroom で開いてください (上のリンク).
       </p>
     {% endif %}
 

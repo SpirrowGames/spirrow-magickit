@@ -456,7 +456,7 @@ async def test_d31_unknown_next_participant_preserves_inputs_and_returns_page():
     # get_thread will be called for the re-render's best-effort context load.
     adapter = AsyncMock()
     adapter.get_thread = AsyncMock(return_value={
-        "thread": {"title": "T"},
+        "thread": {"title": "T", "status": "active"},
         "messages": [{"author": "Bohr", "content": "please decide",
                        "next_participant": "human"}],
         "mode": "full",
@@ -690,7 +690,7 @@ async def test_i20_all_empty_next_participant_and_empty_body_is_rejected():
     )
     # get_thread が D-31 の best-effort context 復元で呼ばれる。
     adapter.get_thread = AsyncMock(return_value={
-        "thread": {"title": "T"},
+        "thread": {"title": "T", "status": "active"},
         "messages": [{"author": "Bohr", "content": "please decide",
                        "next_participant": "human"}],
         "mode": "full",

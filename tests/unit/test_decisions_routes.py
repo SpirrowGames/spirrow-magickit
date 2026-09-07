@@ -134,7 +134,7 @@ async def test_branch_parked_to_human_returns_200_and_judgement_ui():
     (PR #28), not a body-line regex. This test pins that ordering.
     """
     adapter = _adapter_returning({
-        "thread": {"title": "T-x thread"},
+        "thread": {"title": "T-x thread", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "please decide", "next_participant": "human"},
         ],
@@ -162,7 +162,7 @@ async def test_judgement_ui_carries_decision_form_hidden_trigger():
     等価に潰れる — spec §11.4 で実測済)。
     """
     adapter = _adapter_returning({
-        "thread": {"title": "T-trigger"},
+        "thread": {"title": "T-trigger", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "please decide", "next_participant": "human"},
         ],
@@ -180,7 +180,7 @@ async def test_judgement_ui_carries_decision_form_hidden_trigger():
 async def test_branch_body_fallback_next_human_returns_200_and_judgement_ui():
     """Legacy msg without a structured field, body has single-line NEXT: human."""
     adapter = _adapter_returning({
-        "thread": {"title": "T-y"},
+        "thread": {"title": "T-y", "status": "active"},
         "messages": [
             {"author": "Heisenberg", "content": "here is the situation\n\nNEXT: human"},
         ],
@@ -197,7 +197,7 @@ async def test_branch_body_fallback_next_human_returns_200_and_judgement_ui():
 async def test_branch_not_waiting_returns_200_and_link_to_chatroom():
     """Thread exists but is not parked to human → 200 「判断待ちではありません」."""
     adapter = _adapter_returning({
-        "thread": {"title": "T-z"},
+        "thread": {"title": "T-z", "status": "active"},
         "messages": [
             {"author": "Bohr", "content": "handed off", "next_participant": "Heisenberg"},
         ],
@@ -264,7 +264,7 @@ async def test_branch_adapter_exception_returns_503():
 async def test_branch_empty_messages_treated_as_not_waiting():
     """A thread with no messages is not parked (there is no last msg)."""
     adapter = _adapter_returning({
-        "thread": {"title": "T-empty"},
+        "thread": {"title": "T-empty", "status": "active"},
         "messages": [],
         "mode": "full",
     })
@@ -287,7 +287,7 @@ async def test_percent_signs_in_thread_id_reach_ui_link_intact():
     template modes: we don't hand the URL to a re-quoting helper.
     """
     adapter = _adapter_returning({
-        "thread": {"title": "T-x"},
+        "thread": {"title": "T-x", "status": "active"},
         "messages": [{"author": "Bohr", "content": "hi", "next_participant": "Heisenberg"}],
         "mode": "full",
     })

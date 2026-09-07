@@ -128,7 +128,7 @@ def test_each_data_panel_declares_where_its_rows_come_from():
 
     expected = {
         "Chatroom": "Conclair から",
-        "Recent Events": "上の Task Queue の状態遷移ログ",
+        "Recent Events": "Task Queue の状態遷移ログ",
         "Active Locks": "resource → project の写像は定義されていない",
         "Task Queue": "自律ループのタスクは Prismind 側",
     }

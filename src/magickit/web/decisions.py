@@ -94,9 +94,10 @@ S5'' — 判断材料の 3 状態 (spec ``S5-decision-materials.md`` §3)
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Request, Response
@@ -116,12 +117,48 @@ router = APIRouter(tags=["decisions"])
 #: temp file の store を注入できる (module-level defaults を触らずに済む形)。
 #: 通常運用では ``get_settings().db_path`` を読み、``StateManager`` と同じ
 #: SQLite file を共有する。
+#:
+#: **process-lifetime cache** (``lru_cache(maxsize=1)``, T-material-store-
+#: per-request-sync-io / msg-255 §4). 判断ページの endpoint は各 request で
+#: この関数を呼ぶ ∴ 未 cache 時代は「1 request ごとに ``get_settings()`` が
+#: ``config/magickit_config.yaml`` を stat / 場合により read+parse し、続いて
+#: ``DecisionMaterialStore.__init__`` が同期 ``mkdir`` を event loop 上で走
+#: らせる」形になっていた。gate (T-pr-review-spirrow-magickit-32 msg-130 =
+#: PR #32 の非ブロッキング advisory、msg-255 で回収) 指摘。
+#:
+#: **なぜ ``mkdir`` を残すか** (msg-255 §4 の凍らずに残った制約): ``mkdir``
+#: を消して ``StateManager.initialize()`` が startup で作る dir に依存させると
+#: 「動く理由が起動順にしか無く、壊れたときに原因が画面に出ない」形になる。
+#: singleton 化で ``mkdir`` は process 1 回に落ちる ∴ 頻度問題は解け、起動順
+#: への暗黙依存は作らない (msg-255 §4 の推奨形と一致)。
+#:
+#: **なぜ引数を追加しないか** (naysayer Einstein 指示、T-material-store-per-
+#: request-sync-io の naysayer message): FastAPI の ``Depends`` 経由で呼ぶ
+#: 場合、引数追加は query parameter injection として拾われ 422 を招く。また
+#: 「settings を cache key にする」も呼び出し側が事前に ``get_settings()`` を
+#: 走らせねばならず、per-request YAML read という元の問題を呼び出し元に転嫁
+#: するだけ。∴ signature は **無引数のまま**。テスト側の isolation は既存の
+#: ``tests/unit/conftest.py`` の ``monkeypatch.setattr`` が関数まるごと差し
+#: 替える形 ∴ cache は素通しで済む。
+@functools.lru_cache(maxsize=1)
 def _get_material_store() -> DecisionMaterialStore:
-    """Return a fresh ``DecisionMaterialStore`` bound to the configured db.
+    """Return the process-singleton ``DecisionMaterialStore`` bound to the
+    configured db.
 
-    Called per-request; the store itself is stateless in Python and opens
-    a new aiosqlite connection per call. Tests patch this function to inject
-    a temp-file store (see ``tests/unit/test_decision_materials_*.py``).
+    Cached with ``functools.lru_cache(maxsize=1)`` so the underlying
+    ``get_settings()`` YAML lookup and ``DecisionMaterialStore.__init__``
+    ``mkdir`` are performed once per process rather than once per HTTP
+    request. The store itself opens a new aiosqlite connection per call
+    (see ``DecisionMaterialStore``), so sharing one Python instance is safe.
+
+    Tests patch this function whole (``monkeypatch.setattr(decisions_module,
+    "_get_material_store", lambda: store)`` in ``tests/unit/conftest.py``)
+    ∴ the cache on the original is inert while patched. ``conftest`` also
+    clears the cache defensively **both before patching and after the test**,
+    in each case against the reference it captured at import time
+    (``_REAL_GET_MATERIAL_STORE``) rather than against this module's
+    attribute -- at teardown the attribute is still the test's stub, so
+    going through it would clear nothing.
     """
     settings = get_settings()
     return DecisionMaterialStore(db_path=settings.db_path)
@@ -285,9 +322,10 @@ def _candidate_authors(
     The registry filter answers the same question with the actual
     authority (I-19 / D-36) — keeping a spelled-out denylist here would
     reintroduce the "two implementations of the same rule" trap that
-    msg-140 §4 named. When the filter is bypassed (the sync-legacy call
-    site — see the wrapper below), those tokens fall through to the
-    consumer and the POST-time gate rejects them just as it does today.
+    msg-140 §4 named. Every render path now goes through
+    ``_participant_choices_registered`` (the D-31 error rerender was
+    unified onto ``_render_decision_page`` — msg-186 R-9 / msg-252 §1),
+    so the filter is no longer bypassable.
     """
     seen: dict[str, None] = {}
     if parked_author:
@@ -306,21 +344,6 @@ def _candidate_authors(
         if h not in seen:
             seen[h] = None
     return list(seen.keys())
-
-
-def _participant_choices(
-    messages: list[dict[str, Any]], parked_author: str
-) -> list[str]:
-    """Backwards-compatible sync wrapper around ``_candidate_authors``.
-
-    ``_render_decision_error_page`` used to call this synchronously, and
-    the fallback path (Conclair failed → we build the form with a
-    single-entry select) still needs a synchronous list. In the normal
-    path the async ``_participant_choices_registered`` is used instead
-    (I-19). Keeping the same name so tests / callers that only ever exit
-    through the fallback path do not shift.
-    """
-    return _candidate_authors(messages, parked_author)
 
 
 #: I-20 sentinel value for the "宛先を送らない" select option (msg-146 §3).
@@ -699,11 +722,14 @@ def _is_human_decide(msg: dict[str, Any]) -> bool:
     return msg_type == "decide"
 
 
-#: msg の投稿時刻を拾う候補 field。実運用値が確定していない ∴ 見つからない
-#: 場合は None を返し UI 側で「時刻欄ごと省く」(msg-137 §5 N-6: 時刻の欠落は
-#: verdict を弱めない — 証拠 msg は手にある)。順序は Conclair の他 API で見た
-#: 頻度順 (`created_at` が listing で権威、`timestamp` は caller-supplied 表示)。
-_MSG_TIMESTAMP_FIELDS = ("created_at", "timestamp")
+#: msg の投稿時刻を拾う候補 field。G-2 (T-not-waiting-conclair-contract-
+#: assumptions Bohr §4): Conclair の serializer を実測した結果、message 側の
+#: 時刻 field は ``timestamp`` の 1 本 (``schemas/message.py:24`` 必須)。
+#: ``created_at`` は ``Thread`` metadata の field で message には存在しない
+#: (``schemas/thread.py:56``) ∴ 旧 fallback 連鎖 ``("created_at", "timestamp")``
+#: は別エンティティの key を先に引く形になっていた。中間の推測段は落とし、
+#: 最終安全弁 (``None`` を返して UI 側で欄ごと省く: msg-137 §5 N-6) は残す。
+_MSG_TIMESTAMP_FIELDS = ("timestamp",)
 
 
 def _msg_timestamp(msg: dict[str, Any]) -> str | None:
@@ -712,6 +738,14 @@ def _msg_timestamp(msg: dict[str, Any]) -> str | None:
     See ``_MSG_TIMESTAMP_FIELDS``. Returning ``None`` is the intended
     fallback — the UI drops the timestamp column rather than writing
     「不明」(msg-137 §5 N-6).
+
+    G-2 note: ``timestamp`` は **caller-supplied** な表示用 field
+    (``api/messages.py:69`` / ``schemas/thread.py:40``) ∴ 「誰がいつ答えたか」
+    の表示には十分だが、msg の順序判定の権威ではない
+    (``services/thread_rollup.py:98-108``: caller-supplied 時刻順と thread
+    rollup の順序は食い違ってよいと明記)。後の読者がここを順序の根拠に
+    使わないよう明記する。``isinstance(v, str)`` ガードは契約違反時
+    (Conclair が別型を返した場合) の安全弁として残す。
     """
     for f in _MSG_TIMESTAMP_FIELDS:
         v = msg.get(f)
@@ -740,21 +774,60 @@ def _default_next_participant_for_not_waiting(
     return str(last.get("author") or "")
 
 
-def _thread_is_closed(thread_meta: dict[str, Any]) -> bool:
-    """Return True when the thread rollup marks the thread as closed.
+#: G-1 (T-not-waiting-conclair-contract-assumptions): thread status を
+#: フォーム描画側で解釈する 3 値。旧 ``_thread_is_closed`` (bool) は
+#: 「listed でも closed でもない未知 status を "active 相当" として描画する」
+#: と静かに前提していた ∴ Conclair が enum を増やしたときに magickit が
+#: 嘘の導線 (投稿しても無効になる form) を描く経路が残っていた。3 値化で
+#: 「open」「closed」「unknown」を分け、unknown は描画しないが「クローズ」
+#: とも断定しない (§1 の N-2: 否定の主張には完全性が要る)。
+_ThreadWriteState = Literal["open", "closed", "unknown"]
 
-    Einstein Objection (msg after Bohr's design): closed スレッドへの新規
-    メッセージ書き込みは Conclair が ``ChatroomStateError`` で確実に拒否する
-    ∴ closed に送信可能なフォームを描画すると「嘘の導線」になる。
+#: Conclair の thread status enum を magickit が解釈できる 3 値に写す表。
+#:
+#: - ``open`` (フォームを描く): ``active`` / ``awaiting_reply`` / ``parked``。
+#:   ``parked`` を open に残すのは、駐機は「条件が満たされたら再起動する」
+#:   ためにあり、書き込みが正常運転だから (Conclair 自身の UI
+#:   ``templates/thread_detail.html:59`` でも parked に form を出す)。
+#: - ``closed`` (フォームを描かない + 「クローズされています」文言):
+#:   ``resolved`` / ``superseded``。これは断定してよい — Conclair の enum
+#:   で terminal と定義された値。
+#: - ``unknown`` (フォームを描かない + 別文言): 上表に無い任意の str /
+#:   欠落 / 非 str。magickit が知らない状態を「クローズされた」と嘘の
+#:   断定に落とさないためのバケット。§1 N-2 の「否定の主張には完全性が
+#:   要る」を、我々が持っていない完全性を装わずに満たす。
+_THREAD_STATUS_OPEN = frozenset({"active", "awaiting_reply", "parked"})
+_THREAD_STATUS_CLOSED = frozenset({"resolved", "superseded"})
 
-    Conclair の状態 enum は ``active / awaiting_reply / resolved / superseded
-    / parked`` (chatroom.py L1620-1621) ∴ 「決着した」の実体は ``resolved``
-    と ``superseded``。field 名は listing の "status" (chatroom.py L1629)。
-    ここでは case 完全一致で拾う (それ以外は "active" 相当として扱う =
-    フォームを描画する = 安全側の default)。
+
+def _thread_write_state(thread_meta: dict[str, Any]) -> _ThreadWriteState:
+    """判断ページの投稿フォームを描く/描かないを決める 3 値判定。
+
+    G-1 (T-not-waiting-conclair-contract-assumptions): 旧
+    ``_thread_is_closed`` (bool) の denylist 前提を反転した allowlist 判定。
+
+    - ``open``: Conclair enum のうち書き込みが正常運転な 3 値
+      (``active`` / ``awaiting_reply`` / ``parked``)。フォームを描く。
+    - ``closed``: Conclair enum のうち terminal な 2 値
+      (``resolved`` / ``superseded``)。フォームを描かず、既存の
+      「クローズされています」文言を出す。
+    - ``unknown``: 上記いずれでもない — 未知の status 値、欠落、非 str。
+      フォームを描かないが「クローズ」とは書かない (別文言) —
+      「magickit は解釈できません」+ chatroom への導線。
+
+    R4 (Einstein BLOCKING): 判定は not_waiting / judgement 両分岐で
+    同じ規則を使う。not_waiting だけを塞いでも、judgement 分岐から
+    resolved スレッドへ同じ ``type=decide`` を送れる経路が残る (Bohr
+    §1 (b)(d) の一次照合)。
     """
-    status = str(thread_meta.get("status") or "")
-    return status in ("resolved", "superseded")
+    status = thread_meta.get("status")
+    if not isinstance(status, str):
+        return "unknown"
+    if status in _THREAD_STATUS_OPEN:
+        return "open"
+    if status in _THREAD_STATUS_CLOSED:
+        return "closed"
+    return "unknown"
 
 
 def _thread_page_url(project: str, thread_id: str) -> str:
@@ -1099,6 +1172,13 @@ async def _render_judgement_view(
     ) = await _participant_choices_registered(messages, parked_author)
     default_target = _resolve_default_target(parked_author, participant_choices)
 
+    # G-1 / R4 (T-not-waiting-conclair-contract-assumptions, Einstein
+    # BLOCKING): judgement 分岐でも同じ 3 値判定を通す。not_waiting だけを
+    # 塞いでも、resolved スレッドを judgement 経路で開いて ``type=decide``
+    # を送れる穴 (Bohr §1 (b)(d)) が残る ∴ 弱い方の経路が結論を決めて
+    # しまう。
+    thread_write_state = _thread_write_state(thread_meta)
+
     if is_post_rerender:
         # I-20 (msg-146 §3): keep the user's chosen target iff it survived
         # verification; otherwise demote to the "宛先を送らない" sentinel so
@@ -1155,6 +1235,11 @@ async def _render_judgement_view(
             "no_target_value": NO_TARGET_VALUE,
             "no_target_label": NO_TARGET_LABEL,
             "freeform_only_value": _FREEFORM_ONLY_VALUE,
+            # G-1 / R4: template から thread_write_state を読んで
+            # closed / unknown で form 全体を差し替える。not_waiting 分岐と
+            # 同じ context を持たせる (2 箇所で別の規則を持たない)。
+            "thread_write_state": thread_write_state,
+            "thread_status": str(thread_meta.get("status") or ""),
         },
         status_code=status_code,
         headers={"Cache-Control": _NO_STORE},
@@ -1198,7 +1283,14 @@ async def _render_not_waiting_view(
         messages=messages,
         thread_head=thread_head,
     )
-    thread_closed = _thread_is_closed(thread_meta)
+    # G-1 (T-not-waiting-conclair-contract-assumptions): 3 値判定に反転。
+    # 旧 ``_thread_is_closed`` は「resolved / superseded 以外は open」の
+    # denylist 前提で、Conclair が enum を増やしたときに未知 status を
+    # open と推測してしまう ∴ allowlist ベースの 3 値 (open / closed /
+    # unknown) に切り替え、unknown は「クローズ」とも「投稿できる」とも
+    # 断定しない。R4 (Einstein BLOCKING): judgement 分岐でも同じ判定を
+    # 使うため関数を共有する。
+    thread_write_state = _thread_write_state(thread_meta)
     default_next = _default_next_participant_for_not_waiting(messages)
     (
         nw_participant_choices,
@@ -1236,7 +1328,7 @@ async def _render_not_waiting_view(
             "thread_title": thread_meta.get("title") or thread_id,
             "not_waiting_state": nw_state,
             "not_waiting_evidence": nw_evidence,
-            "thread_closed": thread_closed,
+            "thread_write_state": thread_write_state,
             "thread_status": str(thread_meta.get("status") or ""),
             "next_participant_value": selected_target,
             "participant_choices": nw_participant_choices,
@@ -1589,7 +1681,6 @@ __all__ = [
     "_render_decision_error_page",
     "_render_decision_page",
     "_thread_page_url",
-    "_participant_choices",
     "_head_msg_id_from_thread",
     "_classify_judgement_state",
     "_choice_options_from_material",
@@ -1612,7 +1703,7 @@ __all__ = [
     "_msg_timestamp",
     "_load_material",
     "_default_next_participant_for_not_waiting",
-    "_thread_is_closed",
+    "_thread_write_state",
     "_NW_STORE_UNAVAILABLE",
     "_NW_NO_MATERIAL",
     "_NW_MATERIAL_HEAD_UNREADABLE",
