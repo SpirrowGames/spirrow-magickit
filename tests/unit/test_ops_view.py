@@ -45,11 +45,17 @@ STALL = 30 * 60
 # The clock is a recorder rather than an exception-thrower: we want to know
 # *whether* the seam was read, not to shatter tests that happen to swallow
 # exceptions. Every read is stamped with the caller's ``file:line`` -- so
-# the reach proof at the end of the module can verify both that the tests
-# listed as "reaches" actually reach it (guards against a decoy patch) and
-# that no unlisted test does (guards against a hidden time dependency, the
-# way 9 tests in ``test_board.py`` sat quietly on the same seam until the
-# 10th failed).
+# the fixture's teardown can verify both that a test listed as "reaches"
+# actually reached it (guards against a decoy patch) and that no unlisted
+# test did (guards against a hidden time dependency, the way 9 tests in
+# ``test_board.py`` sat quietly on the same seam until the 10th failed).
+#
+# The check runs **per test, in the fixture teardown** -- not as a
+# module-wide aggregator test that reads a shared dict. A module-wide
+# aggregator would trivially pass whenever pytest reordered it to run
+# first (``pytest-randomly``, subset execution, ``pytest-xdist`` slicing)
+# because the shared dict would be empty. Every test carries its own
+# verdict; the module-wide guarantee comes from every teardown holding.
 #
 # ``monkeypatch.setattr`` on the module's ``datetime`` reference is used
 # rather than ``unittest.mock.patch`` on ``.now``: the latter injects
@@ -65,25 +71,43 @@ class _RecordingClock(datetime):
 
     Subclassing ``datetime`` keeps ``isinstance(x, datetime)`` checks in
     production code true; the only override is ``now``. Every read appends
-    ``(caller file, caller line)`` to :data:`_CLOCK_READS`, which the fixture
-    below resets per test and the proof at the end of the module reads back.
+    ``(caller file, caller line)`` to :data:`_CLOCK_READS`, which the
+    fixture below resets before each test and reads back on teardown.
+
+    Naive calls (``tz=None``) are rejected loudly. Every production reader
+    in this file's patched scope calls ``datetime.now(timezone.utc)``, and
+    a new reader that drops the timezone is a design violation whether it
+    would break in tests or not: on the standard-library contract, a naive
+    ``now()`` returns *local* time, which is host-timezone dependent, so
+    silently emulating stdlib semantics would reintroduce the wall-clock
+    non-determinism this file exists to remove. Silently returning UTC as
+    naive would be non-standard and could feed wrong values to production
+    code that expected local time. Failing loud puts the choice at the
+    call site rather than in a mock's opinion.
     """
 
     @classmethod
     def now(cls, tz=None):  # type: ignore[override]
+        if tz is None:
+            raise AssertionError(
+                "naive datetime.now() is not allowed under the recording "
+                "clock in test_ops_view.py: this module's patched scope "
+                "(magickit.web.ops, magickit.web.deps) always calls with "
+                "tz=timezone.utc, and a new naive read is either a "
+                "production regression (drop timezone-awareness) or a "
+                "call that reaches the wrong module. See _RecordingClock."
+            )
         frame = sys._getframe(1)
         _CLOCK_READS.append((frame.f_code.co_filename, frame.f_lineno))
-        if tz is None:
-            return NOW.astimezone(timezone.utc).replace(tzinfo=None)
         return NOW.astimezone(tz)
 
 
 #: Tests that must reach the production wall-clock seam at least once. A
-#: test not listed here must reach it zero times. Declared BEFORE the run
-#: (in source order that also puts it above the fixture that reads it) so
-#: a mismatch is a finding rather than a self-fulfilling classification --
-#: see msg-420 §3 for why "declare after the fact" would let a decoy patch
-#: silently satisfy the proof.
+#: test not listed here must reach it zero times. Base names only -- the
+#: teardown strips the ``[param]`` suffix that ``pytest.mark.parametrize``
+#: appends to ``request.node.name`` by reading ``request.node.originalname``.
+#: Declared BEFORE the run so a mismatch is a finding rather than a
+#: self-fulfilling classification (msg-420 §3).
 _REACHES_PRODUCTION_SEAM: frozenset[str] = frozenset(
     {
         # `_get` -> GET /dashboard/_ops -> collect(get_settings()) with no
@@ -107,25 +131,56 @@ _REACHES_PRODUCTION_SEAM: frozenset[str] = frozenset(
     }
 )
 
-_RECORDED_READS: dict[str, list[tuple[str, int]]] = {}
-
 
 @pytest.fixture(autouse=True)
 def _own_the_production_wall_clock(monkeypatch, request):
-    """Install :class:`_RecordingClock` on the two production modules whose
-    clock reads this file exercises.
+    """Install :class:`_RecordingClock`, then enforce the per-test contract.
 
-    Both are patched even when a given test would only reach one of them:
-    the reach proof below reads a single per-test bucket, and patching
-    both keeps the *unlisted* side honest -- a future edit that starts
-    hitting the deps seam from a currently quiet test will be flagged as
-    a declaration mismatch rather than absorbed silently.
+    Both ``magickit.web.ops.datetime`` and ``magickit.web.deps.datetime`` are
+    patched -- a given test may only reach one, but patching both catches
+    a future edit that starts hitting the deps seam from a currently quiet
+    test. Reads accumulate in :data:`_CLOCK_READS`, which is cleared before
+    yield and inspected on teardown.
+
+    The contract is enforced here, not in a separate module-level test,
+    because a separate test would be reorderable (``pytest-randomly``,
+    subset execution, ``pytest-xdist`` slicing) and would trivially pass
+    when moved ahead of the tests it summarises. In fixture teardown, each
+    test's own outcome depends only on its own observation, and the
+    module-wide guarantee is the AND of every teardown holding.
+
+    Parametrized tests are handled by reading ``request.node.originalname``
+    (the base name, without the ``[param]`` bracket), so
+    ``test_foo[a-1]`` and ``test_foo[a-2]`` are both matched against the
+    single entry ``test_foo`` in :data:`_REACHES_PRODUCTION_SEAM`.
     """
     monkeypatch.setattr(ops, "datetime", _RecordingClock)
     monkeypatch.setattr(deps, "datetime", _RecordingClock)
     _CLOCK_READS.clear()
     yield
-    _RECORDED_READS[request.node.name] = list(_CLOCK_READS)
+    reads = list(_CLOCK_READS)
+    base_name = getattr(request.node, "originalname", None) or request.node.name
+    is_declared = base_name in _REACHES_PRODUCTION_SEAM
+
+    if is_declared and not reads:
+        pytest.fail(
+            f"reach proof: {base_name} is declared as reaching the "
+            f"production wall-clock seam, but observed zero reads. "
+            f"The patch on `magickit.web.ops.datetime` / "
+            f"`magickit.web.deps.datetime` is a decoy, the seam has moved "
+            f"out from under this file, or the test now skips the code "
+            f"path that reads it."
+        )
+    if not is_declared and reads:
+        first_caller = reads[0]
+        pytest.fail(
+            f"reach proof: {base_name} is NOT declared as reaching the "
+            f"seam, but captured {len(reads)} read(s) (first: "
+            f"{first_caller}). Either add it to _REACHES_PRODUCTION_SEAM "
+            f"(if the test is meant to hit the seam) or find why it now "
+            f"does. This is the shape of the 9 quiet-but-mined tests in "
+            f"test_board.py that were carrying an unknown time dependency."
+        )
 
 
 def _row(**kw) -> ops.ProjectOps:
@@ -892,29 +947,28 @@ async def test_the_digest_is_escaped_in_the_rendered_page():
 
 
 # ---------------------------------------------------------------------------
-# The reach proof and its sanity check.
+# Recording-clock support tests.
 #
-# These two tests exist to make the recording clock's guarantees checkable
-# rather than asserted. The sanity test proves the recorder catches a call
-# from ``magickit/web/ops.py`` when the production ``collect()`` is invoked
-# -- without it, a broken recorder could report anything and the proof
-# below would happily agree. The reach proof compares the observed reach
-# set against :data:`_REACHES_PRODUCTION_SEAM`; a mismatch in either
-# direction is a finding, as msg-420 §3 requires.
+# The per-test reach contract is enforced by the autouse fixture teardown
+# above -- one verdict per test, order-independent, parametrize-safe,
+# ``pytest-xdist``-safe. What remains for module-level tests is:
 #
-# They are named to sort last within the module because the proof reads
-# per-test buckets that the autouse fixture only fills as tests finish, so
-# it needs to run after every test it summarises.
+# 1. **Sanity**: the recorder itself reports the production caller, not
+#    the test file and not a mock frame. Without this, a broken recorder
+#    could feed the teardown any story it liked.
+# 2. **Declaration hygiene**: every name in :data:`_REACHES_PRODUCTION_SEAM`
+#    is a real test function in the module. This catches typos and stale
+#    entries that the per-test check cannot see (a phantom name is
+#    never scheduled, so no teardown ever fires on it).
 
 
 @pytest.mark.asyncio
 async def test_the_recording_clock_reports_the_production_module_as_caller():
     """When the seam is called from ``ops.collect``, the recorder must
     report ``magickit/web/ops.py`` as the caller -- not this test file, not
-    ``unittest/mock.py``. Without this bare-metal check, the reach proof
-    below can be satisfied by any decoy that happens to increment the
-    counter."""
-    _CLOCK_READS.clear()
+    ``unittest/mock.py``. Without this bare-metal check, the per-test
+    reach contract can be satisfied by any decoy that happens to increment
+    the counter."""
     with patch.object(
         ops, "ChatroomAdapter", return_value=_adapter(httpx.ConnectError("sanity"))
     ):
@@ -933,76 +987,24 @@ async def test_the_recording_clock_reports_the_production_module_as_caller():
     )
 
 
-def test_the_reach_declaration_matches_observation():
-    """Every test's observed reach agrees with :data:`_REACHES_PRODUCTION_SEAM`.
+def test_the_reach_declaration_names_only_real_tests():
+    """Every name in :data:`_REACHES_PRODUCTION_SEAM` must correspond to a
+    test function in this module.
 
-    Two mismatches are both findings, not just the first:
-
-    - A declared-reaches test that captured no reads means the patch is a
-      decoy: something else is providing the value, or the seam has moved
-      out from under this file.
-    - An undeclared-reaches test that captured a read means we found a
-      time dependency we did not know about -- the same shape as the 9
-      quiet-but-mined tests in ``test_board.py``.
-
-    Also asserts DoD (iv): the "reaches" side of the declaration is
-    non-empty. An edit that patches the seam but has no test that reads
-    it is a patch nobody uses.
-
-    Scoped to tests that actually ran in this session/worker. A test that
-    was filtered out (``pytest -k``, an explicit subset) or dispatched to
-    a different ``pytest-xdist`` worker is neither a decoy nor a hidden
-    dependency -- it is simply absent, and pretending otherwise would
-    turn every subset invocation into a false failure. The full-population
-    guarantee comes from the gate's single-process invocation of the whole
-    file; each partial invocation still verifies its own slice.
+    Order-independent: it inspects module globals only, not
+    :data:`_CLOCK_READS`, so ``pytest-randomly`` / subset selection /
+    ``pytest-xdist`` cannot make it trivially pass. What it catches --
+    typos and stale entries -- the per-test teardown check cannot: a
+    phantom name is never scheduled, and no teardown fires for a test
+    that does not exist.
     """
-    ran: set[str] = set(_RECORDED_READS)
-    observed_reaches: set[str] = {
-        name
-        for name, reads in _RECORDED_READS.items()
-        if reads and name != "test_the_reach_declaration_matches_observation"
-    }
-
-    # Static check: every declared name must exist as a callable test in
-    # this module. Otherwise a typo in the declaration would look like a
-    # test that was simply filtered out under subset execution and slip
-    # past silently. Cheap because it does not depend on which tests ran.
     module_test_names = {
         name
         for name, obj in globals().items()
         if name.startswith("test_") and callable(obj)
     }
-    unknown_declarations = _REACHES_PRODUCTION_SEAM - module_test_names
-    assert not unknown_declarations, (
+    unknown = _REACHES_PRODUCTION_SEAM - module_test_names
+    assert not unknown, (
         f"declared reach names are not test functions in this module "
-        f"(typo, moved test, or stale entry): "
-        f"{sorted(unknown_declarations)}"
+        f"(typo, moved test, or stale entry): {sorted(unknown)}"
     )
-
-    # Only the declared tests that actually ran can be "missed". Tests
-    # that were never scheduled cannot be decoys.
-    declared_that_ran = _REACHES_PRODUCTION_SEAM & ran
-    missed = declared_that_ran - observed_reaches
-    # A read from a test that wasn't declared is always a finding, no
-    # matter which subset is running.
-    unexpected = observed_reaches - _REACHES_PRODUCTION_SEAM
-
-    detail_missed = sorted(missed)
-    detail_unexpected = sorted(unexpected)
-    assert not missed and not unexpected, (
-        f"reach declaration disagrees with observation.\n"
-        f"declared but not observed (decoy patch or moved seam): "
-        f"{detail_missed}\n"
-        f"observed but not declared (unknown time dependency): "
-        f"{detail_unexpected}"
-    )
-    # DoD (iv): editing a file for the recorder means at least one test
-    # must actually reach the patched seam -- but only meaningful when a
-    # declared reacher was scheduled to run in this slice. In a subset
-    # that excludes every declared reacher there is nothing to floor.
-    if declared_that_ran:
-        assert observed_reaches, (
-            "no test observed a production wall-clock read; the patch is a "
-            "no-op and the file's `NOW` literal did not need the recorder."
-        )
