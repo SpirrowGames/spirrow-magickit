@@ -28,6 +28,22 @@ DETAIL_LEVEL_TOKENS = {
     "full": 4000,
 }
 
+# Optional caller-supplied fields on ``checkpoint`` that participate in the
+# truthiness gate.  Listed explicitly so the D1 receipt can report each one
+# as either forwarded (``fields_written``) or dropped (``fields_skipped``);
+# the caller then no longer has to do a read-back to detect a silent drop.
+# ``summary`` is not listed because it is always attempted; ``project`` /
+# ``user`` / ``author`` are not listed because they route the write, not
+# session state itself.  See chatroom T-checkpoint-silent-partial-write
+# msg-262 §5 / msg-264 §5 for the specification.
+_CHECKPOINT_OPTIONAL_FIELDS: tuple[str, ...] = (
+    "blockers",
+    "current_phase",
+    "current_task",
+    "next_action",
+    "embodiment",
+)
+
 
 async def _begin_task_impl(
     project: str,
@@ -289,10 +305,38 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Returns:
             Dict containing:
-            - success: Whether the checkpoint was saved
-            - saved_to: List of storage locations used
-            - knowledge_added: Number of knowledge entries created
-            - message: Status message
+            - success: Whether the checkpoint was saved.  ``True`` only when
+              the downstream session store confirmed persistence (see
+              ``persisted``).  Knowledge/decision failures do not flip this
+              flag on their own; they surface via ``message``.
+            - saved_to: List of storage locations that actually persisted.
+              ``"session"`` appears only when ``persisted`` is ``True``;
+              ``"knowledge"`` appears when at least one decision was saved.
+            - knowledge_added: Number of knowledge entries created.
+            - message: Status message; distinguishes an empty-answer from
+              a no-answer response, and -- on every branch, the failure
+              branches included -- reports any decisions this call did not
+              save (msg-323 §2, R5).
+            - fields_written: The optional session fields this call
+              actually forwarded to Prismind (chatroom
+              T-checkpoint-silent-partial-write msg-262 §2 / msg-264 §5).
+            - fields_skipped: The optional session fields that were *not*
+              forwarded.  Two different things land here and they cannot
+              be told apart from inside this function: a field the caller
+              passed as an explicit falsy value, and a field the caller
+              never passed at all.  The MCP schema defaults (``""`` for
+              the four string fields, ``None`` for ``blockers``) collapse
+              that distinction at the call boundary, before this function is
+              entered, so the server is not able to report which one
+              happened -- the indistinguishability is the subject of this
+              thread, not a gap in the receipt (msg-323 §3).  How to read
+              it: if a field you meant to send is in ``fields_skipped``,
+              it did not arrive.
+            - persisted: ``True`` if the downstream response reported a
+              non-empty ``saved_to``, ``False`` if it reported an empty
+              ``saved_to``, ``None`` if the response did not include the
+              key (or was not shaped as expected).  ``None`` means "no
+              answer from the store", not "the store answered no".
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
@@ -307,7 +351,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         saved_to = []
         knowledge_added = 0
-        errors = []
+        # R5(b) (msg-323 §2): decision-write failures are accumulated in
+        # their own list, kept apart from the session-write failure (which
+        # travels in ``save_error`` below).  One shared list would feed the
+        # session failure into the decision postfix, where it would print a
+        # second time and could push the decision failures out of the
+        # truncation window.
+        decision_errors: list[str] = []
 
         logger.info(
             "Creating checkpoint",
@@ -341,35 +391,95 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 # Continue with original summary
 
         # Step 2: Save session state
-        try:
-            save_args: dict[str, Any] = {"summary": processed_summary}
-            if blockers:
-                save_args["blockers"] = blockers
-            if current_phase:
-                save_args["current_phase"] = current_phase
-            if current_task:
-                save_args["current_task"] = current_task
-            if next_action:
-                save_args["next_action"] = next_action
-            if project:
-                save_args["project"] = project
-            save_args["user"] = effective_user
-            if author:
-                save_args["author"] = author
-            if embodiment:
-                save_args["embodiment"] = embodiment
+        #
+        # D1 receipt (chatroom T-checkpoint-silent-partial-write msg-262 §5 /
+        # msg-264 §5): the truthiness gate below is *retained* under D1 —
+        # inverting it belongs to D2 and requires the caller enumeration
+        # (M2) plus the ``embodiment`` measurement (M1) to avoid turning
+        # today's silent no-op into a silent destructive overwrite (msg-262
+        # §1.1).  What D1 changes is the *report*: for every optional
+        # session field the caller could have set, we say whether it was
+        # forwarded or dropped, and we no longer claim that the write
+        # persisted without the downstream store saying so.
+        persisted: bool | None = None
+        save_error: str | None = None
+        save_args: dict[str, Any] = {"summary": processed_summary}
+        if blockers:
+            save_args["blockers"] = blockers
+        if current_phase:
+            save_args["current_phase"] = current_phase
+        if current_task:
+            save_args["current_task"] = current_task
+        if next_action:
+            save_args["next_action"] = next_action
+        if project:
+            save_args["project"] = project
+        save_args["user"] = effective_user
+        if author:
+            save_args["author"] = author
+        if embodiment:
+            save_args["embodiment"] = embodiment
 
-            await prismind.save_session(**save_args)
-            saved_to.append("session")
-            logger.info("Session state saved")
+        fields_written = [f for f in _CHECKPOINT_OPTIONAL_FIELDS if f in save_args]
+        fields_skipped = [f for f in _CHECKPOINT_OPTIONAL_FIELDS if f not in save_args]
+
+        try:
+            save_result = await prismind.save_session(**save_args)
         except Exception as e:
             logger.error("Failed to save session", error=str(e))
-            errors.append(f"Session save failed: {e}")
+            # The session failure travels in ``save_error`` alone; the
+            # message branch below is its single point of report, so
+            # accumulating it a second time would only duplicate it.
+            save_error = str(e)
+            save_result = None
+
+        # R1/R2 (msg-264 §5): transcribe the downstream ``saved_to`` rather
+        # than synthesising one from "no exception was raised".  R2 gives us
+        # three states; keep all three so the message can tell the caller
+        # whether the store answered "empty" or did not answer at all.
+        if save_error is not None:
+            persisted = None
+        elif isinstance(save_result, dict):
+            downstream_saved_to = save_result.get("saved_to")
+            if isinstance(downstream_saved_to, list):
+                # R6 (msg-323 §4 / msg-264 §2.3 L1 / msg-268): do NOT tighten
+                # this to ``"session" in downstream_saved_to``.  The element
+                # names inside ``saved_to`` are the downstream store's own
+                # internal vocabulary, not our contract; narrowing by name
+                # makes this check go quietly false the day that store
+                # renames a target.  Non-empty means "something was
+                # persisted", and that is the whole of what we may read
+                # from it.
+                persisted = len(downstream_saved_to) > 0
+            else:
+                persisted = None
+        else:
+            persisted = None
+
+        if persisted is True:
+            saved_to.append("session")
+            logger.info("Session state saved")
+        elif persisted is False:
+            # Downstream answered, and it said "nothing was persisted".
+            logger.warning("Session save returned an empty saved_to")
+        elif save_error is None:
+            # Downstream did not answer the persistence question at all.
+            logger.warning("Session save response did not include saved_to")
 
         # Step 3: Save decisions as knowledge
         if decisions:
             if not project:
+                # R5b (msg-323 §2): with no project the decisions are dropped
+                # right here and never reach ``add_knowledge``.  Until this
+                # line the drop was visible only in the server log -- the
+                # caller saw success=True, knowledge_added=0 and "Checkpoint
+                # saved successfully", which is this thread's defect wearing
+                # a different hat.  Count them as unsaved so the message
+                # below is obliged to say so.
                 logger.warning("No project specified, decisions will not be saved")
+                decision_errors.append(
+                    f"{len(decisions)} decision(s) not saved: no project specified"
+                )
             else:
                 decision_tags = ["checkpoint", "decision"]
                 if author:
@@ -386,22 +496,65 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                         knowledge_added += 1
                     except Exception as e:
                         logger.warning("Failed to save decision", decision=decision[:50], error=str(e))
-                        errors.append(f"Decision save failed: {decision[:30]}...")
+                        decision_errors.append(
+                            f"Decision save failed: {decision[:30]}..."
+                        )
 
                 if knowledge_added > 0:
                     saved_to.append("knowledge")
                     logger.info("Decisions saved as knowledge", count=knowledge_added)
 
-        success = len(errors) == 0 or "session" in saved_to
-        message = "Checkpoint saved successfully"
-        if errors:
-            message = f"Checkpoint saved with {len(errors)} warning(s): {'; '.join(errors[:2])}"
+        # R3 (msg-264 §5): ``success`` is fail-closed on persistence.  The
+        # necessary condition for ``success=True`` is that the downstream
+        # session store confirmed the write (``persisted is True``); an
+        # empty answer or no answer is treated as "not saved".  Knowledge
+        # failures continue to surface only via ``message`` — this
+        # obligation is about session state, not about decision writes.
+        success = persisted is True
+
+        # R4 (msg-264 §5): the persisted-negative and persisted-null cases
+        # must be spelled apart in the message.  A downstream store that
+        # answered "I saved nothing" is different from a downstream store
+        # that never told us either way, and conflating them re-opens the
+        # very "answered without saying anything" defect this change closes.
+        if save_error is not None:
+            message = f"Checkpoint not saved: session write failed ({save_error})"
+        elif persisted is True:
+            message = "Checkpoint saved successfully"
+        elif persisted is False:
+            message = (
+                "Checkpoint not saved: downstream session store answered "
+                "with an empty saved_to (nothing was persisted)."
+            )
+        else:
+            message = (
+                "Checkpoint not saved: downstream session store did not "
+                "confirm persistence (saved_to missing from response)."
+            )
+
+        # R5 (msg-323 §2): the fate of the decisions the caller handed us is
+        # reported here, once, for every branch above.  The rule the message
+        # has to satisfy is not "join the error list" but: if any decision
+        # the caller passed was not saved, say so.  Doing the append in a
+        # single place is the substance of the fix -- a copy of it inside
+        # each branch is how the hole the PR gate found was opened, and it
+        # would re-open the next time a branch is added.  ``success`` is not
+        # touched here: INV-D1-SUCCESS (msg-267 §1) keeps it a statement
+        # about session state alone.
+        if decision_errors:
+            message = (
+                f"{message} [{len(decision_errors)} decision warning(s): "
+                f"{'; '.join(decision_errors[:2])}]"
+            )
 
         return {
             "success": success,
             "saved_to": saved_to,
             "knowledge_added": knowledge_added,
             "message": message,
+            "fields_written": fields_written,
+            "fields_skipped": fields_skipped,
+            "persisted": persisted,
         }
 
     @mcp.tool()
