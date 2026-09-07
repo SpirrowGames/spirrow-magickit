@@ -870,23 +870,6 @@ async def _load_material(
     return material, True
 
 
-async def _load_judgement_context(project: str, thread_id: str) -> dict[str, Any]:
-    """判断 UI に必要な参考情報を Conclair から取り直す。
-
-    D-31 のエラー再描画で、入力保持だけでなく thread 文脈 (parked msg / 参加者
-    一覧 / タイトル) も可能な限り復元するために使う。取れなかった場合の fallback
-    は呼び出し側が持つ ∴ ここでは例外を握らず raise させる (呼び出し側が最低限の
-    再描画に落ちる)。
-    """
-    adapter = chatroom_tools._adapter()
-    try:
-        return await adapter.get_thread(
-            project=project, thread_id=thread_id, mode="full"
-        )
-    finally:
-        await adapter.close()
-
-
 def _choice_options_from_material(material: dict[str, Any] | None) -> list[dict[str, str]]:
     """Derive the judgement page's choice buttons from composer material.
 
