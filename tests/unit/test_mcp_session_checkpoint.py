@@ -265,6 +265,21 @@ class TestCheckpointReceiptEnumeratesFieldFate:
     async def test_omitting_every_optional_field_reports_them_all_as_skipped(
         self, tools
     ):
+        """Fields the caller never passed belong in ``fields_skipped`` too.
+
+        ``fields_skipped`` does not mean "you supplied this and we threw
+        it away".  It means "this did not go".  The two roads to that
+        outcome -- passing an explicit falsy value, and never passing the
+        field -- are indistinguishable by the time a call reaches the
+        tool: the MCP schema defaults (``""`` / ``None``) collapse them at
+        the call boundary.  Narrowing this list to "caller-supplied only"
+        is therefore not implementable, and an implementation claiming to
+        do it would be asserting something the server cannot know -- the
+        same defect class this thread exists to close, rebuilt inside the
+        receipt (msg-323 §3).  The pin below is true as written; the PR
+        gate's objection was answered by correcting the ``session.py``
+        docstring to match it, not by changing this behaviour.
+        """
         result = await _checkpoint_result(
             tools,
             {"success": True, "saved_to": ["MCP Memory Server"]},
@@ -514,7 +529,11 @@ class TestCheckpointSuccessIsFailClosed:
 
         assert result["success"] is True
         assert result["persisted"] is True
+        # INV-D1-SUCCESS is unchanged: the direction of ``success`` is not
+        # what this assert is about.  R5 (msg-323 §2) adds the requirement
+        # that the message actually name the decision that did not land.
         assert "warning" in result["message"].lower()
+        assert "decision" in result["message"].lower()
 
 
 class TestCheckpointReceiptShapeIsStable:
@@ -549,3 +568,133 @@ class TestCheckpointReceiptShapeIsStable:
         assert "fields_written" in result
         assert "fields_skipped" in result
         assert result["persisted"] is None
+
+
+class TestMessageAlwaysReportsUnsavedDecisions:
+    """R5 (msg-323 §2): every branch of ``message`` accounts for the decisions.
+
+    The PR gate on #49/#50 found that the message branches consulted the
+    error list only when ``persisted is True``.  A decision that failed
+    while the session write *also* failed was therefore reported nowhere:
+    the return value carries no ``errors`` key, so ``message`` is the only
+    channel the docstring contracts for it ("Knowledge/decision failures
+    do not flip this flag on their own; they surface via ``message``").
+
+    The predicate these tests hold the code to is not "the error list is
+    joined into the string" but the one written in msg-323 §2: *if any
+    decision the caller passed was not saved, the message says so -- on
+    every branch*.  ``project``-less calls count as unsaved (R5b), because
+    from the caller's side those decisions vanish just as completely.
+
+    What is deliberately NOT tested here is ``success`` moving.  It does
+    not move: INV-D1-SUCCESS (msg-267 §1) scopes ``success`` to session
+    state, because widening it would turn a knowledge outage into a retry
+    loop against an append-only store (msg-268 endorsed exactly this).
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_session_exception_and_a_decision_failure_are_both_reported(
+        self, tools
+    ):
+        """The branch the gate objected to: both failures, session one once.
+
+        Reported once matters as much as reported at all.  The session
+        failure already has its own branch text; re-joining it from a
+        shared accumulator would print it twice and could evict the
+        decision failure from the truncation window (msg-323 §2(b)).
+        """
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.save_session = AsyncMock(side_effect=RuntimeError("boom"))
+            inst.add_knowledge = AsyncMock(side_effect=RuntimeError("knowledge down"))
+
+            result = await tools["checkpoint"](
+                summary="s",
+                project="p",
+                decisions=["d1"],
+                auto_extract=False,
+            )
+
+        assert result["success"] is False
+        assert result["persisted"] is None
+        assert "boom" in result["message"]
+        assert result["message"].count("boom") == 1
+        assert "decision" in result["message"].lower()
+        assert "d1" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_saved_to_still_reports_the_decision_failure(self, tools):
+        """``persisted is False`` keeps its own reason *and* gains the decision."""
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.save_session = AsyncMock(
+                return_value={"success": True, "saved_to": []}
+            )
+            inst.add_knowledge = AsyncMock(side_effect=RuntimeError("knowledge down"))
+
+            result = await tools["checkpoint"](
+                summary="s",
+                project="p",
+                decisions=["d1"],
+                auto_extract=False,
+            )
+
+        assert result["success"] is False
+        assert result["persisted"] is False
+        assert "empty" in result["message"].lower()
+        assert "decision" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_saved_to_still_reports_the_decision_failure(self, tools):
+        """``persisted is None`` likewise: the no-answer text is not a swallow."""
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.save_session = AsyncMock(return_value={"success": True})
+            inst.add_knowledge = AsyncMock(side_effect=RuntimeError("knowledge down"))
+
+            result = await tools["checkpoint"](
+                summary="s",
+                project="p",
+                decisions=["d1"],
+                auto_extract=False,
+            )
+
+        assert result["success"] is False
+        assert result["persisted"] is None
+        assert "confirm persistence" in result["message"]
+        assert "decision" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_decisions_without_a_project_are_reported_as_unsaved(self, tools):
+        """R5b: the drop the PR gate did not find, on the *success* path.
+
+        No exception is raised anywhere in this call.  The decisions are
+        discarded before ``add_knowledge`` is ever reached, so nothing
+        lands in the error path at all -- the caller used to get
+        ``success: True``, ``knowledge_added: 0`` and "Checkpoint saved
+        successfully", with the loss recorded only in a server-side log.
+        That is this thread's defect in its purest form, so it is one of
+        the cases R5 has to cover.
+        """
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.save_session = AsyncMock(
+                return_value={"success": True, "saved_to": ["MCP Memory Server"]}
+            )
+            inst.add_knowledge = AsyncMock()
+
+            result = await tools["checkpoint"](
+                summary="s",
+                decisions=["d1"],
+                auto_extract=False,
+            )
+
+        inst.add_knowledge.assert_not_awaited()
+        assert result["knowledge_added"] == 0
+        assert "not saved" in result["message"].lower()
+        assert "project" in result["message"].lower()
+        # INV-D1-SUCCESS (msg-267 §1): the session write did land, so
+        # ``success`` stays True.  R5 changes what the message must say,
+        # never what ``success`` means.
+        assert result["success"] is True
+        assert result["persisted"] is True
