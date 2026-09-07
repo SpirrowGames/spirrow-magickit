@@ -299,6 +299,36 @@ async def fetch_ledger_verdict(pr: PrRef) -> LedgerVerdict:
     return evaluate_ledger_verdict(pr_payload, reviews_payload, pr_slug=pr.slug)
 
 
+def ledger_close_sanction(verdict: LedgerVerdict) -> dict[str, str] | None:
+    """The wire ``close_sanction`` for a carve-out close, or None to claim nothing.
+
+    Conclair's ``kind="pr_gate_ledger"`` requires ``pr`` / ``merged_head`` /
+    ``approving_review_id`` all present and non-empty and refuses ``reason`` on
+    that kind: a carve-out record exists so a reader can re-derive the claim
+    later against GitHub, and ``chatroom_events`` is append-only, so a hollow
+    record could never be repaired. This projects the verdict onto exactly that
+    shape.
+
+    Returns None -- "no claim" -- whenever the evidence is short, which Conclair
+    records as ``kind="unspecified"``. That is deliberately not a failure path:
+    a close that succeeds today keeps succeeding, and the shortfall shows up as
+    the ``unclassified_override`` count rather than as a 422 that would stop the
+    loop. ``approving_review_id`` is an ``int`` here and a ``str`` on the wire,
+    so it is converted; pydantic v2 refuses an int for a ``str`` field.
+    """
+    if not verdict.closable:
+        return None
+    review_id = verdict.approving_review_id
+    evidence = {
+        "pr": verdict.pr_slug or "",
+        "merged_head": verdict.merged_head or "",
+        "approving_review_id": str(review_id) if review_id is not None else "",
+    }
+    if not all(evidence.values()):
+        return None
+    return {"kind": "pr_gate_ledger", **evidence}
+
+
 def format_ledger_close_note(verdict: LedgerVerdict, author: str) -> str:
     """Machine-readable line recording *why* the loop was allowed to file this.
 

@@ -22,6 +22,7 @@ from magickit.mcp.pr_gate_ledger import (
     fetch_ledger_verdict,
     format_ledger_close_note,
     is_pr_gate_ledger_thread,
+    ledger_close_sanction,
     parse_pr_ref,
 )
 from magickit.utils.logging import get_logger
@@ -420,7 +421,15 @@ async def _enforce_close_policies(
 
     Returns ``{"action": "block", "envelope": {...}}`` or
     ``{"action": "proceed", "content": str, "owner_override": bool,
-    "owner_override_reason": str | None}``.
+    "owner_override_reason": str | None, "close_sanction": dict | None}``.
+
+    ``close_sanction`` (D-2) carries *which* of (2) and (3) applied, so the
+    audit can tell a sanctioned close from a corrupt row instead of seeing one
+    boolean for both. It is the same knowledge the two branches below already
+    have at the moment they decide; it used to be projected onto
+    ``owner_override`` and thrown away. None means "no claim", which Conclair
+    records as ``kind="unspecified"`` -- never a partial claim, because the
+    wire refuses those and a refused close would stop the loop.
     """
     is_human = author in HUMAN_IDENTITY_NAMES
     gate_enabled = _settings is not None and _settings.naysayer_gate_enabled
@@ -437,6 +446,7 @@ async def _enforce_close_policies(
         return {
             "action": "proceed", "content": content,
             "owner_override": owner_override, "owner_override_reason": None,
+            "close_sanction": None,
         }
 
     view = await adapter.get_thread(project=project, thread_id=thread_id, mode="full")
@@ -450,6 +460,7 @@ async def _enforce_close_policies(
         return {
             "action": "proceed", "content": content,
             "owner_override": owner_override, "owner_override_reason": None,
+            "close_sanction": None,
         }
     thread = view.get("thread") or {}
     messages = view.get("messages") or []
@@ -472,6 +483,7 @@ async def _enforce_close_policies(
 
     # 2) human owner-override (force-close of a non-owned thread).
     forwarded_reason: str | None = None
+    close_sanction: dict[str, str] | None = None
     if is_human:
         thread_owner = thread.get("owner")
         # Only a *confirmed* force-close (owner known and not the author)
@@ -491,6 +503,13 @@ async def _enforce_close_policies(
                     ),
                 }
             forwarded_reason = reason or None
+            # kind='human_override' requires a non-empty reason on the wire,
+            # and Conclair strips before validating. The gated branch above
+            # accepts an empty reason (a fresh APPROVE already justified the
+            # close), so a blank one is reachable and must claim nothing rather
+            # than assert a human_override the wire would refuse with 422.
+            if reason.strip():
+                close_sanction = {"kind": "human_override", "reason": reason.strip()}
             content = content + _format_owner_override_note(author, thread_owner, reason)
 
     # 3) PR-gate ledger carve-out (T-pr-gate-ledger-debt msg-1001 §2). Only for
@@ -523,12 +542,19 @@ async def _enforce_close_policies(
                 ),
             }
         owner_override = True
+        # `owner_override_reason` keeps carrying the prose, unchanged. It is a
+        # sibling wire field, not part of the sanction: kind='pr_gate_ledger'
+        # refuses a `reason` *inside* close_sanction, since evidence that is
+        # re-derivable and a sentence explaining a refusal are different kinds
+        # of thing and only the first is what makes a carve-out checkable.
         forwarded_reason = verdict.reason
+        close_sanction = ledger_close_sanction(verdict)
         content = content + format_ledger_close_note(verdict, author)
 
     return {
         "action": "proceed", "content": content,
         "owner_override": owner_override, "owner_override_reason": forwarded_reason,
+        "close_sanction": close_sanction,
     }
 
 
@@ -1495,6 +1521,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             # so it can't be a bypass.
             owner_override = False
             owner_override_reason_out: str | None = None
+            close_sanction_out: dict[str, str] | None = None
             if closes:
                 policy = await _enforce_close_policies(
                     adapter,
@@ -1510,6 +1537,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 content = policy["content"]
                 owner_override = policy["owner_override"]
                 owner_override_reason_out = policy["owner_override_reason"]
+                close_sanction_out = policy["close_sanction"]
 
             return await adapter.post_message(
                 project=project,
@@ -1527,6 +1555,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 role=gate.role,
                 owner_override=owner_override,
                 owner_override_reason=owner_override_reason_out,
+                close_sanction=close_sanction_out,
                 next_participant=next_participant or None,
             )
         finally:
@@ -1677,6 +1706,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 role=gate.role,
                 owner_override=policy["owner_override"],
                 owner_override_reason=policy["owner_override_reason"],
+                close_sanction=policy["close_sanction"],
             )
         finally:
             await adapter.close()
