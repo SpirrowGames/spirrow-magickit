@@ -23,6 +23,7 @@ import httpx
 import pytest
 
 from magickit.config import Settings
+from magickit.core import board_lanes
 from magickit.core.board_lanes import BoardLaneStore, SeenItem
 from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.deploy import records
@@ -35,6 +36,58 @@ NOW = datetime(2026, 9, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 def _ago(minutes: float) -> str:
     return (NOW - timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
+class _FrozenClock(datetime):
+    """``datetime`` whose ``now()`` is :data:`NOW`. Everything else is real."""
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+
+@pytest.fixture(autouse=True)
+def _board_reads_the_same_clock_as_the_fixtures(monkeypatch):
+    """Give this module **one** clock.
+
+    Every ``last_activity_at`` / ``observed_at`` a mock Conclair returns here
+    is anchored to :data:`NOW` (via :func:`_ago`), and the ``_collect`` helper
+    passes ``now=NOW`` explicitly. The route handlers do not: ``board_set_lane``
+    and ``board_fragment`` call ``collect(settings)`` with no ``now``, so
+    ``board.collect`` fell through to ``datetime.now(timezone.utc)``
+    (``web/board.py:452``) — the **real** clock. That is two clocks in one
+    test, and which one wins depended on what time of day the suite ran.
+
+    It did not stay theoretical. With ``ops_stall_minutes`` defaulting to 30
+    (``config.py:123``) and the newest fixture heartbeat at ``NOW - 1min``,
+    every route-level test in this file crossed a trip point at
+    **2026-09-02T12:29:00Z**. After it, ``ops.classify`` called the fixture
+    project ``stalled``, ``_collect_loops`` added a ``loop:`` card,
+    ``touch_seen`` recorded *that* key in ``board_seen`` — and the follow-up
+    ``_prune`` ran ``DELETE FROM board_lanes WHERE item_key NOT IN (SELECT
+    item_key FROM board_seen)`` (``core/board_lanes.py:239-240``), taking out
+    the lane row the test had just written. ``test_an_unvouched_move_records_
+    no_actor`` then died on ``KeyError: 'k'``. CI last ran green on ``main``
+    at 2026-09-02T08:28:52Z — 3h51m *before* the trip point — so the repo's
+    gate went red for every PR opened afterwards.
+
+    Freezing the clock the code under test reads (rather than moving the
+    fixtures onto the real clock) is what makes this file independent of when
+    it runs: the assertions stay pinned to known instants, so a future edit
+    cannot re-introduce the drift by picking a new literal.
+
+    ``core.board_lanes`` is frozen to the same instant, because it is the
+    *second* half of the same seam: it stamps ``last_seen_at`` from its own
+    clock, and ``collect`` then selects against it with
+    ``since = now - board_done_days``. Freeze only ``board`` and the 完了
+    window is measured from ``NOW`` against rows stamped in real time — which
+    still passes today only because the real clock is *ahead* of ``NOW``.
+    Freezing both is what makes the file independent of the wall clock in
+    both directions; verified by re-running it with the clock shifted
+    -400/-5/0/+1/+30/+400/+4000 days.
+    """
+    monkeypatch.setattr(board, "datetime", _FrozenClock)
+    monkeypatch.setattr(board_lanes, "datetime", _FrozenClock)
 
 
 def _settings(db_path: str, **kw) -> Settings:
@@ -435,10 +488,10 @@ async def test_done_only_looks_back_the_configured_window(temp_db_path):
     await store.touch_seen([SeenItem(item_key="k", kind="loop", title="t")])
 
     fresh = await store.list_gone(
-        live_keys=set(), since=datetime.now(timezone.utc) - timedelta(days=7)
+        live_keys=set(), since=NOW - timedelta(days=7)
     )
     old = await store.list_gone(
-        live_keys=set(), since=datetime.now(timezone.utc) + timedelta(days=1)
+        live_keys=set(), since=NOW + timedelta(days=1)
     )
 
     assert [r["item_key"] for r in fresh] == ["k"]
@@ -451,7 +504,7 @@ async def test_a_live_card_is_never_in_done(temp_db_path):
     await store.touch_seen([SeenItem(item_key="k", kind="loop", title="t")])
 
     assert await store.list_gone(
-        live_keys={"k"}, since=datetime.now(timezone.utc) - timedelta(days=7)
+        live_keys={"k"}, since=NOW - timedelta(days=7)
     ) == []
 
 
