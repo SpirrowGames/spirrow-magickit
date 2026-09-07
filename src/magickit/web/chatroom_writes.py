@@ -495,6 +495,7 @@ async def post_message(
         body_content = content
         owner_override = False
         resolved_override_reason: str | None = None
+        resolved_close_sanction: dict[str, str] | None = None
 
         if closes:
             # ★ ここに渡す ``body_content=content`` は既に合成後の値である
@@ -524,6 +525,11 @@ async def post_message(
             body_content = decision["content"]
             owner_override = decision.get("owner_override", False)
             resolved_override_reason = decision.get("owner_override_reason")
+            # D-2: the UI is the second family of close paths, so it forwards
+            # the sanction too. Left out, its closes would keep landing as
+            # `unclassified_override` and quietly spoil the very signal that
+            # count exists to give (msg-221 §2).
+            resolved_close_sanction = decision.get("close_sanction")
 
         result = await adapter.post_message(
             project=project,
@@ -541,6 +547,7 @@ async def post_message(
             role=gate.role,
             owner_override=owner_override,
             owner_override_reason=resolved_override_reason,
+            close_sanction=resolved_close_sanction,
             next_participant=next_participant or None,
         )
     finally:
@@ -639,6 +646,7 @@ async def close_thread(
             role=gate.role,
             owner_override=decision.get("owner_override", False),
             owner_override_reason=decision.get("owner_override_reason"),
+            close_sanction=decision.get("close_sanction"),
         )
     finally:
         await adapter.close()

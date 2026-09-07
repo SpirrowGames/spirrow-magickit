@@ -130,6 +130,7 @@ class ChatroomAdapter(BaseAdapter):
         role: str | None = None,
         owner_override: bool = False,
         owner_override_reason: str | None = None,
+        close_sanction: dict[str, str] | None = None,
         next_participant: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -141,6 +142,12 @@ class ChatroomAdapter(BaseAdapter):
             body["owner_override"] = True
         if owner_override_reason is not None:
             body["owner_override_reason"] = owner_override_reason
+        # T-integrity-flags-sanctioned-force-close D-2. Additive: a Conclair
+        # that predates the field ignores it (no request model forbids extras),
+        # so Magickit may ship first and the close is simply recorded as
+        # `unspecified` until Conclair catches up.
+        if close_sanction is not None:
+            body["close_sanction"] = close_sanction
         if reply_to is not None:
             body["reply_to"] = reply_to
         if references_threads is not None:
@@ -185,6 +192,7 @@ class ChatroomAdapter(BaseAdapter):
         role: str | None = None,
         owner_override: bool = False,
         owner_override_reason: str | None = None,
+        close_sanction: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "summary_content": summary_content,
@@ -194,6 +202,9 @@ class ChatroomAdapter(BaseAdapter):
             body["owner_override"] = True
         if owner_override_reason is not None:
             body["owner_override_reason"] = owner_override_reason
+        # See post_message: additive, and the route the carve-out actually uses.
+        if close_sanction is not None:
+            body["close_sanction"] = close_sanction
         if affects_threads is not None:
             body["affects_threads"] = affects_threads
         if related_tasks is not None:
