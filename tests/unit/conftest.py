@@ -26,6 +26,20 @@ from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import decisions as decisions_module
 
+#: The production ``_get_material_store`` captured at **import time**
+#: (T-material-store-per-request-sync-io / msg-326 M1).
+#:
+#: Deliberately not read inside the fixture: by the time a fixture body
+#: runs, an outer-scope fixture may already have swapped the module
+#: attribute for a stub, and we would capture *that* — clearing a cache
+#: the production function does not own, silently. Reading it here binds
+#: the real callable structurally, before any patching can occur.
+#:
+#: ``tests/unit/test_decision_material_store_singleton.py`` captures the
+#: same reference the same way ∴ this is a unification with an existing
+#: pattern, not a new one.
+_REAL_GET_MATERIAL_STORE = decisions_module._get_material_store
+
 
 @pytest.fixture(autouse=True)
 def stub_decision_identity_lookup(monkeypatch):
@@ -72,9 +86,11 @@ def isolated_material_store(monkeypatch) -> Callable[[], DecisionMaterialStore]:
     read. Autouse so tests that don't care get isolation for free.
 
     The temp file is cleaned up when the test ends (regardless of
-    success/failure) via a finalizer. We use a plain ``NamedTemporaryFile``
-    rather than pytest's ``tmp_path`` so the fixture stays usable in
-    non-async tests that don't take ``tmp_path`` directly.
+    success/failure) **after the ``yield`` below** — this is a yield
+    fixture, not a ``request.addfinalizer`` one. We use a plain
+    ``NamedTemporaryFile`` rather than pytest's ``tmp_path`` so the
+    fixture stays usable in non-async tests that don't take ``tmp_path``
+    directly.
 
     **cache_clear safety net** (T-material-store-per-request-sync-io): the
     production ``_get_material_store`` is now ``functools.lru_cache``-
@@ -83,13 +99,17 @@ def isolated_material_store(monkeypatch) -> Callable[[], DecisionMaterialStore]:
     cache on the original is inert during patched calls, but we still
     clear it around each test as defence in depth (any test that reaches
     the real function must not observe a store cached from an earlier
-    test whose settings differed).
+    test whose settings differed). Both clears go through
+    ``_REAL_GET_MATERIAL_STORE``, never through the module attribute.
     """
-    # Defence in depth: reset the singleton cache before patching. Guard
-    # with ``hasattr`` so this fixture keeps working if the production
-    # cache decorator is ever removed / replaced.
-    if hasattr(decisions_module._get_material_store, "cache_clear"):
-        decisions_module._get_material_store.cache_clear()
+    # Defence in depth: reset the singleton cache before patching.
+    # Unconditional on purpose (msg-326 M3): the precondition this used to
+    # guard with ``hasattr`` -- production keeping its lru_cache decorator
+    # -- is already pinned by ``test_get_material_store_is_lru_cached`` ∴ a
+    # guard here is a second copy whose only effect is to turn a broken
+    # premise into silence. Louder beats silent: if the decorator ever goes,
+    # every unit test fails with AttributeError instead of nothing happening.
+    _REAL_GET_MATERIAL_STORE.cache_clear()
 
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -113,9 +133,14 @@ def isolated_material_store(monkeypatch) -> Callable[[], DecisionMaterialStore]:
             # OS temp reaper rather than failing the run.
             pass
 
-    # Clear again after teardown: monkeypatch restores the original
-    # function object, and any state it accreted during this test's
-    # non-patched code paths (rare, but possible for tests that spawn
-    # subprocesses or bypass the module attribute) must not leak.
-    if hasattr(decisions_module._get_material_store, "cache_clear"):
-        decisions_module._get_material_store.cache_clear()
+    # Clear again on the way out, so state the real function accreted via
+    # code paths that bypass the module attribute does not leak forward.
+    #
+    # Measured, not assumed (msg-326 §1): at THIS point monkeypatch has not
+    # undone anything yet. This fixture takes ``monkeypatch`` as an argument
+    # ∴ monkeypatch is set up first and torn down last (LIFO), so
+    # ``decisions_module._get_material_store`` is still the lambda stub
+    # here. Reading the module attribute would find a stub with no
+    # ``cache_clear`` -- which is exactly the silent no-op this line used to
+    # be. Clear the reference captured at import time instead.
+    _REAL_GET_MATERIAL_STORE.cache_clear()

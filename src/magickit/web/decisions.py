@@ -154,8 +154,11 @@ def _get_material_store() -> DecisionMaterialStore:
     Tests patch this function whole (``monkeypatch.setattr(decisions_module,
     "_get_material_store", lambda: store)`` in ``tests/unit/conftest.py``)
     ∴ the cache on the original is inert while patched. ``conftest`` also
-    calls ``_get_material_store.cache_clear()`` defensively at teardown for
-    any code path that reaches the real function.
+    clears the cache defensively **both before patching and after the test**,
+    in each case against the reference it captured at import time
+    (``_REAL_GET_MATERIAL_STORE``) rather than against this module's
+    attribute -- at teardown the attribute is still the test's stub, so
+    going through it would clear nothing.
     """
     settings = get_settings()
     return DecisionMaterialStore(db_path=settings.db_path)
