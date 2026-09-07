@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -19,12 +21,192 @@ import pytest
 
 from magickit.config import Settings
 from magickit.main import create_app
-from magickit.web import ops
+from magickit.web import deps, ops
 from magickit.web.deps import humanize_age, parse_ts
 from tests.route_table import route_table
 
 NOW = datetime(2026, 8, 10, 16, 0, 0, tzinfo=timezone.utc)
 STALL = 30 * 60
+
+
+# ---------------------------------------------------------------------------
+# The recording clock.
+#
+# There are two clocks in this file if the production side reads the wall:
+# a ``NOW`` literal that the fixtures anchor to, and ``datetime.now(...)``
+# inside ``magickit.web.ops.collect`` (line 362, hit by every HTTP route
+# below) and ``magickit.web.deps.age_seconds`` (line 62, reached through the
+# ``|ago`` filter in ``partials/ops_table.html``). Fresh CI stayed green for
+# exactly as long as both clocks happened to agree; ``test_board.py`` was
+# the same fault in the same shape (see msg-343 §1). The fix is to move
+# ownership of both production reads to this file so a wall-clock shift
+# cannot change what an assertion sees.
+#
+# The clock is a recorder rather than an exception-thrower: we want to know
+# *whether* the seam was read, not to shatter tests that happen to swallow
+# exceptions. Every read is stamped with the caller's ``file:line`` -- so
+# the fixture's teardown can verify both that a test listed as "reaches"
+# actually reached it (guards against a decoy patch) and that no unlisted
+# test did (guards against a hidden time dependency, the way 9 tests in
+# ``test_board.py`` sat quietly on the same seam until the 10th failed).
+#
+# The check runs **per test, in the fixture teardown** -- not as a
+# module-wide aggregator test that reads a shared dict. A module-wide
+# aggregator would trivially pass whenever pytest reordered it to run
+# first (``pytest-randomly``, subset execution, ``pytest-xdist`` slicing)
+# because the shared dict would be empty. Every test carries its own
+# verdict; the module-wide guarantee comes from every teardown holding.
+#
+# ``monkeypatch.setattr`` on the module's ``datetime`` reference is used
+# rather than ``unittest.mock.patch`` on ``.now``: the latter injects
+# ``unittest/mock.py`` frames between the production call site and this
+# recorder, and skipping them here just to work around a needless indirection
+# is exactly the "列挙して潰す" shape msg-422 argues against.
+
+_CLOCK_READS: list[tuple[str, int]] = []
+
+
+class _RecordingClock(datetime):
+    """``datetime`` whose ``now()`` returns :data:`NOW` and records the caller.
+
+    Subclassing ``datetime`` matters because the monkeypatch rebinds
+    ``magickit.web.ops.datetime`` and ``magickit.web.deps.datetime`` to
+    this class. Any ``isinstance(x, datetime)`` in patched-scope
+    production code (e.g. ``deps.parse_ts`` at ``deps.py:37``) therefore
+    reads as ``isinstance(x, _RecordingClock)`` -- so ``x`` must actually
+    be an instance of this class for the check to hold. Two paths make
+    that true:
+
+    - **Inherited classmethods**. ``_RecordingClock.fromisoformat(text)``
+      returns a ``_RecordingClock`` instance, not a bare ``datetime``;
+      any value that flows in as an ISO string and is parsed under the
+      patched name comes out as this class.
+    - **``.now()`` return type**. ``datetime.astimezone`` returns a
+      *bare* ``datetime`` even when called on a subclass instance, so
+      ``NOW.astimezone(tz)`` alone would give production code a plain
+      ``datetime`` -- and a plain ``datetime`` is not an instance of a
+      subclass. The result is rebuilt via ``cls(...)`` below so the
+      returned object is a ``_RecordingClock``, and downstream
+      ``isinstance`` checks against the patched name stay true.
+
+    Naive calls (``tz=None``) are rejected loudly. Every production
+    reader in this file's patched scope calls
+    ``datetime.now(timezone.utc)``, and a new reader that drops the
+    timezone is a design violation whether it would break in tests or
+    not: on the standard-library contract, a naive ``now()`` returns
+    *local* time, which is host-timezone dependent, so silently
+    emulating stdlib semantics would reintroduce the wall-clock
+    non-determinism this file exists to remove. Silently returning UTC
+    as naive would be non-standard and could feed wrong values to
+    production code that expected local time. Failing loud puts the
+    choice at the call site rather than in a mock's opinion.
+    """
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        if tz is None:
+            raise AssertionError(
+                "naive datetime.now() is not allowed under the recording "
+                "clock in test_ops_view.py: this module's patched scope "
+                "(magickit.web.ops, magickit.web.deps) always calls with "
+                "tz=timezone.utc, and a new naive read is either a "
+                "production regression (drop timezone-awareness) or a "
+                "call that reaches the wrong module. See _RecordingClock."
+            )
+        frame = sys._getframe(1)
+        _CLOCK_READS.append((frame.f_code.co_filename, frame.f_lineno))
+        # ``NOW.astimezone(tz)`` returns a bare ``datetime`` -- see the
+        # docstring. Rebuild as ``cls`` so production code that stores or
+        # forwards the value keeps ``isinstance(x, datetime) is True`` when
+        # ``datetime`` is bound to the patched (subclass) reference.
+        aware = NOW.astimezone(tz)
+        return cls(
+            aware.year, aware.month, aware.day,
+            aware.hour, aware.minute, aware.second, aware.microsecond,
+            tzinfo=aware.tzinfo,
+            fold=aware.fold,
+        )
+
+
+#: Tests that must reach the production wall-clock seam at least once. A
+#: test not listed here must reach it zero times. Base names only -- the
+#: teardown strips the ``[param]`` suffix that ``pytest.mark.parametrize``
+#: appends to ``request.node.name`` by reading ``request.node.originalname``.
+#: Declared BEFORE the run so a mismatch is a finding rather than a
+#: self-fulfilling classification (msg-420 §3).
+_REACHES_PRODUCTION_SEAM: frozenset[str] = frozenset(
+    {
+        # `_get` -> GET /dashboard/_ops -> collect(get_settings()) with no
+        # `now=`, so `magickit.web.ops:362` reads. Some also render row
+        # timestamps, which reach `magickit.web.deps:62` through `|ago`.
+        "test_fragment_renders_the_state_and_the_elapsed_time",
+        "test_project_name_is_escaped",
+        "test_outage_notice_does_not_read_as_a_verdict",
+        "test_labels_match_headers",
+        "test_table_opts_into_stacking",
+        "test_the_digest_is_escaped_in_the_rendered_page",
+        # `_post_control` -> POST .../control -> collect(settings) after the
+        # write, same read.
+        "test_control_button_sets_desired_and_records_the_actor",
+        "test_an_empty_actor_still_writes",
+        "test_control_post_returns_the_whole_table",
+        "test_a_rejected_control_write_renders_inside_the_table",
+        "test_a_control_write_that_raises_still_answers_with_the_page",
+        # The sanity test drives the seam on purpose.
+        "test_the_recording_clock_reports_the_production_module_as_caller",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _own_the_production_wall_clock(monkeypatch, request):
+    """Install :class:`_RecordingClock`, then enforce the per-test contract.
+
+    Both ``magickit.web.ops.datetime`` and ``magickit.web.deps.datetime`` are
+    patched -- a given test may only reach one, but patching both catches
+    a future edit that starts hitting the deps seam from a currently quiet
+    test. Reads accumulate in :data:`_CLOCK_READS`, which is cleared before
+    yield and inspected on teardown.
+
+    The contract is enforced here, not in a separate module-level test,
+    because a separate test would be reorderable (``pytest-randomly``,
+    subset execution, ``pytest-xdist`` slicing) and would trivially pass
+    when moved ahead of the tests it summarises. In fixture teardown, each
+    test's own outcome depends only on its own observation, and the
+    module-wide guarantee is the AND of every teardown holding.
+
+    Parametrized tests are handled by reading ``request.node.originalname``
+    (the base name, without the ``[param]`` bracket), so
+    ``test_foo[a-1]`` and ``test_foo[a-2]`` are both matched against the
+    single entry ``test_foo`` in :data:`_REACHES_PRODUCTION_SEAM`.
+    """
+    monkeypatch.setattr(ops, "datetime", _RecordingClock)
+    monkeypatch.setattr(deps, "datetime", _RecordingClock)
+    _CLOCK_READS.clear()
+    yield
+    reads = list(_CLOCK_READS)
+    base_name = getattr(request.node, "originalname", None) or request.node.name
+    is_declared = base_name in _REACHES_PRODUCTION_SEAM
+
+    if is_declared and not reads:
+        pytest.fail(
+            f"reach proof: {base_name} is declared as reaching the "
+            f"production wall-clock seam, but observed zero reads. "
+            f"The patch on `magickit.web.ops.datetime` / "
+            f"`magickit.web.deps.datetime` is a decoy, the seam has moved "
+            f"out from under this file, or the test now skips the code "
+            f"path that reads it."
+        )
+    if not is_declared and reads:
+        first_caller = reads[0]
+        pytest.fail(
+            f"reach proof: {base_name} is NOT declared as reaching the "
+            f"seam, but captured {len(reads)} read(s) (first: "
+            f"{first_caller}). Either add it to _REACHES_PRODUCTION_SEAM "
+            f"(if the test is meant to hit the seam) or find why it now "
+            f"does. This is the shape of the 9 quiet-but-mined tests in "
+            f"test_board.py that were carrying an unknown time dependency."
+        )
 
 
 def _row(**kw) -> ops.ProjectOps:
@@ -381,7 +563,13 @@ async def test_fragment_renders_the_state_and_the_elapsed_time():
             "configured": True,
             "observed_state": "run",
             "observed_actor": "mindwire-conductor",
-            "observed_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            # NOW rather than ``datetime.now(timezone.utc)``: with the
+            # production seam pinned to :data:`NOW` by the module fixture,
+            # a real-time offset here would race the pin -- ``idle_seconds``
+            # would be measured between two different clocks and this test
+            # would swing between "2時間" and "たった今" as the wall drifted
+            # against the literal.
+            "observed_at": (NOW - timedelta(hours=2)).isoformat(),
         },
     )
 
@@ -782,3 +970,67 @@ async def test_the_digest_is_escaped_in_the_rendered_page():
     assert response.status_code == 200
     assert "<script>alert(1)</script>" not in response.text
     assert "&lt;script&gt;" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Recording-clock support tests.
+#
+# The per-test reach contract is enforced by the autouse fixture teardown
+# above -- one verdict per test, order-independent, parametrize-safe,
+# ``pytest-xdist``-safe. What remains for module-level tests is:
+#
+# 1. **Sanity**: the recorder itself reports the production caller, not
+#    the test file and not a mock frame. Without this, a broken recorder
+#    could feed the teardown any story it liked.
+# 2. **Declaration hygiene**: every name in :data:`_REACHES_PRODUCTION_SEAM`
+#    is a real test function in the module. This catches typos and stale
+#    entries that the per-test check cannot see (a phantom name is
+#    never scheduled, so no teardown ever fires on it).
+
+
+@pytest.mark.asyncio
+async def test_the_recording_clock_reports_the_production_module_as_caller():
+    """When the seam is called from ``ops.collect``, the recorder must
+    report ``magickit/web/ops.py`` as the caller -- not this test file, not
+    ``unittest/mock.py``. Without this bare-metal check, the per-test
+    reach contract can be satisfied by any decoy that happens to increment
+    the counter."""
+    with patch.object(
+        ops, "ChatroomAdapter", return_value=_adapter(httpx.ConnectError("sanity"))
+    ):
+        await ops.collect(Settings())  # no `now=`; the seam is exercised.
+
+    assert _CLOCK_READS, "the recording clock captured no reads at all"
+
+    # Component-wise suffix on a POSIX-normalized, repo-root-relative path
+    # -- raw `==` would fail on CI's `/app/src/magickit/web/ops.py` vs local
+    # `C:\\...\\ops.py`, and a raw string `.endswith` would falsely match
+    # `.../vendor/other/web/ops.py`. See rev.6 §2.
+    caller_file, _line = _CLOCK_READS[0]
+    parts = Path(caller_file).resolve().parts
+    assert parts[-3:] == ("magickit", "web", "ops.py"), (
+        f"expected recorder caller under magickit/web/ops.py, got {parts[-3:]}"
+    )
+
+
+def test_the_reach_declaration_names_only_real_tests():
+    """Every name in :data:`_REACHES_PRODUCTION_SEAM` must correspond to a
+    test function in this module.
+
+    Order-independent: it inspects module globals only, not
+    :data:`_CLOCK_READS`, so ``pytest-randomly`` / subset selection /
+    ``pytest-xdist`` cannot make it trivially pass. What it catches --
+    typos and stale entries -- the per-test teardown check cannot: a
+    phantom name is never scheduled, and no teardown fires for a test
+    that does not exist.
+    """
+    module_test_names = {
+        name
+        for name, obj in globals().items()
+        if name.startswith("test_") and callable(obj)
+    }
+    unknown = _REACHES_PRODUCTION_SEAM - module_test_names
+    assert not unknown, (
+        f"declared reach names are not test functions in this module "
+        f"(typo, moved test, or stale entry): {sorted(unknown)}"
+    )
