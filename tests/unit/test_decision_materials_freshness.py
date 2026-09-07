@@ -70,7 +70,7 @@ def _parked_thread_payload(
     ``last_msg_id=None, include_last=False`` produces a thread rollup with
     the field missing (the fail-to-stale case, spec §3.2).
     """
-    thread: dict[str, Any] = {"title": "T-judgement"}
+    thread: dict[str, Any] = {"title": "T-judgement", "status": "active"}
     if include_last:
         thread["last_msg_id"] = last_msg_id
     return {
