@@ -290,6 +290,7 @@ def _package_sources() -> list[Path]:
     )
     return sources
 
+
 # The ten rows of Bohr msg-558 §2, kept as fixtures so this guard cannot
 # silently regress into the shape of the one it replaced. C1/C2 are the
 # controls the old scans did catch; V1-V8 are the ones they did not.
