@@ -33,15 +33,27 @@ logger = get_logger(__name__)
 
 RUNNER_MEMORY_MAX = os.environ.get("MAGICKIT_DEPLOY_RUNNER_MEMORY_MAX", "1G")
 
-#: systemd-run --user needs to find the user manager. A system unit does
-#: not get these in its environment, so they are supplied explicitly
-#: rather than inherited.
-_USER_BUS_ENV = {
-    "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
-    "DBUS_SESSION_BUS_ADDRESS": os.environ.get(
-        "DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus"
-    ),
-}
+
+def _user_bus_env() -> dict[str, str]:
+    """The env systemd-run --user needs to find the user manager.
+
+    A system unit does not get these in its environment, so they are
+    supplied explicitly rather than inherited.
+
+    Evaluated at call time -- not as a module-scope dict literal -- for
+    the same reason ``fcntl`` in :mod:`magickit.deploy.records` is
+    imported lazily: ``os.getuid`` is POSIX-only, and calling it while
+    the module was being imported killed every non-POSIX collection
+    (`board` -> `records` transitively pulls this file in, so
+    ``deploy.launcher`` also has to load anywhere). The runtime call
+    still needs POSIX; the import does not.
+    """
+    return {
+        "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
+        "DBUS_SESSION_BUS_ADDRESS": os.environ.get(
+            "DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus"
+        ),
+    }
 
 
 def unit_name(request_id: str) -> str:
@@ -55,7 +67,7 @@ def launch(request_id: str) -> tuple[bool, str]:
 
     unit = unit_name(request_id)
     root = magickit_root()
-    env = {**os.environ, **_USER_BUS_ENV}
+    env = {**os.environ, **_user_bus_env()}
 
     argv = [
         "systemd-run",

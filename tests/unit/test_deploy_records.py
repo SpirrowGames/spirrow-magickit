@@ -23,6 +23,8 @@ from magickit.deploy.records import (
     DeployStore,
 )
 
+from ._deploy_marks import requires_real_flock
+
 
 @pytest.fixture
 def store(tmp_path) -> DeployStore:
@@ -158,6 +160,7 @@ _HOLDER = textwrap.dedent(
 )
 
 
+@requires_real_flock
 def test_a_second_process_cannot_deploy_the_same_target(store, tmp_path):
     src = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src")
     script = tmp_path / "holder.py"
@@ -177,12 +180,14 @@ def test_a_second_process_cannot_deploy_the_same_target(store, tmp_path):
         holder.wait(timeout=10)
 
 
+@requires_real_flock
 def test_a_different_target_is_not_blocked(store, tmp_path):
     with store.target_lock("spirrow-conclair"):
         with store.target_lock("something-else"):
             pass
 
 
+@requires_real_flock
 def test_the_lock_is_released_when_the_holder_dies(store, tmp_path):
     """Why "interrupted" needs no timeout: the kernel does the reaping."""
     src = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src")

@@ -25,6 +25,8 @@ import pytest
 
 from magickit.deploy import registry
 
+from ._deploy_marks import requires_posix_paths
+
 # ── the self-deploy refusal ──────────────────────────────────────
 
 
@@ -194,6 +196,7 @@ def test_every_target_declares_a_health_check_or_says_it_has_none():
         assert target.health_url is None or target.health_url.startswith("http")
 
 
+@requires_posix_paths
 def test_targets_are_absolute_paths_under_the_services_root():
     for name in registry.target_names():
         target = registry.resolve_target(name)

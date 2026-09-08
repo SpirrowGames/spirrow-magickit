@@ -18,6 +18,8 @@ holding are:
 
 from __future__ import annotations
 
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -35,6 +37,8 @@ from magickit.deploy.records import (
     DeployStore,
 )
 from magickit.deploy.registry import DeployTarget
+
+from ._deploy_marks import requires_real_flock, requires_symlink_atomic_replace
 
 NEW_SHA = "a" * 40
 OLD_SHA = "b" * 40
@@ -60,9 +64,32 @@ def store(tmp_path) -> DeployStore:
     return DeployStore(tmp_path / "state")
 
 
+def _stub_target_lock_on_non_posix(monkeypatch):
+    """Let the wiring-based tests run where fcntl.flock is not available.
+
+    ``runner.run`` opens ``store.target_lock`` unconditionally. On any
+    host without ``fcntl`` (Windows, most obviously) the real lock cannot
+    even be taken -- ``import fcntl`` raises -- so a test that only cares
+    about the *rest* of the runner would be dragged into skipping too.
+
+    The two tests that actually assert on the lock's behaviour (cross-
+    process refusal, and the reap-on-take path) are marked
+    ``requires_real_flock`` above, so they never see this stub.
+    """
+    if sys.platform != "win32":
+        return
+
+    @contextmanager
+    def _noop(self, target):
+        yield
+
+    monkeypatch.setattr(DeployStore, "target_lock", _noop)
+
+
 @pytest.fixture
 def wiring(monkeypatch, target):
     """Every seam, defaulted to a clean successful deploy."""
+    _stub_target_lock_on_non_posix(monkeypatch)
     monkeypatch.setattr(runner, "resolve_target", lambda name: target)
     monkeypatch.setattr(
         runner.pin_mod,
@@ -456,6 +483,7 @@ def release_target(tmp_path, monkeypatch, target):
     return converted
 
 
+@requires_symlink_atomic_replace
 def test_a_release_deploy_prepares_the_standby_and_leaves_the_live_one_alone(
     store, wiring, release_target, monkeypatch
 ):
@@ -472,6 +500,7 @@ def test_a_release_deploy_prepares_the_standby_and_leaves_the_live_one_alone(
     assert agent_target.repo_path == release_target.releases_root / "b"
 
 
+@requires_symlink_atomic_replace
 def test_previous_sha_is_what_was_serving_not_what_the_standby_held(
     store, wiring, release_target, monkeypatch
 ):
@@ -516,6 +545,7 @@ def test_an_in_place_target_still_reports_its_own_previous_head(store, wiring, t
     assert result.previous_sha == OLD_SHA
 
 
+@requires_symlink_atomic_replace
 def test_the_switch_happens_after_the_agent_and_before_the_restart(
     store, wiring, release_target
 ):
@@ -579,6 +609,7 @@ def test_a_broken_layout_stops_the_deploy_rather_than_guessing(
     wiring._restart.assert_not_called()
 
 
+@requires_symlink_atomic_replace
 def test_a_rollback_onto_an_already_correct_slot_skips_preparation(
     store, wiring, release_target, monkeypatch
 ):
@@ -741,6 +772,7 @@ def test_an_unexpected_crash_becomes_a_recorded_failure(store, wiring, monkeypat
 # ── R-9: concurrency ─────────────────────────────────────────────
 
 
+@requires_real_flock
 def test_a_second_deploy_of_the_same_target_is_refused_not_queued(store, wiring):
     request = _approved(store)
 
