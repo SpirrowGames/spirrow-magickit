@@ -17,6 +17,17 @@ import pytest
 from magickit.deploy import releases
 from magickit.deploy.releases import ReleaseLayoutError
 
+from ._deploy_marks import requires_symlink_atomic_replace
+
+# Every test here builds a working release layout with a real ``current``
+# symlink and then either reads it or replaces it with ``os.replace``.
+# On Windows the replace step raises PermissionError even with Developer
+# Mode enabled, and there is no equivalent user-space primitive; on any
+# POSIX host the whole file runs. The marker is on the file because the
+# division "which tests read vs which tests replace" is not the property
+# the tests are about -- the layout is.
+pytestmark = requires_symlink_atomic_replace
+
 
 @pytest.fixture
 def root(tmp_path):

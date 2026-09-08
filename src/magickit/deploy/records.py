@@ -34,7 +34,6 @@ process filing a request is able to write.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import uuid
@@ -352,7 +351,20 @@ class DeployStore:
         finishes minutes later against a tree the first deploy moved,
         and the caller has long since been told "running". Refusing is
         the honest answer.
+
+        ``fcntl`` is imported here rather than at module top on purpose.
+        The mechanism is POSIX-only (Windows has no ``flock`` and any
+        shim is a no-op that silently drops the mutual exclusion), so
+        pulling it into module scope made ``import magickit.deploy.records``
+        die on non-POSIX hosts before a single test could collect --
+        and every test that imports :mod:`magickit.web` transitively
+        imports this file. Deferring the import to the one call that
+        actually uses it lets the module load anywhere; the failure, if
+        POSIX is missing, arrives at the call site where the caller
+        can see what they asked for.
         """
+        import fcntl
+
         self._ensure()
         path = self.locks_dir / f"{target}.lock"
         fh = path.open("a+")
