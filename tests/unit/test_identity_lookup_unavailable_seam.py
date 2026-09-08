@@ -40,8 +40,10 @@ I-U-3: The transport-failure branch of ``_lookup_identity`` never carries
 I-U-4: No code outside the ``_IdentityLookup`` class body reads the raw
   ``unavailable_reason`` field at all -- consumers branch on
   ``is_unavailable`` and take the string from ``reason_or_raise()``.
-  Enforced by parsing the two consumer files and rejecting every
-  ``ast.Attribute`` read of the field outside the class's own subtree.
+  Enforced by parsing every module under ``src/magickit`` and rejecting
+  every ``ast.Attribute`` read of the field outside the class's own
+  subtree -- the package, not a list of files known to consume it, so
+  that a new consumer file cannot quietly fall outside the guard.
   It is one rule with no exception list, which is the entire reason the
   property earns its place: see ``test_no_consumer_reads_the_raw_...``.
   Falsified by any spelling of a raw read, however punctuated -- the
@@ -50,10 +52,14 @@ I-U-4: No code outside the ``_IdentityLookup`` class body reads the raw
 
 I-U-5: ``_IdentityLookup`` is constructed at exactly three places -- the
   ``_LOOKUP_UNREGISTERED`` singleton, ``_lookup_unusable``, and the
-  success path of ``_lookup_identity``. Falsified by a fourth site,
-  which is how an un-normalised (possibly empty) reason would get back
-  in past I-U-2. This one is what makes msg-319's "an empty reason is
-  no longer constructible" a checked fact rather than a convention.
+  success path of ``_lookup_identity``. Falsified by a fourth site
+  anywhere in the package, *including a second one inside a scope that
+  is already allowed*: the three are counted, not merely permitted,
+  because naming a scope should license the one construction that was
+  audited, not every future construction added beside it. A fourth is
+  how an un-normalised (possibly empty) reason gets back in past
+  I-U-2, which is what makes msg-319's "an empty reason is no longer
+  constructible" a checked fact rather than a convention.
 """
 
 from __future__ import annotations
@@ -240,10 +246,49 @@ async def test_transport_failure_with_real_message_preserves_it() -> None:
 # rather than an ``Attribute``, so the scan needs no comment-stripping
 # heuristics to stay off this module's own prose.
 
-CONSUMER_FILES = (
-    Path("src") / "magickit" / "mcp" / "tools" / "chatroom.py",
-    Path("src") / "magickit" / "web" / "decisions.py",
-)
+# Both guards below scan the whole package rather than a list of files
+# known to consume the seam. An enumerated list is the same mistake one
+# level up from the spelling-shaped scan this replaced: an *exclusion*
+# list grows visibly when someone adds an exception, but an *inclusion*
+# list silently loses coverage when someone adds a file, and nothing goes
+# RED to say so.
+#
+# That is not hypothetical here. Five modules import ``mcp.tools.chatroom``
+# (``main.py``, ``mcp_server.py``, ``web/chatroom_dashboard.py``,
+# ``web/chatroom_writes.py``, ``web/decisions.py``) and the two-file list
+# reached exactly one of them; consumer #2 was itself born this way, with
+# ``web/decisions.py:397`` reaching across modules for the module-private
+# ``chatroom_tools._lookup_identity``. Growth in files -- 4 consumers in 1
+# file, then 6 in 2 -- is the observation that opened this thread
+# (msg-245 §3), so the guard must not be indexed by the file count it was
+# written against. Widening costs nothing: 86 files, zero offenders.
+#
+# ``tests/`` is deliberately excluded. The invariant is that *production*
+# code never reads the raw field; the tests in this very module read it
+# ten times on purpose, to characterise it. Scanning them would
+# manufacture false positives, not find defects.
+PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "magickit"
+
+
+def _package_sources() -> list[Path]:
+    """Every production module in the package, in a stable order.
+
+    The emptiness check is not paranoia about ``rglob``. Both guards below
+    assert that a scan found no offenders, so a scan that silently covers
+    nothing passes for a clean one -- which is the same "coverage quietly
+    went to zero" failure that scanning a hardcoded file list had, just
+    reached by a wrong path instead of a stale list. Fail loudly instead.
+    """
+    sources = sorted(PACKAGE_ROOT.rglob("*.py"))
+    assert sources, (
+        f"found no modules under {PACKAGE_ROOT} -- the guards below would "
+        "then pass by scanning nothing at all"
+    )
+    assert PACKAGE_ROOT / "mcp" / "tools" / "chatroom.py" in sources, (
+        "the module that defines `_IdentityLookup` must itself be in the "
+        f"scanned set, but {PACKAGE_ROOT} did not yield it"
+    )
+    return sources
 
 # The ten rows of Bohr msg-558 §2, kept as fixtures so this guard cannot
 # silently regress into the shape of the one it replaced. C1/C2 are the
@@ -312,12 +357,11 @@ def test_no_consumer_reads_the_raw_unavailable_reason_field() -> None:
     becomes unconditionally wrong, and "unconditionally wrong" is a rule a
     machine can check without an exception list (Bohr msg-558 §3.2(iii)).
     """
-    repo_root = Path(__file__).resolve().parents[2]
     offenders = []
-    for rel in CONSUMER_FILES:
-        path = repo_root / rel
+    for path in _package_sources():
+        rel = path.relative_to(PACKAGE_ROOT).as_posix()
         for lineno in _raw_field_reads(path.read_text(encoding="utf-8")):
-            offenders.append(f"{rel.name}:{lineno}")
+            offenders.append(f"{rel}:{lineno}")
 
     assert not offenders, (
         "Outside `_IdentityLookup` itself, `unavailable_reason` must never "
@@ -367,6 +411,22 @@ def test_the_guard_does_not_fire_on_the_legitimate_shapes() -> None:
 # ---- I-U-5: the normalising constructor is the only way in ------------
 
 
+def _names_the_type(func: ast.expr) -> bool:
+    """Whether a call target names ``_IdentityLookup``, bare or qualified.
+
+    Both forms have to count. Inside ``chatroom.py`` the constructor is a
+    bare ``ast.Name``, but every other module reaches it through the module
+    object -- ``chatroom_tools._IdentityLookup(...)``, an ``ast.Attribute``
+    -- which is exactly the shape ``web/decisions.py`` already uses to call
+    ``chatroom_tools._lookup_identity``. A Name-only rule would therefore
+    have gone GREEN on the very form a second file is most likely to write
+    (Bohr msg-565 §4-Q3).
+    """
+    if isinstance(func, ast.Name):
+        return func.id == "_IdentityLookup"
+    return isinstance(func, ast.Attribute) and func.attr == "_IdentityLookup"
+
+
 def _construction_sites(source: str) -> list[tuple[int, str]]:
     """``(lineno, enclosing scope)`` for each direct ``_IdentityLookup(...)``
     call. Scope is the innermost enclosing function name, or ``"<module>"``.
@@ -379,11 +439,7 @@ def _construction_sites(source: str) -> list[tuple[int, str]]:
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 walk(child, child.name)
                 continue
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id == "_IdentityLookup"
-            ):
+            if isinstance(child, ast.Call) and _names_the_type(child.func):
                 sites.append((child.lineno, scope))
             walk(child, scope)
 
@@ -405,19 +461,21 @@ def test_only_the_normalising_helper_constructs_an_unavailable_lookup() -> None:
     Three construction sites are legitimate: the module-level
     ``_LOOKUP_UNREGISTERED`` singleton (reason ``None``), ``_lookup_unusable``
     (which normalises), and the success path in ``_lookup_identity``
-    (reason ``None``). A fourth is an offender.
+    (reason ``None``). Each is allowed exactly once, so a second
+    construction added inside one of those functions fails too -- an
+    allow-list of scope names would otherwise wave through any number
+    of later constructions that happen to sit in the right function.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    allowed_scopes = {"_lookup_unusable", "_lookup_identity"}
-    offenders = []
-    module_level = []
-    for rel in CONSUMER_FILES:
-        path = repo_root / rel
+    expected_scopes = ("<module>", "_lookup_unusable", "_lookup_identity")
+    offenders: list[str] = []
+    found: dict[str, list[str]] = {scope: [] for scope in expected_scopes}
+    for path in _package_sources():
+        rel = path.relative_to(PACKAGE_ROOT).as_posix()
         for lineno, scope in _construction_sites(path.read_text(encoding="utf-8")):
-            if scope == "<module>":
-                module_level.append(f"{rel.name}:{lineno}")
-            elif scope not in allowed_scopes:
-                offenders.append(f"{rel.name}:{lineno} in {scope}()")
+            if scope in found:
+                found[scope].append(f"{rel}:{lineno}")
+            else:
+                offenders.append(f"{rel}:{lineno} in {scope}()")
 
     assert not offenders, (
         "`_IdentityLookup(...)` must not be constructed directly: an "
@@ -425,10 +483,13 @@ def test_only_the_normalising_helper_constructs_an_unavailable_lookup() -> None:
         "normalises the reason to a non-empty string (msg-245 §5 DoD). "
         "Offending sites:\n  " + "\n  ".join(offenders)
     )
-    assert len(module_level) == 1, (
-        "expected exactly one module-level construction (the "
-        f"`_LOOKUP_UNREGISTERED` singleton), found {module_level}"
-    )
+    for scope in expected_scopes:
+        assert len(found[scope]) == 1, (
+            f"expected exactly one `_IdentityLookup(...)` construction in "
+            f"{scope}, found {len(found[scope])}: {found[scope]}. Naming a "
+            "scope permits the one construction it was audited for, not "
+            "every future construction someone adds beside it."
+        )
     assert chatroom_tools._LOOKUP_UNREGISTERED.unavailable_reason is None, (
         "the module-level singleton must be the confirmed-unregistered "
         "verdict, not an unavailable one"
