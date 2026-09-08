@@ -703,13 +703,19 @@ class _IdentityLookup(NamedTuple):
     read it as "unregistered, skip the check" (I-3 / I-9), so a shape that
     merely fails to say "yes" must not land here -- see ``_lookup_identity``.
 
-    Consumers must branch on ``is_unavailable`` -- never on the truthiness of
-    ``unavailable_reason``. See the property below for why the distinction is
-    load-bearing (T-unavailable-reason-empty-diagnostic msg-245 / Einstein
-    msg-246): the *reason string* is a diagnostic payload, not a state flag,
-    so a consumer that read ``if lookup.unavailable_reason:`` would treat a
-    hypothetically empty string as "lookup was usable" and turn the gate
-    fail-open. The boolean below is the one, typed source of truth.
+    Consumers branch on ``is_unavailable`` and take the reason string from
+    ``reason_or_raise()``. Outside this class body, ``unavailable_reason``
+    must not be read at all -- which is a checked rule, not a convention:
+    ``test_no_consumer_reads_the_raw_unavailable_reason_field`` (in
+    ``tests/unit/test_identity_lookup_unavailable_seam.py``) parses this
+    file and ``web/decisions.py`` and rejects every such read.
+
+    The rule is "never read the raw field" rather than "never use
+    truthiness" because only the former is decidable. Once a consumer may
+    legitimately bind the reason to a local, a later ``if r:`` on that
+    local is indistinguishable from correct diagnostic handling without
+    tracking dataflow (T-unavailable-reason-empty-diagnostic msg-245 §3,
+    Bohr msg-558 §3.2(iii)).
     """
 
     unavailable_reason: str | None
@@ -720,35 +726,49 @@ class _IdentityLookup(NamedTuple):
     def is_unavailable(self) -> bool:
         """True iff the lookup produced no usable verdict.
 
-        This is the ONLY predicate any consumer should branch on to decide
-        "usable or not". It exists as a named property, rather than being
-        recomputed at each call site as ``unavailable_reason is not None``,
-        because the previous shape depended on six independent consumers
-        (five in this module, one in ``web/decisions.py``) all remembering
-        to write the exact ``is not None`` idiom. As soon as one of them
-        drifted to ``if lookup.unavailable_reason:`` (which is what a code
-        reviewer might well suggest as "more Pythonic"), an empty reason
-        string -- reachable historically from a message-less transport
-        exception, see ``_lookup_identity`` -- would silently be read as
-        "usable" and the gate would fail *open*. Exposing the intent as a
-        typed boolean makes that misreading structurally impossible: there
-        is no truthiness axis on ``bool`` that ``if`` reads differently
-        from ``is True``, and the docstring the consumer sees names the
-        semantics rather than the encoding.
+        The ONLY predicate a consumer should branch on. Together with
+        ``reason_or_raise()`` it means no consumer ever needs to touch
+        ``unavailable_reason``, and that is what makes the seam
+        machine-checkable: "the raw field is never read outside this
+        class" is one rule with no exception list, enforced by
+        ``test_no_consumer_reads_the_raw_unavailable_reason_field``.
+
+        This property does NOT make a misread structurally impossible. An
+        earlier version of this docstring said it did, and that was false:
+        ``unavailable_reason`` is a public field on a public NamedTuple,
+        every consumer can still reach it, and nothing in the type system
+        prevents it. The named test is the only thing that prevents it,
+        which is why it is named here instead of left implicit (msg-319
+        objection ①, sustained in Bohr msg-558 §2 after measuring that the
+        line-oriented guard this replaced missed eight of ten forms).
+
+        The original fail-open motivation is also no longer live. Because
+        ``_lookup_unusable`` normalises the reason, the reachable values
+        are ``None`` or a non-empty string, so a truthiness slip would
+        today agree with ``is not None`` on every reachable value -- the
+        naysayer was right about that (msg-558 §3.1). What justifies the
+        property now is decidability, not fail-open avoidance.
         """
         return self.unavailable_reason is not None
 
     def reason_or_raise(self) -> str:
         """Return the non-empty diagnostic string for the "unavailable" case.
 
-        Companion to ``is_unavailable``: consumers that have just branched on
-        ``is_unavailable`` need to hand the reason string to an error-envelope
-        constructor typed ``reason: str``. Reading ``unavailable_reason``
-        directly would leave the type as ``str | None`` (the property is not
-        a static type-narrower), and ``_lookup_unusable`` already normalises
-        the stored value to non-empty, so this method exists to make that
-        invariant a single assertion at one place rather than a defensive
-        ``or ""`` repeated at every call site.
+        The only legal way for a consumer to obtain the reason, and that is
+        the whole justification: consumers are forbidden from reading
+        ``unavailable_reason`` directly (see ``is_unavailable``), so the
+        design that forbids the field owes them an accessor in its place.
+
+        An earlier version of this docstring justified the method as saving
+        a defensive ``or ""`` at each call site. That was wrong, and it is
+        recorded rather than quietly deleted because it was load-bearing in
+        review. Writing ``lookup.unavailable_reason is not None`` narrows
+        ``str | None`` to ``str`` on its own, so under that idiom no
+        ``or ""`` was ever needed. Measured on this file: the ``is not
+        None`` form type-checks with 2 pre-existing errors and no new ones,
+        while branching on the property and then reading the field directly
+        adds three ``arg-type`` errors. This method pays back exactly the
+        narrowing the property costs, no more (Bohr msg-558 §3.1(3)).
 
         Raises ``AssertionError`` if invoked on a usable verdict. That is a
         programming error -- the property must be checked first -- and never

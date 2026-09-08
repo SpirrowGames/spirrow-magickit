@@ -37,20 +37,28 @@ I-U-3: The transport-failure branch of ``_lookup_identity`` never carries
   merely a placeholder from the constructor rather than the exception's
   type name.
 
-I-U-4: Every consumer that used to read
-  ``lookup.unavailable_reason is not None`` now reads ``lookup.is_unavailable``.
-  This is enforced not by six behavioural tests but by a source-level
-  scan -- one test that greps the two files where the consumers live and
-  fails RED if the legacy ``is not None`` idiom returns. Reason: the
-  behaviour is already covered by ``test_role_gate`` / ``test_next_participant_gate``
-  / ``test_decisions_form_radio_and_target`` in aggregate; the new
-  invariant is *how* the branch is written, and Einstein msg-246
-  specifically warned against locking in the shape with six per-site
-  behavioural pins.
+I-U-4: No code outside the ``_IdentityLookup`` class body reads the raw
+  ``unavailable_reason`` field at all -- consumers branch on
+  ``is_unavailable`` and take the string from ``reason_or_raise()``.
+  Enforced by parsing the two consumer files and rejecting every
+  ``ast.Attribute`` read of the field outside the class's own subtree.
+  It is one rule with no exception list, which is the entire reason the
+  property earns its place: see ``test_no_consumer_reads_the_raw_...``.
+  Falsified by any spelling of a raw read, however punctuated -- the
+  ten forms of Bohr msg-558 §2 are pinned as fixtures so the guard
+  cannot decay back into matching spellings.
+
+I-U-5: ``_IdentityLookup`` is constructed at exactly three places -- the
+  ``_LOOKUP_UNREGISTERED`` singleton, ``_lookup_unusable``, and the
+  success path of ``_lookup_identity``. Falsified by a fourth site,
+  which is how an un-normalised (possibly empty) reason would get back
+  in past I-U-2. This one is what makes msg-319's "an empty reason is
+  no longer constructible" a checked fact rather than a convention.
 """
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -212,88 +220,218 @@ async def test_transport_failure_with_real_message_preserves_it() -> None:
     assert lookup.unavailable_reason == "connection refused"
 
 
-# ---- I-U-4: no consumer reads unavailable_reason via `is not None` -----
+# ---- I-U-4: no consumer reads the raw field outside the class ---------
+#
+# One rule, not a catalogue of spellings: *nothing outside the
+# ``_IdentityLookup`` class body may read ``unavailable_reason`` at all.*
+# The pin this replaces was two line-oriented scans looking for
+# ``if ...unavailable_reason:`` and ``if ...unavailable_reason is not None:``.
+# Bohr msg-558 §2 measured them by mutating the consumer in
+# ``_check_next_participant`` into ten forms: both "plain" spellings were
+# caught and all eight realistic variations -- ``elif``, a trailing
+# comment, black's line wrapping, ``bool(...)``, a compound condition, a
+# local alias -- went GREEN. A guard shaped like the spellings someone
+# happened to think of is not a guard.
+#
+# Reading the field is the thing to forbid, and that is a property of the
+# syntax tree rather than of a line: ``ast.Attribute(attr="unavailable_reason")``
+# is the same node however the surrounding expression is punctuated or
+# wrapped, and prose in a docstring that names the field is a ``Constant``
+# rather than an ``Attribute``, so the scan needs no comment-stripping
+# heuristics to stay off this module's own prose.
+
+CONSUMER_FILES = (
+    Path("src") / "magickit" / "mcp" / "tools" / "chatroom.py",
+    Path("src") / "magickit" / "web" / "decisions.py",
+)
+
+# The ten rows of Bohr msg-558 §2, kept as fixtures so this guard cannot
+# silently regress into the shape of the one it replaced. C1/C2 are the
+# controls the old scans did catch; V1-V8 are the ones they did not.
+KNOWN_SLIP_FORMS = {
+    "C1 plain truthiness": "if lookup.unavailable_reason:\n    pass\n",
+    "C2 plain is-not-None": "if lookup.unavailable_reason is not None:\n    pass\n",
+    "V1 elif truthiness": (
+        "if False:\n    pass\nelif lookup.unavailable_reason:\n    pass\n"
+    ),
+    "V2 trailing comment": (
+        "if lookup.unavailable_reason:  # more Pythonic\n    pass\n"
+    ),
+    "V3 wrapped truthiness": "if (\n    lookup.unavailable_reason\n):\n    pass\n",
+    "V4 elif is-not-None": (
+        "if False:\n    pass\n"
+        "elif lookup.unavailable_reason is not None:\n    pass\n"
+    ),
+    "V5 wrapped is-not-None": (
+        "if (\n    lookup.unavailable_reason\n    is not None\n):\n    pass\n"
+    ),
+    "V6 compound condition": (
+        "if lookup.unavailable_reason and not lookup.found:\n    pass\n"
+    ),
+    "V7 bool() wrapper": "if bool(lookup.unavailable_reason):\n    pass\n",
+    "V8 local alias": "r = lookup.unavailable_reason\nif r:\n    pass\n",
+}
 
 
-def test_no_source_consumer_uses_the_legacy_is_not_none_idiom() -> None:
-    """Source-level pin (not behavioural): if any consumer of
-    ``_IdentityLookup`` reverts to ``lookup.unavailable_reason is not None``,
-    this test fails RED and the reviewer is pointed at the six-consumer
-    fail-open surface that motivated ``is_unavailable`` in the first place.
+def _raw_field_reads(source: str) -> list[int]:
+    """Line numbers of every read of the raw ``unavailable_reason`` field
+    that is not inside the ``_IdentityLookup`` class body.
 
-    Deliberately scoped to consumer files only -- the DEFINITION of
-    ``is_unavailable`` inside ``chatroom.py`` uses the ``is not None``
-    form (``return self.unavailable_reason is not None``), and that line
-    is legitimate: it is the ONE place the property is allowed to
-    reference the field's null-ness. The scan excludes the class body
-    by looking for ``lookup.unavailable_reason`` / ``.unavailable_reason``
-    patterns (call sites), not the bare field access inside the property.
+    The class body is exempt because that is where the field legitimately
+    lives: ``is_unavailable`` and ``reason_or_raise`` must read it, and
+    exposing it safely is what they are for. The exemption is by subtree
+    membership rather than by a ``self.`` prefix or a line range, so it
+    keeps holding if an accessor is renamed or added, or the class moves
+    within the file.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    files_to_scan = [
-        repo_root / "src" / "magickit" / "mcp" / "tools" / "chatroom.py",
-        repo_root / "src" / "magickit" / "web" / "decisions.py",
-    ]
-    offenders: list[str] = []
-    for path in files_to_scan:
-        text = path.read_text(encoding="utf-8")
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            stripped = line.strip()
-            # A CONSUMER read is characterised by ``if <name>.unavailable_reason
-            # is not None:`` -- the branch statement that used to guard every
-            # gate. The property body (``return self.unavailable_reason is not
-            # None``) is the ONE legitimate use of the ``is not None`` form and
-            # is not a branch statement, so restricting the scan to ``if``
-            # lines excludes it structurally rather than by name.
-            if (
-                stripped.startswith("if ")
-                and ".unavailable_reason is not None" in stripped
-            ):
-                offenders.append(f"{path.name}:{lineno}: {stripped}")
-
-    assert not offenders, (
-        "Consumers of _IdentityLookup must branch on `.is_unavailable`, "
-        "not on `.unavailable_reason is not None` -- the property is the "
-        "typed seam that structurally rules out a truthiness slip "
-        "(T-unavailable-reason-empty-diagnostic / Einstein msg-246). "
-        "Offending lines:\n  " + "\n  ".join(offenders)
+    tree = ast.parse(source)
+    exempt: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "_IdentityLookup":
+            exempt.update(id(child) for child in ast.walk(node))
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "unavailable_reason"
+        and id(node) not in exempt
     )
 
 
-def test_no_source_consumer_reads_reason_via_truthiness() -> None:
-    """The tighter form of the same pin: the ``if lookup.unavailable_reason:``
-    truthiness idiom -- the one Bohr msg-245 §3 specifically warned about
-    -- must not appear anywhere in the consumer files. If a reviewer
-    "cleans up" the ``is not None`` to a bare truthy check, this catches
-    them before the empty-string class becomes fail-open.
+def test_no_consumer_reads_the_raw_unavailable_reason_field() -> None:
+    """I-U-4. Consumers branch on ``is_unavailable`` and take the string
+    from ``reason_or_raise()``; neither reads the raw field outside the
+    class, so a clean tree scores zero offenders.
+
+    This is what makes ``is_unavailable`` load-bearing rather than
+    decorative, and the reason it survives msg-319's objection ② even
+    though that objection's own premise is correct. The property does not
+    make a truthiness misread *impossible* -- ``unavailable_reason`` is
+    still a public field on a public NamedTuple and any consumer can still
+    reach it. What it buys is that reading the field outside the class
+    becomes unconditionally wrong, and "unconditionally wrong" is a rule a
+    machine can check without an exception list (Bohr msg-558 §3.2(iii)).
     """
     repo_root = Path(__file__).resolve().parents[2]
-    files_to_scan = [
-        repo_root / "src" / "magickit" / "mcp" / "tools" / "chatroom.py",
-        repo_root / "src" / "magickit" / "web" / "decisions.py",
-    ]
-    offenders: list[str] = []
-    for path in files_to_scan:
-        text = path.read_text(encoding="utf-8")
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            stripped = line.strip()
-            if stripped.startswith("#") or stripped.startswith('"'):
-                continue
-            if "``" in stripped:
-                continue
-            # ``if <name>.unavailable_reason:`` or
-            # ``if not <name>.unavailable_reason:`` -- both are wrong.
-            if (
-                stripped.startswith("if ")
-                and stripped.endswith(".unavailable_reason:")
-            ):
-                offenders.append(f"{path.name}:{lineno}: {stripped}")
+    offenders = []
+    for rel in CONSUMER_FILES:
+        path = repo_root / rel
+        for lineno in _raw_field_reads(path.read_text(encoding="utf-8")):
+            offenders.append(f"{rel.name}:{lineno}")
 
     assert not offenders, (
-        "The truthiness idiom `if <lookup>.unavailable_reason:` reads an "
-        "empty reason as `usable` and turns the gate fail-open. Branch "
-        "on `.is_unavailable` instead. Offending lines:\n  "
-        + "\n  ".join(offenders)
+        "Outside `_IdentityLookup` itself, `unavailable_reason` must never "
+        "be read: branch on `.is_unavailable`, and take the string from "
+        "`.reason_or_raise()`. Reading the raw field is how a fail-closed "
+        "gate becomes fail-open (T-unavailable-reason-empty-diagnostic "
+        "msg-245 §3). Offending reads:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("form", sorted(KNOWN_SLIP_FORMS))
+def test_the_guard_detects_every_known_slip_form(form: str) -> None:
+    """The guard guarding the guard.
+
+    Every row of the msg-558 §2 table must be detected. Eight of these ten
+    were GREEN under the line-oriented scans this replaced, so if a future
+    change reintroduces a spelling-shaped guard, this goes RED and names
+    the spelling it stopped seeing.
+    """
+    assert _raw_field_reads(KNOWN_SLIP_FORMS[form]), (
+        f"{form} reads the raw field but the guard did not flag it -- the "
+        "rule has drifted back to matching spellings instead of reads"
+    )
+
+
+def test_the_guard_does_not_fire_on_the_legitimate_shapes() -> None:
+    """Negative control, so the test above cannot be satisfied by a guard
+    that simply flags everything.
+
+    Three things must stay silent: branching on the property, the class's
+    own accessor reading the field it exists to expose, and prose that
+    merely names the field.
+    """
+    assert _raw_field_reads("if lookup.is_unavailable:\n    pass\n") == []
+    assert _raw_field_reads('"""Prose naming unavailable_reason."""\n') == []
+    assert (
+        _raw_field_reads(
+            "class _IdentityLookup:\n"
+            "    @property\n"
+            "    def is_unavailable(self) -> bool:\n"
+            "        return self.unavailable_reason is not None\n"
+        )
+        == []
+    )
+
+
+# ---- I-U-5: the normalising constructor is the only way in ------------
+
+
+def _construction_sites(source: str) -> list[tuple[int, str]]:
+    """``(lineno, enclosing scope)`` for each direct ``_IdentityLookup(...)``
+    call. Scope is the innermost enclosing function name, or ``"<module>"``.
+    """
+    tree = ast.parse(source)
+    sites: list[tuple[int, str]] = []
+
+    def walk(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                walk(child, child.name)
+                continue
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "_IdentityLookup"
+            ):
+                sites.append((child.lineno, scope))
+            walk(child, scope)
+
+    walk(tree, "<module>")
+    return sites
+
+
+def test_only_the_normalising_helper_constructs_an_unavailable_lookup() -> None:
+    """I-U-5 (Bohr msg-558 §4 SHOULD).
+
+    msg-319 argued the consumer-side guard is unnecessary because an empty
+    reason is no longer constructible. That premise is true today, and this
+    test is what keeps it true. "Every unavailable lookup is built through
+    ``_lookup_unusable``" was itself an unguarded convention: nothing but a
+    docstring stopped a fourth site from writing
+    ``_IdentityLookup("", False, ())`` directly and restoring the empty
+    reason the normalisation removed.
+
+    Three construction sites are legitimate: the module-level
+    ``_LOOKUP_UNREGISTERED`` singleton (reason ``None``), ``_lookup_unusable``
+    (which normalises), and the success path in ``_lookup_identity``
+    (reason ``None``). A fourth is an offender.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    allowed_scopes = {"_lookup_unusable", "_lookup_identity"}
+    offenders = []
+    module_level = []
+    for rel in CONSUMER_FILES:
+        path = repo_root / rel
+        for lineno, scope in _construction_sites(path.read_text(encoding="utf-8")):
+            if scope == "<module>":
+                module_level.append(f"{rel.name}:{lineno}")
+            elif scope not in allowed_scopes:
+                offenders.append(f"{rel.name}:{lineno} in {scope}()")
+
+    assert not offenders, (
+        "`_IdentityLookup(...)` must not be constructed directly: an "
+        "unavailable verdict goes through `_lookup_unusable`, which "
+        "normalises the reason to a non-empty string (msg-245 §5 DoD). "
+        "Offending sites:\n  " + "\n  ".join(offenders)
+    )
+    assert len(module_level) == 1, (
+        "expected exactly one module-level construction (the "
+        f"`_LOOKUP_UNREGISTERED` singleton), found {module_level}"
+    )
+    assert chatroom_tools._LOOKUP_UNREGISTERED.unavailable_reason is None, (
+        "the module-level singleton must be the confirmed-unregistered "
+        "verdict, not an unavailable one"
     )
 
 
