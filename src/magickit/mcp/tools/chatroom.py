@@ -805,11 +805,100 @@ class _IdentityLookup(NamedTuple):
     ``found=False`` is only ever set from an answer that said so. Both gates
     read it as "unregistered, skip the check" (I-3 / I-9), so a shape that
     merely fails to say "yes" must not land here -- see ``_lookup_identity``.
+
+    Consumers branch on ``is_unavailable`` and take the reason string from
+    ``reason_or_raise()``. Outside this class body, ``unavailable_reason``
+    must not be read at all -- which is a checked rule, not a convention:
+    ``test_no_consumer_reads_the_raw_unavailable_reason_field`` (in
+    ``tests/unit/test_identity_lookup_unavailable_seam.py``) parses every
+    module in the ``magickit`` package and rejects every read of the field
+    spelled as an attribute. The scanned set is deliberately not
+    enumerated here: the first version of this sentence named the two
+    files the scan then covered, and the next commit widened the scan and
+    left the sentence describing a coverage that had ceased to exist.
+
+    The rule is "never read the raw field" rather than "never use
+    truthiness" because only the former is decidable. Once a consumer may
+    legitimately bind the reason to a local, a later ``if r:`` on that
+    local is indistinguishable from correct diagnostic handling without
+    tracking dataflow (T-unavailable-reason-empty-diagnostic msg-245 §3,
+    Bohr msg-558 §3.2(iii)).
     """
 
     unavailable_reason: str | None
     found: bool
     allowed_roles: tuple[str, ...]
+
+    @property
+    def is_unavailable(self) -> bool:
+        """True iff the lookup produced no usable verdict.
+
+        The ONLY predicate a consumer should branch on. Together with
+        ``reason_or_raise()`` it means no consumer ever needs to touch
+        ``unavailable_reason``, and that is what makes the seam
+        machine-checkable: "outside the ``_IdentityLookup`` class body,
+        the attribute ``unavailable_reason`` is never read" is one rule
+        with no exception list, enforced by
+        ``test_no_consumer_reads_the_raw_unavailable_reason_field``.
+
+        Attribute reads are the rule's reach, and that reach is a ceiling
+        rather than an oversight: on a public ``NamedTuple`` the field is
+        also reachable through ``getattr``, indexing, unpacking and
+        ``_asdict``, and an unavailable value is also constructible
+        through ``_replace``, ``_make`` or an alias, none of which the
+        guard inspects. All of those forms occur zero times in the
+        package today (Einstein msg-571 §4, Bohr msg-572 §3.1); widening
+        the guard one node kind at a time would only move the same
+        objection one level down, because no total rule over a public
+        tuple's field is decidable.
+
+        This property does NOT make a misread structurally impossible. An
+        earlier version of this docstring said it did, and that was false:
+        ``unavailable_reason`` is a public field on a public NamedTuple,
+        every consumer can still reach it, and nothing in the type system
+        prevents it. The named test is the only thing that prevents it,
+        which is why it is named here instead of left implicit (msg-319
+        objection ①, sustained in Bohr msg-558 §2 after measuring that the
+        line-oriented guard this replaced missed eight of ten forms).
+
+        The original fail-open motivation is also no longer live. Because
+        ``_lookup_unusable`` normalises the reason, the reachable values
+        are ``None`` or a non-empty string, so a truthiness slip would
+        today agree with ``is not None`` on every reachable value -- the
+        naysayer was right about that (msg-558 §3.1). What justifies the
+        property now is decidability, not fail-open avoidance.
+        """
+        return self.unavailable_reason is not None
+
+    def reason_or_raise(self) -> str:
+        """Return the non-empty diagnostic string for the "unavailable" case.
+
+        The only legal way for a consumer to obtain the reason, and that is
+        the whole justification: consumers are forbidden from reading
+        ``unavailable_reason`` directly (see ``is_unavailable``), so the
+        design that forbids the field owes them an accessor in its place.
+
+        An earlier version of this docstring justified the method as saving
+        a defensive ``or ""`` at each call site. That was wrong, and it is
+        recorded rather than quietly deleted because it was load-bearing in
+        review. Writing ``lookup.unavailable_reason is not None`` narrows
+        ``str | None`` to ``str`` on its own, so under that idiom no
+        ``or ""`` was ever needed. Measured on this file: the ``is not
+        None`` form type-checks with 2 pre-existing errors and no new ones,
+        while branching on the property and then reading the field directly
+        adds three ``arg-type`` errors. This method pays back exactly the
+        narrowing the property costs, no more (Bohr msg-558 §3.1(3)).
+
+        Raises ``AssertionError`` if invoked on a usable verdict. That is a
+        programming error -- the property must be checked first -- and never
+        a data-driven condition, so an assertion is the right shape.
+        """
+        if self.unavailable_reason is None:
+            raise AssertionError(
+                "reason_or_raise() requires is_unavailable to be True; "
+                "check the property before calling this method"
+            )
+        return self.unavailable_reason
 
 
 _LOOKUP_UNREGISTERED = _IdentityLookup(None, False, ())
@@ -819,10 +908,20 @@ def _lookup_unusable(reason: str) -> _IdentityLookup:
     """No usable verdict: neither "registered" nor "not registered".
 
     ``found=False`` in the returned tuple is filler, never read: every caller
-    tests ``unavailable_reason`` first. Constructed through one helper so a
+    branches on ``is_unavailable`` first. Constructed through one helper so a
     new failure mode cannot accidentally be spelled as the legacy skip.
+
+    The reason string is normalised here (whitespace stripped; empty becomes
+    the placeholder ``"unspecified"``) so that the two properties the type
+    now promises stay in sync: ``is_unavailable`` is True and the diagnostic
+    payload the error envelope carries is a non-empty human-readable string.
+    Callers *should* still supply a meaningful reason -- the transport branch
+    of ``_lookup_identity`` uses the exception type name, which is stronger
+    than "unspecified" -- but the defence is here too so that a future call
+    site that forgets cannot regress the invariant Bohr msg-245 §5 pinned.
     """
-    return _IdentityLookup(reason, False, ())
+    normalised = reason.strip() or "unspecified"
+    return _IdentityLookup(normalised, False, ())
 
 
 class _RoleDecision(NamedTuple):
@@ -904,8 +1003,22 @@ async def _lookup_identity(author: str) -> _IdentityLookup:
     try:
         result = await prismind.get_identity(identity_name=author)
     except Exception as e:  # transport failure, unknown tool, timeout, ...
-        logger.warning("Identity lookup failed", author=author, error=str(e))
-        return _lookup_unusable(str(e))
+        # An exception raised without a message (``raise Timeout()``, some
+        # wrapped adapter errors) produces ``str(e) == ""``; whitespace-only
+        # messages are equally useless. Fall back to the exception's *type*
+        # name in either case so the ``reason`` field carried into the error
+        # envelope (``RoleValidationUnavailableError`` etc.) never degrades
+        # to an empty parenthetical -- Bohr msg-245 §1 diagnosed this as the
+        # single remaining path to an empty ``unavailable_reason``, Einstein
+        # msg-246 asked specifically for the ``.strip()`` guard so a message
+        # of ``" "`` cannot slip past the ``or``. The full string is still
+        # logged separately for the rare exception whose informative bit is
+        # in the type-name rather than the message.
+        reason = str(e).strip() or type(e).__name__
+        logger.warning(
+            "Identity lookup failed", author=author, error=str(e), reason=reason
+        )
+        return _lookup_unusable(reason)
 
     if not isinstance(result, dict):
         return _lookup_unusable("unexpected response from Prismind")
@@ -980,10 +1093,10 @@ async def _check_role_allowed(
     if lookup is None:
         lookup = await _lookup_identity(author)
 
-    if lookup.unavailable_reason is not None:
+    if lookup.is_unavailable:
         return _RoleDecision(
             _role_validation_unavailable_error(
-                author=author, role=role, reason=lookup.unavailable_reason
+                author=author, role=role, reason=lookup.reason_or_raise()
             ),
             None,
         )
@@ -1053,9 +1166,9 @@ def _check_can_close(*, author: str, lookup: _IdentityLookup) -> dict[str, Any] 
     capability check equivalent but bypassable by omitting ``role``. The
     recorded decide is Tier-C's (msg-032 §2); this is the baseline it acts on.
     """
-    if lookup.unavailable_reason is not None:
+    if lookup.is_unavailable:
         return _close_validation_unavailable_error(
-            author=author, reason=lookup.unavailable_reason
+            author=author, reason=lookup.reason_or_raise()
         )
     if not lookup.found:
         return None
@@ -1101,13 +1214,13 @@ async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
         if not role:
             return _ALLOW_WITHOUT_ROLE  # nothing to validate, nothing to ask
         human_lookup = await _lookup_identity(author)
-        if human_lookup.unavailable_reason is not None:
+        if human_lookup.is_unavailable:
             logger.warning(
                 "Role not recorded: identity lookup unavailable on a human close",
                 author=author,
                 requested_role=role,
                 recorded_role=None,
-                reason=human_lookup.unavailable_reason,
+                reason=human_lookup.reason_or_raise(),
             )
             return _ALLOW_WITHOUT_ROLE
         return await _check_role_allowed(
@@ -1120,7 +1233,7 @@ async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
     # It is pure given the record, so this costs nothing and keeps the
     # fail-closed posture in one place rather than duplicating the condition.
     close_error = _check_can_close(author=author, lookup=lookup)
-    if lookup.unavailable_reason is not None:
+    if lookup.is_unavailable:
         return _RoleDecision(close_error, None)
 
     # Verdict ordering is unchanged: claim-then-capability, so a role the
@@ -1263,9 +1376,9 @@ async def _check_next_participant(name: str) -> dict[str, Any] | None:
     if not name:
         return None
     lookup = await _lookup_identity(name)
-    if lookup.unavailable_reason is not None:
+    if lookup.is_unavailable:
         return _next_participant_unavailable_error(
-            name=name, reason=lookup.unavailable_reason
+            name=name, reason=lookup.reason_or_raise()
         )
     if not lookup.found:
         return _next_participant_unknown_error(name=name)
