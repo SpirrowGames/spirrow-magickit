@@ -707,8 +707,12 @@ class _IdentityLookup(NamedTuple):
     ``reason_or_raise()``. Outside this class body, ``unavailable_reason``
     must not be read at all -- which is a checked rule, not a convention:
     ``test_no_consumer_reads_the_raw_unavailable_reason_field`` (in
-    ``tests/unit/test_identity_lookup_unavailable_seam.py``) parses this
-    file and ``web/decisions.py`` and rejects every such read.
+    ``tests/unit/test_identity_lookup_unavailable_seam.py``) parses every
+    module in the ``magickit`` package and rejects every read of the field
+    spelled as an attribute. The scanned set is deliberately not
+    enumerated here: the first version of this sentence named the two
+    files the scan then covered, and the next commit widened the scan and
+    left the sentence describing a coverage that had ceased to exist.
 
     The rule is "never read the raw field" rather than "never use
     truthiness" because only the former is decidable. Once a consumer may
@@ -729,9 +733,21 @@ class _IdentityLookup(NamedTuple):
         The ONLY predicate a consumer should branch on. Together with
         ``reason_or_raise()`` it means no consumer ever needs to touch
         ``unavailable_reason``, and that is what makes the seam
-        machine-checkable: "the raw field is never read outside this
-        class" is one rule with no exception list, enforced by
+        machine-checkable: "outside the ``_IdentityLookup`` class body,
+        the attribute ``unavailable_reason`` is never read" is one rule
+        with no exception list, enforced by
         ``test_no_consumer_reads_the_raw_unavailable_reason_field``.
+
+        Attribute reads are the rule's reach, and that reach is a ceiling
+        rather than an oversight: on a public ``NamedTuple`` the field is
+        also reachable through ``getattr``, indexing, unpacking and
+        ``_asdict``, and an unavailable value is also constructible
+        through ``_replace``, ``_make`` or an alias, none of which the
+        guard inspects. All of those forms occur zero times in the
+        package today (Einstein msg-571 §4, Bohr msg-572 §3.1); widening
+        the guard one node kind at a time would only move the same
+        objection one level down, because no total rule over a public
+        tuple's field is decidable.
 
         This property does NOT make a misread structurally impossible. An
         earlier version of this docstring said it did, and that was false:
