@@ -1,5 +1,6 @@
 """Configuration management for Magickit using Pydantic Settings."""
 
+import functools
 from pathlib import Path
 from typing import Any
 
@@ -460,13 +461,55 @@ class Settings(BaseSettings):
         return cls(**flat_config)
 
 
+@functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Get application settings.
 
     Loads from config file if available, with environment variable overrides.
 
+    **Process-lifetime cache** (``functools.lru_cache(maxsize=1)``,
+    T-get-settings-uncached-on-live-request-paths / msg-491). Without the
+    cache each async request handler that touches this function (``board``
+    fragment poll every 20s per open dashboard, ``chatroom_digest``,
+    ``chatroom_proxy``, ``deploys``, ``ops``, plus the material store
+    ``get_settings().db_path`` lookup) does a synchronous ``stat`` and, when
+    the file is present, a YAML read + parse on the event loop. The frequency
+    is not itself a defect (Einstein naysayer, same thread: 20s poll is
+    operationally invisible), but "range-out" residuals from an earlier PR
+    (T-material-store-per-request-sync-io / msg-255 §4, which deliberately
+    limited its scope to the material-store call site) landed nobody's, and
+    caching here retires them at the source with the same shape already in
+    use for ``_get_material_store`` (a nullary singleton with no explicit
+    invalidation).
+
+    **No cache invalidation** (Einstein's YAGNI concern, same thread): this
+    module never re-reads the config after startup, no code path in the
+    tree signals a config change (grep ``reload``/``SIGHUP`` finds only
+    ``systemctl daemon-reload`` and uvicorn's ``--reload`` source-watch,
+    which restarts the whole process), and no test writes the YAML at
+    runtime. Adding TTL / file-watcher / teardown machinery to preserve a
+    behaviour nothing observes would be exactly the OverScope the objection
+    warned against, so this docstring is the whole of the invalidation
+    story: **the process re-reads the config by restarting**.
+
+    **Test isolation** (measured, not assumed): every consumer imports the
+    symbol locally (``from magickit.config import get_settings``) and every
+    test patches at that local reference (``patch.object(board_module,
+    "get_settings", ...)`` / ``monkeypatch.setattr(deploys_module,
+    "get_settings", ...)``). No test in the tree patches
+    ``magickit.config.get_settings`` directly, so the cache on the module-
+    level function is inert while tests run. If a future test does call
+    the real function, ``get_settings.cache_clear()`` is available.
+
+    **Not the API-side ``get_settings``** (msg-491 §2): ``api/routes.py``
+    defines a same-named function that returns a startup-bound module
+    global and raises ``RuntimeError`` when unset — it does not read the
+    YAML and it is not on the request path this cache covers. This cache
+    lives on ``magickit.config.get_settings`` alone.
+
     Returns:
-        Settings instance.
+        Settings instance (same instance across the process; call
+        ``get_settings.cache_clear()`` to force a re-read).
     """
     config_path = Path("config/magickit_config.yaml")
     if config_path.exists():
