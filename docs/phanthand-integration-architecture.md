@@ -103,20 +103,28 @@ Drive 原本の逐語移行。**この文書は Drive 上に 2 部あった** �
 無い。ホスト名・IP・サーバーパス・認証の姿勢のいずれも本書には現れず、ポートは実値のまま
 （規約 §3.1-3）。
 
-### ポート番号を現状として読まないこと
+### ポート番号を現状として読まないこと（実測 2026-09-10）
 
-§アーキテクチャ の図が書く 4 つのポートは **Magickit の設定ファイルの既定値**であって、
-稼働中の値ではない:
+§アーキテクチャ の図が書く 4 つのポートは **旧採番**である。`src/magickit/config.py` と
+`.env.example` の既定値と同じ系列だが、**稼働構成は `config/magickit_config.yaml` が
+これを上書きしている**。
 
-| 図 | `src/magickit/config.py` の既定 | [[platform:infra-registry]] §3 |
+| 図 | 稼働値 | 確認方法 |
 |---|---|---|
-| Magickit `:8004` | — | `8114`（MCP）/ `8117`（chatroom MCP） |
-| Cognilens `:8003` | `cognilens_url = http://localhost:8003` | **未登録** |
-| Lexora `:8001` | `lexora_url = http://localhost:8001` | `8110` |
-| Prismind `:8002` | `prismind_url = http://localhost:8002` | `8112`（mcp-proxy / SSE） |
+| Magickit `:8004` | `:8113`（FastAPI / Web UI、`spirrow-magickit.service`）、`:8114`（MCP・OAuth 版）、`:8117`（MCP・ループ用、認証無効） | `config/magickit_config.yaml` / `CLAUDE.md` の再起動コマンド表 |
+| Cognilens `:8003` | **`:8111`** | `service_health` が `http://localhost:8111` を healthy で返す |
+| Lexora `:8001` | **`:8110`** | 同上 |
+| Prismind `:8002` | **`:8112`** | 同上 |
+| Phanthand `:7300` | `:7300`（変わっていない） | [[platform:infra-registry]] §3 |
 
-台帳の `8110` / `8112` は proxy 側、config の `8001` / `8002` は直結側、という読みが自然だが
-**実測していない**。Phanthand の `:7300` だけは両者一致している。
+**旧採番のまま起動すると衝突する** —— `8002` は現在 llama-server（Qwen3.5）が使っている。
+
+対応は [[platform:infra-registry]] §3 に全件登録済み（§3.1 が `8114` と `8117` の違い、
+§3.2 が旧採番との関係を書いている）。
+
+**`.env.example` はこの移行に合わせて稼働値へ直した。** `config.py` の既定値は runtime に
+効きうるので触っていない —— 実際の起動は `config/magickit_config.yaml` が上書きするため
+実害は無いが、yaml を置かずに起動した場合だけ旧採番に落ちる。
 
 ### 実装との対応（2026-09-10 照合）
 
