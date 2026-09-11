@@ -1,5 +1,5 @@
 [Unit]
-Description=Spirrow Magickit MCP Server (local, no-auth, tailscale 100.79.84.62:8117)
+Description=Spirrow Magickit MCP Server (local instance, :8117)
 Documentation=https://github.com/spirrow/spirrow-magickit
 After=network.target
 After=spirrow-magickit.service spirrow-conclair.service
@@ -15,8 +15,12 @@ Restart=always
 RestartSec=5
 MemoryMax=512M
 
-# Local-only instance: auth disabled, bind 127.0.0.1, port 8115, http-only
-# Reachable only from sg-ai-server-01 itself (SSH access is the gate)
+# The bind host, port and auth posture are the Environment= lines below --
+# read those, not a comment. The two lines that used to sit here said
+# "bind 127.0.0.1, port 8115" and "reachable only from this host, SSH is the
+# gate", and every clause of that was false against the lines it introduced.
+# What this instance is actually reachable from is recorded once, in
+# [[platform:infra-registry]] §5, and not restated here (conventions §3.1-4).
 Environment=PYTHONPATH=/home/sgadmin/services/spirrow/spirrow-magickit/src
 Environment=MAGICKIT_LOG_LEVEL=INFO
 Environment=MAGICKIT_AUTH_DISABLED=1
