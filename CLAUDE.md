@@ -1,5 +1,7 @@
 # Spirrow-Magickit
 
+> **実インフラ値**（ホスト名 / IP / パス）は [[platform:infra-registry]] が正本。この文書は `{{PLACEHOLDER}}` で参照する（規約 §3.1）。
+
 Spirrow Platform のオーケストレーションレイヤー。複数の MCP サーバを束ね、タスク管理・
 依存解決・コンテキスト最適化を担う。**「指揮者 — 自分では演奏しない」** が原則で、
 実処理は各サービスへの委譲に徹する。
@@ -332,7 +334,7 @@ merge はどこからでもできるが、live にできるのは systemd と al
 - **承認の扉は 3 つ**: 認証済み MCP(claude.ai 経由・`magickit.spirrowgames.dev` → :8114)と、
   ホスト上の `python -m magickit.deploy.approval <id> --by <name>`。**検査は 1 実装を共有**し、
   監査に `approved_via` が残る。後者が新しい権限を与えるわけではない — ホストのシェルは
-  `sgadmin`(NOPASSWD:ALL)で要求 JSON を直接書けるので、**追跡できない迂回を記録された行為に
+  `{{USER_SERVICES}}`(NOPASSWD:ALL)で要求 JSON を直接書けるので、**追跡できない迂回を記録された行為に
   変えているだけ**。ループはシェルを持たないので使えない(= ゲートが本物なのはそちら側)
 - **3 つ目はダッシュボードのボタン**(`approved_via=tailnet-identity`)。長らく
   「ここにボタンがあってはならない」と書いてあり、その理由(無認証面に restart を渡すな)は
@@ -610,7 +612,7 @@ sudo systemctl restart spirrow-magickit.service            # main.py @ 127.0.0.1
                                                            #   (tailnet へは tailscale serve :8443 が proxy)
 sudo systemctl restart spirrow-magickit-mcp.service        # mcp_server.py @ 127.0.0.1:8114
                                                            #   (Cloudflare Tunnel → claude.ai, auth ON)
-sudo systemctl restart spirrow-magickit-mcp-local.service  # mcp_server.py @ 100.79.84.62:8117
+sudo systemctl restart spirrow-magickit-mcp-local.service  # mcp_server.py @ {{IP_SERVICES}}:8117
                                                            #   (tailnet 内の Claude Code CLI, auth OFF)
 sudo systemctl restart github-mcp.service                  # docker start github-mcp
 ```
