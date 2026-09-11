@@ -1,15 +1,17 @@
 # Deploy runner — magickit から Claude Code を起動して deploy する
 
+> **実インフラ値**（ホスト名 / IP / パス）は [[platform:infra-registry]] が正本。この文書は `{{PLACEHOLDER}}` で参照する（規約 §3.1）。
+
 ## 1. これが埋める穴
 
-PR は `sg-tomtebo-01` からでも merge できる。しかし **live にするのは `sg-ai-server-01` でしかできない** — systemd unit と alembic の履歴がここにあるから。開発ループの走る `sg-tomtebo-01` からここへの ssh は無い。∴「land した」と「動いている」の間に、誰も渡れない川があった。
+PR は `{{HOST_LOOP}}` からでも merge できる。しかし **live にするのは `{{HOST_SERVICES}}` でしかできない** — systemd unit と alembic の履歴がここにあるから。開発ループの走る `{{HOST_LOOP}}` からここへの ssh は無い。∴「land した」と「動いている」の間に、誰も渡れない川があった。
 
 magickit は既にその境界に立っていて、既にループから到達できている。だから渡し場をここに作る。
 
 ## 2. 形
 
 ```
-  loop (sg-tomtebo-01)                    人間 (claude.ai / OAuth)
+  loop ({{HOST_LOOP}})                    人間 (claude.ai / OAuth)
         │                                         │
         │ deploy_request                          │ deploy_approve
         ▼                                         ▼
@@ -56,7 +58,7 @@ magickit は既にその境界に立っていて、既にループから到達�
 ### unit に渡すパスの制約（どちらも「エージェントのせい」に見える壊れ方をする）
 
 - **相対パスは不可**。`ReadWritePaths=data/deploy/runs/x` を渡すと unit は起動すらしない（実測: `Failed to start transient service unit: Invalid ReadWritePaths`）。`systemd-analyze verify` は警告だけで通すので静的検査では捕まらない。∴ `default_state_root()` は必ず絶対パスを返し、`require_absolute()` が unit を組み立てる時点で弾く
-- **`/tmp` 配下も不可**。`PrivateTmp=true` が namespace 内でそのパスを消すため、実行前に **exit 226 (EXIT_NAMESPACE)** で死ぬ。本番の対象は全て `/home/sgadmin/services/spirrow` 配下なので発火しない ∴ 致命化せず警告に留め、代わりに **exit 226 を「これはパスの問題であってエージェントの問題ではない」と名指しで報告**する
+- **`/tmp` 配下も不可**。`PrivateTmp=true` が namespace 内でそのパスを消すため、実行前に **exit 226 (EXIT_NAMESPACE)** で死ぬ。本番の対象は全て `{{PATH_SERVICES}}` 配下なので発火しない ∴ 致命化せず警告に留め、代わりに **exit 226 を「これはパスの問題であってエージェントの問題ではない」と名指しで報告**する
 
 どちらも放置すると「エージェントがレポートを書かなかった」という**原因から 3 層離れた症状**として現れる。
 
@@ -139,7 +141,7 @@ runner の順序が変わります: **待機面で pin → backup → agent → 
 
 **本当の境界（カーネル）**
 
-- `NoNewPrivileges=true` — これが要。sgadmin は `NOPASSWD: ALL` なので、**sgadmin として無拘束に走るエージェントは実質 root** であり、どんな禁止コマンド一覧もそれを変えない
+- `NoNewPrivileges=true` — これが要。{{USER_SERVICES}} は `NOPASSWD: ALL` なので、**{{USER_SERVICES}} として無拘束に走るエージェントは実質 root** であり、どんな禁止コマンド一覧もそれを変えない
 - `ProtectHome=read-only` + `ReadWritePaths` は対象 repo と自分の scratch と `~/.claude` のみ — 他サービスのツリーを触れない ∴ 指された対象以外を deploy できない
 - `--strict-mcp-config` で MCP サーバをゼロにする — magickit 自身の tool に届かない（自分の deploy を承認する、が明らかな危険）
 - `PrivateTmp` / `MemoryMax=4G` / wall-clock timeout
@@ -155,7 +157,7 @@ runner の順序が変わります: **待機面で pin → backup → agent → 
 
 **正直な限界**: deny 規則は「禁じた物の列挙」であり、shell には無限の言い換えがある ∴ **これは境界ではない**。だから migration については deny に頼らず revision の前後比較で**検出**する。そして deploy が生き延びられない事（特権・他 repo）はカーネルが拒否する。
 
-**未実装の強化案**: 専用 unix ユーザ `spirrow-deploy` を作り、sudoers を restart だけに絞る。今は sgadmin で走るので、上記の隔離は「sgadmin として何ができるか」を狭めているだけで、`~/.claude` への書き込みは開いている（Claude Code の session state に必要）。これを閉じるには専用ユーザと専用 credential が要る。root 権限の構成変更なので本 PR には含めない。
+**未実装の強化案**: 専用 unix ユーザ `spirrow-deploy` を作り、sudoers を restart だけに絞る。今は {{USER_SERVICES}} で走るので、上記の隔離は「{{USER_SERVICES}} として何ができるか」を狭めているだけで、`~/.claude` への書き込みは開いている（Claude Code の session state に必要）。これを閉じるには専用ユーザと専用 credential が要る。root 権限の構成変更なので本 PR には含めない。
 
 ```
 # 将来 /etc/sudoers.d/spirrow-deploy として入れる案（未適用）
@@ -184,9 +186,9 @@ spirrow-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl is-active spirrow-conclai
 
 #### 承認の 2 つ目の扉（ホスト上のコマンド）
 
-MCP の承認 tool が守っている相手は **sg-tomtebo-01 のループ**で、あれはこのホストにシェルを持たない ∴ MCP が差し出すもの以外は何もできません。ここは本物の境界です（`:8117` に公開されている tool でコード実行できるものは無いことを確認済み — 唯一の `subprocess` は固定引数の `git config user.email`）。
+MCP の承認 tool が守っている相手は **{{HOST_LOOP}} のループ**で、あれはこのホストにシェルを持たない ∴ MCP が差し出すもの以外は何もできません。ここは本物の境界です（`:8117` に公開されている tool でコード実行できるものは無いことを確認済み — 唯一の `subprocess` は固定引数の `git config user.email`）。
 
-**ホスト上のシェルに対しては境界ではありません。** シェルは `sgadmin` で動き `NOPASSWD: ALL` を持ち、`data/deploy/requests/*.json` を直接書けます。機構を無視して `git merge && systemctl restart` することもできます。
+**ホスト上のシェルに対しては境界ではありません。** シェルは `{{USER_SERVICES}}` で動き `NOPASSWD: ALL` を持ち、`data/deploy/requests/*.json` を直接書けます。機構を無視して `git merge && systemctl restart` することもできます。
 
 ∴ 2 つ目の扉を用意しました。エンドポイントではなくコマンドです:
 
@@ -244,4 +246,4 @@ deploy_rollback(request_id="…", requested_by="…", reason="…")
 
 - **magickit 自身の deploy** — 意図的な carve-out として残す。**当初ここに書いていた理由（「runner が restart で死ぬ」）は実測で誤り**だった: runner は `user@1000.service/app.slice` の user transient unit で、起動元の system サービスを止めても生き残る（実測）。実際には deploy は完走し結果も記録される。
   残る理由はもっと小さい: **失敗したときに何が起きたかを報告する tool 自身が落ちている**。`deploy_status` も `deploy_history` も再起動される MCP サーバが答えるので、magickit だけは「失敗の調査にホストへの到達が要る」— この機能が消そうとしている依存そのものになる。解くには magickit に依存しない報告経路が要る（allowlist の項目ではない）
-- **専用ユーザによる隔離** — 手順と成果物は [`docs/deploy-hardening.md`](deploy-hardening.md) に用意済み。**未適用**。本当の障害物は sudoers ではなく Claude の認証で、`~sgadmin/.claude/.credentials.json` は別ユーザから読めない ∴ API キーか専用ユーザでの対話ログインのどちらかが要る（2026-08-16 時点では現状維持を選択）
+- **専用ユーザによる隔離** — 手順と成果物は [`docs/deploy-hardening.md`](deploy-hardening.md) に用意済み。**未適用**。本当の障害物は sudoers ではなく Claude の認証で、`~{{USER_SERVICES}}/.claude/.credentials.json` は別ユーザから読めない ∴ API キーか専用ユーザでの対話ログインのどちらかが要る（2026-08-16 時点では現状維持を選択）

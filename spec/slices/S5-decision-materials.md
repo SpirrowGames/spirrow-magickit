@@ -1,5 +1,7 @@
 # S5'' 判断ページに材料を運ぶ ― spec
 
+> **実インフラ値**（ホスト名 / IP / パス）は [[platform:infra-registry]] が正本。この文書は `{{PLACEHOLDER}}` で参照する（規約 §3.1）。
+
 判断ページに「何を聞かれているか」を出す。増分 2 (`S5-decision-page.md`) が
 建てた `GET /dashboard/decisions/{project}/{thread_id}` の判断 UI 分岐に対し、
 mindwire 側の composer が生成する材料 (問い / 選択肢 / 得るもの / 失うもの /
@@ -341,7 +343,7 @@ escape 混入があれば受入で必ず露見する。∴ 実装が Q-5' 混入
 2. **magickit** — 本 PR。material 受け口を建てる。**全ページ J-absent
    (mindwire push なし)。これを「実装済」と呼ばない** — 材料は 1 個も出ない
 3. **mindwire の push** (別 repo / 別 PR)。**+ P-10 (認可) 実測**:
-   - 経路: `sg-tomtebo-01 → magickit:8443` は既に実証済 (curl 群 / msg-118 §5)
+   - 経路: `{{HOST_LOOP}} → magickit:8443` は既に実証済 (curl 群 / msg-118 §5)
    - 残: PUT に認証がかかるか / 我々を認可するか (未測)
    - 判定基準: 「200 が返った」ではなく「PUT した内容が GET で読み戻せた」
 4. 外形実測 **A-14〜A-18** (§7)。**ここで初めて完了**
