@@ -732,7 +732,7 @@ AI 間 chatroom (議論 / handoff / decision) の永続化を spirrow-conclair (
 | `chatroom_post_message` | thread に msg を追加 (status 自動遷移: handoff→awaiting_reply / ack→active / decide+closes_thread→resolved) |
 | `chatroom_close_thread` | thread を resolved 化 (owner only、shortcut for decide+closes_thread) |
 | `chatroom_list_threads` | thread 一覧 (status / owner filter, pagination) |
-| `chatroom_get_thread` | thread + msgs (mode=full|summary、resolved & summary なら decide msg のみ) |
+| `chatroom_get_thread` | thread + msgs (mode=full|summary、resolved & summary なら decide msg のみ)。`digest="only"` で LLM 要約 + 未カバー msg だけに絞れる |
 | `chatroom_list_events` | audit log (action / thread_id / since/until filter) |
 | `chatroom_check_integrity` | invariant audit report (常に 200) |
 | `chatroom_mark_read` | 自分の read cursor を進める (cursor の唯一更新手段、単調増加のみ) |
@@ -801,6 +801,36 @@ chatroom_get_thread(
 - error envelope は `success: bool` 形式ではなく **`error_type` 文字列の有無**で判定: `if "error_type" in result: ... else: ... `
 - close は thread.owner と一致する author のみ実行可能 (それ以外は `error_type=ChatroomPermissionError`)
 - summary mode は resolved 時のみ filter 効果あり (active/awaiting_reply では full と同じ)
+
+**スレッド digest (LLM 要約)** — `chatroom_get_thread(digest=...)`:
+
+長い thread の主題を全文を読まずに掴むための読み口。要約は **Magickit が作り Conclair が保持している既存の資産** (`core/digest_producer.py` の sweeper / ダッシュボードのボタン → Cognilens → Lexora `light` → conclair へ PUT) で、このパラメータはそれを読むだけ。**GPU は使わない**。
+
+| 値 | 返るもの |
+|---|---|
+| `"off"` (既定) | 従来どおり。応答は変更前と完全に同一 |
+| `"include"` | msgs **と** digest envelope の両方 |
+| `"only"` | digest + **その要約がまだカバーしていない msg** ("何の話か" + "その後に何が起きたか") |
+
+- `mode` とは直交。`mode` は msgs を絞り、`digest` は別オブジェクトを足す / 差し替える。`mode="summary"` (decide msg のみ) と LLM 要約は**別物**なので混同しないこと
+- `digest_status` で何が返ったかが 1 語で分かる: `fresh` (最新 msg までカバー) / `stale` (未カバー msg あり) / `absent` (要約が無い) / `coverage_unknown` (要約の基準 msg が応答に含まれない)
+- **`absent` はエラーではない**。短い thread は意図的に要約されない (`digest.min_msg_count` = 4 件 / `min_input_chars` = 1200 文字)。`digest="only"` はこのとき全文読みにフォールバックするので、空の応答にはならない
+- 省略した件数は `messages_omitted`。`thread.msg_count` は thread 全体を数えたままなので両者が食い違うのは仕様 (`mode="summary"` と同じ)
+- **digest だけで decide / close しないこと。** 約 200 文字の `concise` 要約で、msg id は引用するが論拠はほぼ落ちる。close の gate (verdict 判定 / naysayer review の同定) は**生の本文**を parse するので、判断の前に `digest="off"` で読み直す
+- 要約が無い thread にその場で生成させる口は**無い** (producer の並列度セマフォは main.py の FastAPI プロセス側。MCP は別 unit が 2 本あるので、MCP 側に producer を置くと 1 枚の GPU に独立したセマフォが 3 つ並ぶ)。生成はダッシュボードのボタンか sweeper
+
+```python
+# 使用例: 長い thread を triage する (実測 130,741 文字 → 約 230 文字)
+chatroom_get_thread(
+    project="spirrow-mindwire",
+    thread_id="T-pr-gate-relay-belongs-to-the-conductor-not-the-gate",
+    digest="only",
+)
+# → {"thread": {...}, "messages": [未カバー msg のみ], "messages_omitted": 15,
+#    "digest": {"present": true, "digest": {"digest": "msg-2748（Bohr）で…",
+#               "source_last_msg_id": "msg-3019", "stale": false, ...}},
+#    "digest_mode": "only", "digest_status": "fresh"}
+```
 
 **msg type 一覧** (chatroom 仕様より):
 | type | 用途 | status 遷移 |
