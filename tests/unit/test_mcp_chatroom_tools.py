@@ -311,14 +311,139 @@ async def test_list_threads_owner_normalization(registered) -> None:
 # ---- get_thread -------------------------------------------------------
 
 
+def _view_with_digest(
+    *,
+    present: bool = True,
+    source_last_msg_id: str = "msg-003",
+    stale: bool | None = False,
+    text: str = "msg-001 で X を決めた。",
+) -> dict[str, Any]:
+    """A get_thread response shaped like Conclair's include_digest=true."""
+    inner = {
+        "digest": text,
+        "source_last_msg_id": source_last_msg_id,
+        "stale": stale,
+        "behind_by": 0 if stale is False else 1,
+    }
+    return {
+        "thread": {"thread_id": "T-1", "msg_count": 3},
+        "messages": [
+            {"msg_id": "msg-001", "content": "a"},
+            {"msg_id": "msg-002", "content": "b"},
+            {"msg_id": "msg-003", "content": "c"},
+        ],
+        "mode": "full",
+        "digest": {
+            "present": present,
+            "thread_last_msg_id": "msg-003",
+            "digest": inner if present else None,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_get_thread_summary_mode(registered) -> None:
     tools, adapter = registered
     fn = tools["chatroom_get_thread"]
     await fn(project="p", thread_id="T-1", mode="summary")
     adapter.get_thread.assert_awaited_once_with(
-        project="p", thread_id="T-1", mode="summary"
+        project="p", thread_id="T-1", mode="summary", include_digest=False
     )
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_off_leaves_response_untouched(registered) -> None:
+    """The default must be byte-identical to the pre-digest behaviour."""
+    tools, adapter = registered
+    adapter.get_thread = AsyncMock(return_value={"thread": {}, "messages": [], "mode": "full"})
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1")
+    assert result == {"thread": {}, "messages": [], "mode": "full"}
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_include_keeps_all_messages(registered) -> None:
+    tools, adapter = registered
+    adapter.get_thread = AsyncMock(return_value=_view_with_digest())
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1", digest="include")
+
+    adapter.get_thread.assert_awaited_once_with(
+        project="p", thread_id="T-1", mode="full", include_digest=True
+    )
+    assert result["digest_mode"] == "include"
+    assert result["digest_status"] == "fresh"
+    assert len(result["messages"]) == 3
+    assert "messages_omitted" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_only_elides_covered_messages(registered) -> None:
+    tools, adapter = registered
+    adapter.get_thread = AsyncMock(return_value=_view_with_digest())
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1", digest="only")
+
+    assert result["digest_status"] == "fresh"
+    assert result["messages"] == []
+    assert result["messages_omitted"] == 3
+    # The digest itself, and the thread rollup, survive the elision.
+    assert result["digest"]["digest"]["digest"].startswith("msg-001")
+    assert result["thread"]["msg_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_only_keeps_uncovered_tail(registered) -> None:
+    """A stale digest must come back with the messages it does not cover."""
+    tools, adapter = registered
+    adapter.get_thread = AsyncMock(
+        return_value=_view_with_digest(source_last_msg_id="msg-001", stale=True)
+    )
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1", digest="only")
+
+    assert result["digest_status"] == "stale"
+    assert [m["msg_id"] for m in result["messages"]] == ["msg-002", "msg-003"]
+    assert result["messages_omitted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_only_falls_back_when_absent(registered) -> None:
+    """No digest is a normal answer -- the read must not come back empty."""
+    tools, adapter = registered
+    adapter.get_thread = AsyncMock(return_value=_view_with_digest(present=False))
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1", digest="only")
+
+    assert result["digest_status"] == "absent"
+    assert len(result["messages"]) == 3
+    assert "messages_omitted" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_only_keeps_all_when_coverage_unknown(registered) -> None:
+    """The covered msg is not in this response -> elide nothing."""
+    tools, adapter = registered
+    adapter.get_thread = AsyncMock(
+        return_value=_view_with_digest(source_last_msg_id="msg-999", stale=True)
+    )
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1", digest="only")
+
+    assert result["digest_status"] == "coverage_unknown"
+    assert len(result["messages"]) == 3
+    assert "messages_omitted" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_thread_digest_forwards_error_envelope(registered) -> None:
+    tools, adapter = registered
+    envelope = {"error_type": "ThreadNotFound", "error": "no such thread", "details": {}}
+    adapter.get_thread = AsyncMock(return_value=envelope)
+    fn = tools["chatroom_get_thread"]
+    result = await fn(project="p", thread_id="T-1", digest="only")
+
+    assert result == envelope
 
 
 # ---- list_events ------------------------------------------------------

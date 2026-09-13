@@ -558,6 +558,72 @@ async def _enforce_close_policies(
     }
 
 
+# --- thread digests on the read path ----------------------------------
+#
+# Conclair stores an LLM digest per thread and Magickit produces it
+# (`core/digest_producer.py`: Cognilens -> Lexora light, PUT back). Until
+# now the only readers were the dashboard and the browser view, so an MCP
+# caller had to pull the whole thread -- 130KB on a 15-msg thread measured
+# 2026-09-13 -- to learn what it was about. These helpers are what lets
+# `chatroom_get_thread` hand back the ~200-char digest instead.
+#
+# Two rules shape them, and both are about not lying to the reader:
+#
+# 1. **A missing digest is not an error.** Conclair answers 200 with
+#    `present: false`, and short threads are *deliberately* never digested
+#    (`digest.min_msg_count` / `min_input_chars`: a propose plus one reply
+#    is already the shortest accurate account of itself). So `digest="only"`
+#    degrades to the full thread rather than returning an empty read --
+#    the same shape `smart_read` uses when Cognilens fails.
+#
+# 2. **Elision is always declared.** When messages are dropped, the response
+#    says how many and up to which msg the digest covers. A summary silently
+#    standing in for a thread is how a reader ends up acting on messages
+#    they never saw.
+#
+# What these helpers deliberately do NOT do is decide *for* the caller
+# whether the digest is enough. The gates in this module (verdict parsing,
+# `_latest_naysayer_review`) read raw message bodies, so a digest can never
+# substitute for the read that precedes a close -- see the tool docstring.
+
+
+def _digest_body(view: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored digest object from a `include_digest=true` response.
+
+    None when the envelope is absent, reports `present: false`, or carries
+    an empty string -- all three mean "there is nothing to read instead of
+    the messages", which is the only distinction the callers need.
+    """
+    envelope = view.get("digest")
+    if not isinstance(envelope, dict) or not envelope.get("present"):
+        return None
+    body = envelope.get("digest")
+    if not isinstance(body, dict) or not str(body.get("digest") or "").strip():
+        return None
+    return body
+
+
+def _uncovered_tail(
+    messages: list[dict[str, Any]], source_last_msg_id: Any
+) -> list[dict[str, Any]] | None:
+    """Messages posted after the ones the digest covers, or None.
+
+    Located by *position in the returned list*, not by parsing the number
+    out of the msg_id: `messages` is append-only and already in msg_id
+    order, so the index is exact and needs no assumption about the id
+    format. None means the coverage point is not in this list (a filtered
+    `mode="summary"` read, or a digest written against a msg the caller
+    did not receive) -- the caller must then keep every message rather
+    than guess which ones are already summarized.
+    """
+    if not isinstance(source_last_msg_id, str) or not source_last_msg_id:
+        return None
+    for idx, msg in enumerate(messages):
+        if msg.get("msg_id") == source_last_msg_id:
+            return messages[idx + 1:]
+    return None
+
+
 def _adapter() -> ChatroomAdapter:
     if _settings is None:
         raise RuntimeError("Settings not initialized")
@@ -1887,22 +1953,68 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         project: str,
         thread_id: str,
         mode: Literal["full", "summary"] = "full",
+        digest: Literal["off", "include", "only"] = "off",
     ) -> dict[str, Any]:
-        """Fetch a thread plus its messages.
+        """Fetch a thread plus its messages, optionally as an LLM digest.
 
         USE THIS WHEN: you need to read the conversation. For resolved
         threads use mode="summary" to load only the decide msg
-        (saves tokens).
+        (saves tokens). To find out what a long thread is about without
+        paying for it, use digest="only".
 
         Args:
-            mode: "full" (default) returns every msg in numeric msg_id
-                order. "summary" on a resolved thread returns only the
-                decide msg; on active / awaiting_reply / superseded /
-                parked it behaves the same as "full".
+            mode: which **messages** come back. "full" (default) returns
+                every msg in numeric msg_id order. "summary" on a
+                resolved thread returns only the decide msg; on active /
+                awaiting_reply / superseded / parked it behaves the same
+                as "full".
+            digest: whether to include the stored **LLM summary** of the
+                thread. Orthogonal to `mode` -- `mode` filters messages,
+                `digest` adds (or substitutes for) a separate object.
+                - "off" (default): unchanged behaviour, no digest.
+                - "include": messages *and* the digest.
+                - "only": the digest plus the messages it does NOT yet
+                  cover, i.e. "what this thread is about, and what has
+                  happened since that was written".
+
+        Digest semantics (digest != "off"):
+            `digest` is Conclair's envelope: `{present, style,
+            thread_last_msg_id, thread_msg_count, digest: {...}}`, where
+            the inner object carries the summary text plus
+            `source_last_msg_id` / `behind_by` / `stale` / `producer` /
+            `generated_at`. **`present: false` is a normal answer**, not
+            an outage: threads below `digest.min_msg_count` /
+            `min_input_chars` are deliberately never digested, and a
+            freshly opened one has not been swept yet.
+
+            `digest_status` says what you got, in one word:
+            - "fresh": a digest covering the newest msg in the thread.
+            - "stale": a digest plus newer messages it does not cover.
+            - "absent": no digest exists -- with digest="only" the full
+              read is returned instead, so you are never left with
+              nothing.
+            - "coverage_unknown": a digest exists but the msg it was
+              written against is not in this response (e.g. combined
+              with mode="summary"). Nothing is elided in that case.
+
+            With digest="only", `messages` holds only the uncovered tail
+            and `messages_omitted` counts what was dropped. `thread`'s
+            `msg_count` still counts the whole thread, so the two
+            disagreeing is expected -- the same way it already does in
+            mode="summary".
+
+        DO NOT decide from the digest alone. It is a ~200-char `concise`
+        summary produced by Lexora `light`; it cites msg ids but drops
+        most of the argument. Closing a thread, issuing or reading a
+        naysayer verdict, and anything else this module gates on reads
+        the raw message bodies -- so re-read with digest="off" (or
+        "include") before acting, and treat digest="only" as triage.
 
         Returns:
             {"thread": Thread, "messages": [Message...], "mode":
-             "full"|"summary"}.
+             "full"|"summary"}, plus `digest` / `digest_mode` /
+            `digest_status` (and `messages_omitted` when digest="only"
+            elided anything) when a digest was requested.
 
             `thread` carries the same activity rollup as the listing
             (`msg_count` / `last_msg_id` / `last_activity_at`). In
@@ -1912,11 +2024,48 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         """
         adapter = _adapter()
         try:
-            return await adapter.get_thread(
-                project=project, thread_id=thread_id, mode=mode
+            view = await adapter.get_thread(
+                project=project,
+                thread_id=thread_id,
+                mode=mode,
+                include_digest=digest != "off",
             )
         finally:
             await adapter.close()
+
+        if digest == "off" or not isinstance(view, dict) or "error_type" in view:
+            # Conclair's error envelope is forwarded as-is, like every other
+            # tool in this module: a failed read must not come back wearing
+            # the shape of a successful one.
+            return view
+
+        view["digest_mode"] = digest
+        body = _digest_body(view)
+        if body is None:
+            view["digest_status"] = "absent"
+            return view
+
+        messages = view.get("messages")
+        tail = (
+            _uncovered_tail(messages, body.get("source_last_msg_id"))
+            if isinstance(messages, list)
+            else None
+        )
+        if tail is None:
+            view["digest_status"] = "coverage_unknown"
+            return view
+
+        # `stale` is Conclair's own derivation (digest vs the thread's
+        # current last_msg_id) and is the authority; the tail is only the
+        # fallback for a store that did not compute it.
+        stale = body.get("stale")
+        view["digest_status"] = (
+            "stale" if (bool(tail) if stale is None else bool(stale)) else "fresh"
+        )
+        if digest == "only":
+            view["messages"] = tail
+            view["messages_omitted"] = len(messages) - len(tail)
+        return view
 
     @mcp.tool()
     async def chatroom_list_events(
