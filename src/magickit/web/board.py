@@ -19,15 +19,21 @@
      ``"closed"`` (``resolved`` / ``superseded``) でない。**鮮度だけでは
      resolved が落ちない**: 解決した msg がそのまま末尾になるので
      (``resolved_by_msg == last_msg_id``)、鮮度は構造的に一致し続ける。
-  3. **駐機が人宛** — ``decisions._is_parked_to_human`` が真。
-     ``next_participant`` が別の identity を指していれば、それは僕への
-     駐機ではなく他者への handoff。
+  3. **僕がまだ答えていない** — 駐機 msg が human の ``decide`` ではない
+     (``decisions._is_human_decide``)。自分の決裁が末尾に残っているだけの
+     ものは、僕の番ではなく次の人の番。
 
-  2 と 3 は**判断ページの関数をそのまま呼ぶ** (``decisions.py:1080`` が
-  judgement 分岐に入る条件と同一)。かつてこの docstring は「判断ページと
-  同じ規則」と書いていたが、実装していたのは 1 だけで、**板と判断ページは
-  実際に食い違っていた** ——— 板が判断待ちと言うカードを開くと判断ページが
-  「判断待ちではありません」と答える、という形で。
+  **``NEXT:`` 行を「誰の番か」として読んではいけない。** 一度そう実装して
+  外した (2026-09-14): ``decisions._is_parked_to_human`` で絞ったところ、
+  **本物の判断待ちを 3 件落とした**。``NEXT:`` は「次に動く *はず* の人」
+  であって、誰の番かを決めているのは conductor の停止理由のほう。
+  mindwire の ``guard_proposer_to_implementer`` (guard (i)) は
+  **非 human の著者から implementer への handoff を design→implement の
+  Tier-C ゲートとして人に差し戻す** (``conductor/core.py`` `_route`) ∴
+  ``NEXT: Heisenberg`` と書いてあるスレッドがそのまま僕の判断待ちになる。
+  材料が来ていること自体が「conductor が人で止まった」の言い換えで
+  (push は ``$needsHuman`` な停止理由でしか発火しない)、その停止理由は
+  材料の ``signature`` (``<reason>:<msg_id>``) にも入っている。
 - **deploy 承認待ち** — ``status == pending_approval`` の deploy request。
   ローカルの file store ∴ Conclair が落ちていても読める。
 - **止まったループ** — 稼働状況ページと **同じ** ``ops.classify`` で
@@ -240,10 +246,10 @@ class _Live:
     #: 判断待ちの判定ができた project 集合。ここに無い project の消えた
     #: 判断カードには「進んだ」と書けない (読めていないだけかもしれない)。
     decided_projects: set[str] = field(default_factory=set)
-    #: 鮮度は通ったが駐機が人宛でなかったカードの ``item_key``。完了列の
+    #: 鮮度は通ったが末尾が僕自身の決裁だったカードの ``item_key``。完了列の
     #: 理由づけがこれを見ないと「スレッドが進みました」と嘘をつく
-    #: ——— 進んでいない。宛先が僕ではなかっただけ。
-    not_parked_to_me: set[str] = field(default_factory=set)
+    #: ——— 進んでいない。僕が答えたまま止まっているだけ。
+    already_answered: set[str] = field(default_factory=set)
 
 
 def _pr_link(*texts: str) -> CardLink | None:
@@ -375,30 +381,30 @@ async def _collect_decisions(
                 )
             )
 
-    await _keep_only_parked_to_me(adapter, candidates, live)
+    await _drop_the_ones_i_already_answered(adapter, candidates, live)
 
 
-async def _keep_only_parked_to_me(
+async def _drop_the_ones_i_already_answered(
     adapter: ChatroomAdapter, candidates: list[Card], live: _Live
 ) -> None:
-    """駐機 msg が**僕宛**のカードだけを board に載せる。
+    """自分の決裁が末尾に残っているだけのカードを落とす。
 
-    判定は判断ページの :func:`decisions._is_parked_to_human` をそのまま
-    呼ぶ ——— ``next_participant`` が human を指すか、その field を持たない
-    旧 msg なら本文の単独行 ``NEXT: human``。**同じ問いを 2 回実装しない**
-    のがここの要点で、板が「待っている」と言ったカードを開いた先の判断
-    ページが「宛先が違います」と答える、という食い違いはそれで起きていた。
+    判定は判断ページの :func:`decisions._is_human_decide` (``author`` が
+    human かつ ``type == "decide"``)。答えた後もスレッドが動いていなければ
+    材料は鮮度を保ったままなので、鮮度だけでは落ちない。
+
+    **ここで ``NEXT:`` 行や ``next_participant`` を見てはいけない。**
+    ``NEXT: Heisenberg`` のスレッドは僕の判断待ちでありうる (module
+    docstring の guard (i))。落とすのは「僕が既に答えた」の 1 形だけで、
+    「誰に宛てられているか」ではない。
 
     駐機 msg は ``list_threads`` には入っていない ∴ 1 本ずつ取りに行く。
     対象は鮮度とスレッド状態を通ったものだけ (実測 5 本) で、板全体でも
     1 桁本にしかならない ——— ``head == last_msg_id`` を満たす材料の数が
     そのまま上限になる。
 
-    **読めなかったら残す。** 宛先が他人だと分かることと、宛先を確認でき
-    ないことは別で、後者で消すのは「僕への依頼が黙って消える」向きの
-    取りこぼし。落とした分は件数として板の上に出す (0 件なら何も出さない)
-    ——— 材料があるのに人宛の駐機になっていないのは mindwire 側の通知が
-    壊れている可能性があり、黙って消すとその故障が板から見えなくなる。
+    **読めなかったら残す。** 答えたと分かることと、確認できないことは別で、
+    後者で消すのは「僕への依頼が黙って消える」向きの取りこぼし。
     """
     if not candidates:
         return
@@ -411,7 +417,6 @@ async def _keep_only_parked_to_me(
         return_exceptions=True,
     )
 
-    withheld = 0
     for card, result in zip(candidates, results):
         if isinstance(result, BaseException) or ops._is_error(result):
             logger.warning(
@@ -427,19 +432,13 @@ async def _keep_only_parked_to_me(
             # 権威が空を返した。宛先を確認できていない ∴ 残す側に倒す。
             live.cards.append(card)
             continue
-        if decisions._is_parked_to_human(messages[-1]):
-            live.cards.append(card)
+        if decisions._is_human_decide(messages[-1]):
+            # 自分の決裁が末尾。答えは出ている ∴ 次は誰かの番で、僕のでは
+            # ない。告知は出さない: これは故障ではなく通常の流れで、完了列
+            # のカードが理由を持っている。
+            live.already_answered.add(card.key)
         else:
-            live.not_parked_to_me.add(card.key)
-            withheld += 1
-
-    if withheld:
-        live.notices.append(
-            f"判断材料はあるが駐機が人宛になっていないものが {withheld} 件あります"
-            "（次の担当が別の identity を指しているか、宛先が付いていません）。"
-            "板には出していません — 心当たりが無ければ mindwire 側の通知の"
-            "故障かもしれません。"
-        )
+            live.cards.append(card)
 
 
 # --- deploy 承認待ち -------------------------------------------------------
@@ -588,10 +587,10 @@ def _gone_reason(row: dict[str, Any], live: _Live) -> str:
     project = row.get("project")
     thread_id = row.get("thread_id")
 
-    if str(row.get("item_key", "")) in live.not_parked_to_me:
-        # スレッドは動いていない。駐機の宛先が僕ではなかっただけ ∴
-        # 下の「進みました」に落とすと、起きていないことを断定する。
-        return "駐機の宛先が人ではありません（次の担当が別の identity です）"
+    if str(row.get("item_key", "")) in live.already_answered:
+        # スレッドは動いていない。末尾が僕自身の決裁なだけ ∴ 下の
+        # 「進みました」に落とすと、起きていないことを断定する。
+        return "あなたが回答済みです（決裁がスレッドの末尾にあります）"
 
     if kind == "decision" and project and thread_id:
         thread = live.threads.get((str(project), str(thread_id)))

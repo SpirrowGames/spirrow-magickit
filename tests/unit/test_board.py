@@ -120,12 +120,12 @@ def _summary(project="p", **kw):
 
 
 def _parked(msg_id="msg-9", *, to="human", **kw):
-    """A parked message. ``to`` is the ``next_participant`` the board reads.
+    """A parked message: an agent's report, i.e. one I have **not** answered.
 
-    ``to="human"`` is the default because that is what a board fixture is
-    *for*: every pre-existing test in this file is about freshness, and
-    each one needs the thread to be parked on the human or the card is
-    (correctly) not a card at all.
+    ``next_participant`` is carried because real messages have it, but the
+    board deliberately does not read it -- see ``_drop_the_ones_i_already_
+    answered``. Pass ``author="human", type="decide"`` for the one shape
+    that does take a card off the board.
     """
     msg = {
         "msg_id": msg_id,
@@ -136,6 +136,11 @@ def _parked(msg_id="msg-9", *, to="human", **kw):
     }
     msg.update(kw)
     return msg
+
+
+def _my_decide(msg_id="msg-9", **kw):
+    """My own Tier-C decision, sitting at the thread's tail."""
+    return _parked(msg_id, author="human", type="decide", **kw)
 
 
 def _adapter(*, summaries=None, threads=None, control=None, messages=None):
@@ -999,15 +1004,60 @@ async def test_superseded_is_closed_too(temp_db_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_thread_parked_on_someone_else_is_not_my_card(
+async def test_a_thread_handed_to_the_implementer_is_still_my_card(
     temp_db_path, monkeypatch
 ):
-    """``next_participant`` が別の identity を指すなら僕への駐機ではない。"""
+    """``NEXT: Heisenberg`` は「Heisenberg の番」ではない。
+
+    mindwire の ``guard_proposer_to_implementer`` (guard (i)) は、非 human
+    の著者から implementer への handoff を **design→implement の Tier-C
+    ゲート**として人に差し戻す ∴ conductor は ``StopReason.HUMAN`` で
+    止まり、だからこそ材料が push されてくる。
+
+    2026-09-14 に一度これを ``_is_parked_to_human`` で落とす実装を入れ、
+    **本物の判断待ちを 3 件消した**。このテストはその再発を止めるためのもの。
+    """
     _no_deploys(monkeypatch)
     await _put_material(temp_db_path, head="msg-9")
     adapter = _adapter(
         threads={"p": [_thread(last_msg_id="msg-9")]},
-        messages={"T-1": [_parked("msg-9", to="Bohr")]},
+        messages={"T-1": [_parked("msg-9", to="Heisenberg")]},
+    )
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    assert [c.key for c in _cards(context)] == ["decision:p:T-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_with_no_handoff_at_all_is_still_my_card(
+    temp_db_path, monkeypatch
+):
+    """宛先が付いていないこと自体は「僕の番ではない」の根拠にならない。"""
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9")
+    adapter = _adapter(
+        threads={"p": [_thread(last_msg_id="msg-9")]},
+        messages={"T-1": [_parked("msg-9", to=None)]},
+    )
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    assert [c.key for c in _cards(context)] == ["decision:p:T-1"]
+
+
+@pytest.mark.asyncio
+async def test_my_own_decide_at_the_tail_is_not_a_card(temp_db_path, monkeypatch):
+    """答えた後にスレッドが動いていないと、材料は鮮度を保ったまま残る。
+
+    鮮度だけでは落ちない ∴ 「僕が既に答えた」は別に見る必要がある。落とす
+    のはこの 1 形だけで、「誰に宛てられているか」ではない。
+    """
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9")
+    adapter = _adapter(
+        threads={"p": [_thread(last_msg_id="msg-9")]},
+        messages={"T-1": [_my_decide("msg-9")]},
     )
 
     context = await _collect(adapter, _settings(temp_db_path))
@@ -1016,49 +1066,26 @@ async def test_a_thread_parked_on_someone_else_is_not_my_card(
 
 
 @pytest.mark.asyncio
-async def test_withholding_for_the_wrong_target_is_announced_not_silent(
-    temp_db_path, monkeypatch
-):
-    """黙って消さない。
-
-    材料があるのに人宛の駐機になっていないのは mindwire 側の通知が壊れて
-    いる可能性がある ∴ 0 件でないかぎり件数を板の上に出す。消すだけだと
-    その故障が board から見えなくなる。
-    """
+async def test_an_agents_decide_is_not_my_decide(temp_db_path, monkeypatch):
+    """``type=decide`` だけでは足りない。**著者が human** であること。"""
     _no_deploys(monkeypatch)
     await _put_material(temp_db_path, head="msg-9")
     adapter = _adapter(
         threads={"p": [_thread(last_msg_id="msg-9")]},
-        messages={"T-1": [_parked("msg-9", to="Bohr")]},
+        messages={"T-1": [_parked("msg-9", author="Bohr", type="decide")]},
     )
 
     context = await _collect(adapter, _settings(temp_db_path))
 
-    assert any("駐機が人宛になっていない" in n for n in context["notices"])
-
-
-@pytest.mark.asyncio
-async def test_nothing_is_announced_when_nothing_was_withheld(
-    temp_db_path, monkeypatch
-):
-    """常時点灯する行は読まれなくなる ∴ 0 件なら何も出さない。"""
-    _no_deploys(monkeypatch)
-    await _put_material(temp_db_path, head="msg-9")
-    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
-
-    context = await _collect(adapter, _settings(temp_db_path))
-
-    assert len(_cards(context)) == 1
-    assert context["notices"] == []
+    assert [c.key for c in _cards(context)] == ["decision:p:T-1"]
 
 
 @pytest.mark.asyncio
 async def test_an_unreadable_parked_msg_keeps_the_card(temp_db_path, monkeypatch):
     """**読めなかったら残す。** ここだけ倒す向きが逆。
 
-    宛先が他人だと分かることと、宛先を確認できないことは別。後者で消すと
-    「僕への依頼が黙って board から消える」という、この板が存在する理由
-    そのものを壊す向きの取りこぼしになる。
+    答えたと分かることと、確認できないことは別。後者で消すと「僕への依頼が
+    黙って board から消える」という、この板が存在する理由そのものを壊す。
     """
     _no_deploys(monkeypatch)
     await _put_material(temp_db_path, head="msg-9")
@@ -1073,57 +1100,27 @@ async def test_an_unreadable_parked_msg_keeps_the_card(temp_db_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_a_legacy_msg_with_no_field_falls_back_to_the_body(
-    temp_db_path, monkeypatch
-):
-    """``next_participant`` を持たない旧 msg は本文の単独行で拾う。
-
-    実測 (`T-gate-silently-suppresses-...`) がこの経路で拾われている ∴
-    field 前提にすると本物の判断待ちが 1 枚消える。
-    """
-    _no_deploys(monkeypatch)
-    await _put_material(temp_db_path, head="msg-9")
-    legacy = {"msg_id": "msg-9", "author": "pr-gate-relay", "type": "report",
-              "content": "ここまでの経緯\n\nNEXT: human\n"}
-    adapter = _adapter(
-        threads={"p": [_thread(last_msg_id="msg-9")]},
-        messages={"T-1": [legacy]},
-    )
-
-    context = await _collect(adapter, _settings(temp_db_path))
-
-    assert [c.key for c in _cards(context)] == ["decision:p:T-1"]
-
-
-@pytest.mark.asyncio
 async def test_the_done_column_does_not_claim_a_thread_advanced_when_it_did_not(
     temp_db_path, monkeypatch
 ):
-    """宛先違いで落ちたカードに「スレッドが進みました」と書かない。
-
-    進んでいない ——— 駐機の宛先が僕ではなかっただけで、スレッドは 1 mm も
-    動いていない。完了列は「何が起きたか」を言う列なので、起きていない
-    ことを書いたらこの列を読む理由が無くなる。
-    """
+    """答えたまま止まったカードに「スレッドが進みました」と書かない。"""
     _no_deploys(monkeypatch)
     await _put_material(temp_db_path, head="msg-9")
     store = BoardLaneStore(db_path=temp_db_path)
     await store.touch_seen([
         SeenItem(item_key="decision:p:T-1", kind="decision", title="t",
                  project="p", thread_id="T-1", href="#"),
-        SeenItem(item_key="decision:p:T-ghost", kind="decision", title="g",
-                 project="p", thread_id="T-ghost", href="#"),
     ])
     adapter = _adapter(
         threads={"p": [_thread(last_msg_id="msg-9")]},
-        messages={"T-1": [_parked("msg-9", to="Bohr")]},
+        messages={"T-1": [_my_decide("msg-9")]},
     )
 
     context = await _collect(adapter, _settings(temp_db_path))
 
     reasons = {c.key: c.reason for c in context["done"]}
     assert reasons["decision:p:T-1"] == (
-        "駐機の宛先が人ではありません（次の担当が別の identity です）"
+        "あなたが回答済みです（決裁がスレッドの末尾にあります）"
     )
 
 
@@ -1135,5 +1132,5 @@ def test_the_board_and_the_decision_page_share_both_predicates():
     """
     from magickit.web import decisions as decisions_module
 
-    assert board.decisions._is_parked_to_human is decisions_module._is_parked_to_human
+    assert board.decisions._is_human_decide is decisions_module._is_human_decide
     assert board.decisions._thread_write_state is decisions_module._thread_write_state
