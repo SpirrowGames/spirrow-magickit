@@ -38,7 +38,13 @@ from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import close_client as close_chatroom_ui_client
 from magickit.web import dashboard_router as chatroom_dashboard_router
 from magickit.web import digest_router as chatroom_digest_router
-from magickit.web import board_router, decisions_router, deploys_router, ops_router
+from magickit.web import (
+    board_router,
+    decision_summary_router,
+    decisions_router,
+    deploys_router,
+    ops_router,
+)
 from magickit.web import router as chatroom_ui_router
 from magickit.web import writes_router as chatroom_writes_router
 
@@ -286,6 +292,8 @@ def create_app() -> FastAPI:
     # not fold this into ops" a structural fact instead of a comment
     # somebody has to remember.
     app.include_router(decisions_router)
+    # 3 セグメント ∴ 判断ページ本体 (2) とも板 (1) とも衝突しない。
+    app.include_router(decision_summary_router)
 
     # The board: 「僕を待って止まっているもの」を 1 枚に。Claims
     # `/dashboard/decisions` itself, which used to be a 302 stub inside the

@@ -132,6 +132,18 @@ class Settings(BaseSettings):
         default_factory=lambda: ["Bohr", "Heisenberg", "Einstein", "Fermi", "human"]
     )
 
+    # 判断ページの「簡潔版」ボタン。人がボタンを押したときだけ走る ∴ 既定は
+    # 有効 (digest の sweeper が既定 off なのは、誰も頼んでいないのに GPU を
+    # 使い始める唯一のものだったから。こちらは押されるまで何もしない)。
+    decision_summary_enabled: bool = Field(default=True)
+    # `lexora_timeout` の 240s は重い文書処理向けの天井。要約は人が押して
+    # 待っている ∴ 継承しない。実測 (Qwen3.8-27B / 12.5k tokens 入力) は
+    # 7 秒台で、材料だけを渡す本用途はさらに小さい。
+    decision_summary_timeout_seconds: float = Field(default=90.0)
+    # 要約なので入力より短くなるのが前提。詰まったときに長文を吐いて時間を
+    # 使い切るのを防ぐ上限でもある。
+    decision_summary_max_tokens: int = Field(default=1200)
+
     # Ops view: how long a project may go without any chatroom activity or
     # loop heartbeat before the page calls it stalled. Long enough to sit
     # through an implementation turn (minutes) plus a slow review, short
@@ -422,6 +434,13 @@ class Settings(BaseSettings):
                 flat_config["decision_next_participant_choices"] = list(
                     decisions_cfg.get("next_participant_choices") or []
                 )
+            for yaml_key, field in (
+                ("summary_enabled", "decision_summary_enabled"),
+                ("summary_timeout_seconds", "decision_summary_timeout_seconds"),
+                ("summary_max_tokens", "decision_summary_max_tokens"),
+            ):
+                if yaml_key in decisions_cfg:
+                    flat_config[field] = decisions_cfg.get(yaml_key)
 
         # Ops view settings
         if ops := yaml_config.get("ops"):
