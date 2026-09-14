@@ -64,7 +64,8 @@
         </thead>
         <tbody>
             {% for row in requests %}
-            <tr>
+            {# やること board の承認カードがこの行を名指して飛んでくる。 #}
+            <tr id="deploy-{{ row.request_id }}">
                 <td class="nowrap">{{ row.created_at }}</td>
                 <td><code>{{ row.target }}</code></td>
                 <td><span class="status status-{{ row.status_class }}">{{ row.status }}</span></td>
