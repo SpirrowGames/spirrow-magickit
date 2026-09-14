@@ -1,0 +1,69 @@
+{#
+  判断材料の簡潔版。詳細の **上** に出し、詳細はその下に残る ——— 切替に
+  すると比較できない。要約は導出物で、正本は下の詳細。
+
+  **フォームはこの fragment に紐づかない。** 選択の radio も宛先の select も
+  詳細側にある ∴ 「要約だけ見て決めた」が構造的に起きない。
+#}
+{% if error %}
+<div class="decision-summary decision-summary-error" role="status">
+  {{ error }}
+  <span class="decision-summary-note">下の詳細はそのまま読めます。</span>
+</div>
+{% elif summary %}
+<div class="decision-summary" role="region" aria-label="簡潔版">
+  <h2>簡潔版</h2>
+
+  {% if summary.question %}
+  <p class="decision-summary-question"><span class="pre-wrap">{{ summary.question }}</span></p>
+  {% endif %}
+
+  {% if summary.options %}
+  <table class="table table-stack decision-summary-table">
+    <thead>
+      <tr>
+        <th scope="col">選択肢</th>
+        <th scope="col">得るもの</th>
+        <th scope="col">失うもの</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for opt in summary.options %}
+      <tr>
+        <td data-label="選択肢">
+          <span class="decision-choice-id">{{ opt.id }}</span>
+          <span class="pre-wrap">{{ opt.label }}</span>
+        </td>
+        <td data-label="得るもの"><span class="pre-wrap">{{ opt.gain }}</span></td>
+        <td data-label="失うもの"><span class="pre-wrap">{{ opt.loss }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {#
+    落ちた選択肢を黙って消さない。要約が元より少ないなら、それは要約が
+    落としたということで、読み手が詳細で確かめるべき事実。
+  #}
+  {% if summary.source_option_count and summary.options
+        and summary.options | length < summary.source_option_count %}
+  <p class="decision-summary-note">
+    元の選択肢 {{ summary.source_option_count }} 件のうち
+    {{ summary.options | length }} 件だけが要約されています。
+    下の詳細で残りを確認してください。
+  </p>
+  {% endif %}
+
+  <p class="decision-summary-note">
+    {#
+      provenance。どの tier に要求したかであって、Lexora が実際どのモデルに
+      流したかの観測ではない (model が返る日まで空欄) —— digest の tier と
+      同じ扱い。「要約は材料から機械が作った」ことを画面に残すのが目的で、
+      判断の根拠は下の詳細のほう。
+    #}
+    材料から {{ summary.tier }} tier が生成{% if summary.model %} ({{ summary.model }}){% endif %}{% if summary.generated_at %} · {{ summary.generated_at | ago }}{% endif %}{% if cached %} · 前回の結果{% endif %}。
+    <strong>判断の根拠は下の詳細です。</strong>
+  </p>
+</div>
+{% endif %}
