@@ -116,6 +116,22 @@ class Settings(BaseSettings):
     # requires.
     naysayer_identities: list[str] = Field(default_factory=lambda: ["Einstein"])
 
+    # 判断ページの「次の担当」に出す identity。**スレッドの発言者ではなく、
+    # Takahito が誰にタスクを回してよいかのリスト。** カードが彼に回った時点で
+    # 彼は誰にでも回せる ∴ 出どころはスレッドの状態ではなく設定。
+    #
+    # 発言者から作っていた頃は、材料付きスレッド 20 本の実測で `pr-gate-relay`
+    # (129 発言) / `orchestrator` / `operator-lane` が候補に混ざっていた —
+    # 機械側の役に人の判断を手渡せる形だった。逆に `Fermi` はどのスレッドでも
+    # 発言していないので、設定に書かない限り永久に選べなかった。
+    #
+    # ここに書いても Prismind に未登録の名前は `_participant_choices_registered`
+    # (D-36 / D-38 fail-closed) が落とす。このリストは候補の**出どころ**であって
+    # 認可ではない。
+    decision_next_participant_choices: list[str] = Field(
+        default_factory=lambda: ["Bohr", "Heisenberg", "Einstein", "Fermi", "human"]
+    )
+
     # Ops view: how long a project may go without any chatroom activity or
     # loop heartbeat before the page calls it stalled. Long enough to sit
     # through an implementation turn (minutes) plus a slow review, short
@@ -397,6 +413,15 @@ class Settings(BaseSettings):
                 flat_config["naysayer_gate_enabled"] = naysayer_gate.get("enabled")
             flat_config["naysayer_gate_tag"] = naysayer_gate.get("tag")
             flat_config["naysayer_identities"] = naysayer_gate.get("identities")
+
+        # 判断ページ。`is not None` で見るのは deploy.approver_logins と同じ理由
+        # ——— 「書いていない」と「空リストを明示した」を区別する。空を明示したら
+        # 候補は sentinel だけになる、が意図どおり効くようにする。
+        if (decisions_cfg := yaml_config.get("decisions")) is not None:
+            if "next_participant_choices" in decisions_cfg:
+                flat_config["decision_next_participant_choices"] = list(
+                    decisions_cfg.get("next_participant_choices") or []
+                )
 
         # Ops view settings
         if ops := yaml_config.get("ops"):

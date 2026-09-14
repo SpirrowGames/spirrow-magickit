@@ -688,9 +688,16 @@ async def test_page_shows_undetermined_store_unavailable_stays_200(
 async def test_page_shows_undetermined_head_is_current(isolated_material_store):
     """★ test 7: head が最終 msg (後ろ空) → undetermined / head_is_current。
 
-    通知が指していた msg が今も最新なのに not_waiting 分岐に来ているなら
-    その msg は判断を求める形ではなかった — 「そもそも判断ではなかった」を
-    一次データで言える唯一の分岐 (msg-137 §1 の 9)。
+    **この分岐の射程は 2026-09-14 に狭まった。** 旧 docstring は「通知が指して
+    いた msg が今も最新なのに not_waiting に来たなら、その msg は判断を求める
+    形ではなかった」と書いていたが、それは偽だった: guard (i) の Tier-C 差し戻し
+    (proposer → implementer の handoff を conductor が人に戻す) が**まさにこの
+    形**を作り、しかも本物の判断待ちだった。開いているスレッドで材料が新鮮なら
+    今は judgement に入る (:func:`_is_waiting_on_the_human`)。
+
+    ∴ この分岐に残るのは「材料は新鮮だが、別の理由で人の番ではない」場合。
+    ここでは closed を使う — スレッドが resolved なら、通知が指した msg が
+    末尾のままでも人の番ではない。
     """
     store = isolated_material_store()
     await store.put_material(
@@ -699,10 +706,10 @@ async def test_page_shows_undetermined_head_is_current(isolated_material_store):
         signature=None, question=None, options=None,
         recommendation=None, recommendation_reason=None, unknowns=None,
     )
-    payload = _thread_payload([
-        # 最終 msg = head, かつ human parking ではない (故障で来た pattern).
-        _msg("msg-100", author="Bohr", next_participant="Einstein"),
-    ])
+    payload = _thread_payload(
+        [_msg("msg-100", author="Bohr", next_participant="Einstein")],
+        status="resolved",
+    )
     adapter = _adapter_returning(payload)
     with patch.object(chatroom_tools, "_adapter", return_value=adapter):
         r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
@@ -1018,8 +1025,20 @@ def test_msg_timestamp_returns_none_for_empty_str():
 
 @pytest.mark.asyncio
 async def test_answered_evidence_is_html_escaped(isolated_material_store):
-    """★ test 12 (msg-137 §7): author に ``<script>`` を含む msg を answered
-    の根拠にしても escape される (|safe 禁止の lint と併せて)。"""
+    """★ test 12 (msg-137 §7): 敵対的な文字列が生で HTML に出ないこと。
+
+    **2026-09-14 に測り直した**: この test は名前のとおり「answered の根拠に
+    出る author」を守っているつもりだったが、実際に escape を証明していたのは
+    **select の候補**だった ——— 候補が発言者から作られていたので、悪意ある
+    author 名がそこに出ていた。候補が設定由来になった今その経路は消えたので、
+    実際に守れるものを守る形に直す。
+
+    なお answered の根拠に出る author は **構造的に "human" にしかならない**:
+    ``_is_human_decide`` は ``author.lower() in _HUMAN_IDENTITIES`` を要求する
+    ∴ ``Human<script>…`` は human decide と判定されない。あの経路に敵対的な
+    文字列は到達しない。ここでは**スレッド題名**を使う ——— Conclair 由来の
+    文字列で、not_waiting / judgement のどちらでも描画される。
+    """
     store = isolated_material_store()
     await store.put_material(
         project=PROJECT, thread_id=THREAD,
@@ -1029,9 +1048,9 @@ async def test_answered_evidence_is_html_escaped(isolated_material_store):
     )
     payload = _thread_payload([
         _msg("msg-100", author="Bohr", next_participant="human"),
-        _msg("msg-101", author="Human<script>alert(1)</script>",
-             type="decide", next_participant="none"),
+        _msg("msg-101", author="human", type="decide", next_participant="none"),
     ])
+    payload["thread"]["title"] = "T<script>alert(1)</script>"
     adapter = _adapter_returning(payload)
     with patch.object(chatroom_tools, "_adapter", return_value=adapter):
         r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
@@ -1125,3 +1144,114 @@ async def test_chatroom_link_present_in_all_states(isolated_material_store):
         ):
             r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
         assert f"/ui/projects/{PROJECT}/threads/{THREAD}" in r.text
+
+
+# ---------------------------------------------------------------------------
+# 板と同じ答えを返すこと (2026-09-14)
+# ---------------------------------------------------------------------------
+#
+# 板に出ているカードを開いたら「判断待ちではありません」と言われる、が本番で
+# 起きていた。`NEXT:` 行は「次に動く *はず* の人」で、誰の番かを決めているのは
+# conductor の停止理由のほう。材料が push されてきていること自体がその答え。
+
+
+@pytest.mark.asyncio
+async def test_guard_i_tier_c_gate_opens_as_a_judgement(isolated_material_store):
+    """`NEXT: <implementer>` でも、材料が新鮮なら人の番。
+
+    mindwire の guard (i) は非 human の著者から implementer への handoff を
+    design→implement の Tier-C ゲートとして人に差し戻す ∴ conductor は
+    `StopReason.HUMAN` で止まり、だからこそ材料が来る。**本番でこの形の
+    カードが板に出ているのに、開くと「宛先が違います」と言われていた。**
+    """
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD, head_msg_id="msg-100",
+        signature="human:msg-100", question="この問題をどう解くか",
+        options=None, recommendation=None, recommendation_reason=None,
+        unknowns=None,
+    )
+    payload = _thread_payload(
+        [_msg("msg-100", author="Bohr", next_participant="Heisenberg")]
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert "判断待ちではありません" not in r.text
+    assert "この問題をどう解くか" in r.text
+
+
+@pytest.mark.asyncio
+async def test_a_stale_material_still_lands_in_not_waiting(isolated_material_store):
+    """広げたのは fresh だけ。**材料が古ければ従来どおり not_waiting。**"""
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD, head_msg_id="msg-1",
+        signature=None, question="古い問い", options=None,
+        recommendation=None, recommendation_reason=None, unknowns=None,
+    )
+    payload = _thread_payload([
+        _msg("msg-1", author="Bohr", next_participant="Heisenberg"),
+        _msg("msg-100", author="Bohr", next_participant="Heisenberg"),
+    ])
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # head の後に msg があるので advanced 分岐。judgement には入らない。
+    assert "その後スレッドが進んでいます" in r.text
+    assert "古い問い" not in r.text          # I-14: stale の材料は描かない
+
+
+@pytest.mark.asyncio
+async def test_my_own_decide_at_the_tail_is_not_a_judgement(isolated_material_store):
+    """答えた後にスレッドが動いていないと材料は新鮮なまま ∴ 別に見る。"""
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD, head_msg_id="msg-100",
+        signature=None, question="もう答えた問い", options=None,
+        recommendation=None, recommendation_reason=None, unknowns=None,
+    )
+    payload = _thread_payload(
+        [_msg("msg-100", author="human", type="decide", next_participant="Bohr")]
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert "判断待ちではありません" in r.text
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_human_park_opens_even_with_no_material(
+    isolated_material_store,
+):
+    """**OR であって置き換えではない。**
+
+    mindwire D-34 は「材料の PUT が失敗しても通知は出す」と決めている ∴
+    明示 `NEXT: human` で PUT だけ落ちた回を freshness で判定すると、通知を
+    受けて開いた人が J-absent の判断画面すら見られなくなる。
+    """
+    isolated_material_store()          # 材料は入れない
+    payload = _thread_payload(
+        [_msg("msg-100", author="Bohr", next_participant="human")]
+    )
+    adapter = _adapter_returning(payload)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert "判断待ちではありません" not in r.text
+
+
+def test_the_page_and_the_board_share_the_same_three_predicates():
+    """同じ問いに 2 つの実装を持たせない。"""
+    from magickit.web import board
+
+    assert decision_page._is_parked_to_human is board.decisions._is_parked_to_human
+    assert decision_page._thread_write_state is board.decisions._thread_write_state
+    assert decision_page._is_human_decide is board.decisions._is_human_decide

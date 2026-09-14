@@ -37,6 +37,7 @@ tests that do not care about the filter.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -154,6 +155,21 @@ async def test_d35_i12_sentinel_radio_is_checked_by_default_on_fresh_render():
     # freeform_only_value).
     tail = r.text[idx : idx + 400]
     assert "checked" in tail, tail
+
+
+
+def _adapter_for_thread(*, last_msg_id: str = "msg-1") -> AsyncMock:
+    """J-fresh を作る最小のスレッド (駐機 msg は human 宛)。"""
+    return _adapter_returning({
+        "thread": {
+            "title": "T-table", "last_msg_id": last_msg_id, "status": "active",
+        },
+        "messages": [{
+            "author": "Bohr", "content": "please decide",
+            "next_participant": "human", "msg_id": last_msg_id,
+        }],
+        "mode": "full",
+    })
 
 
 @pytest.mark.asyncio
@@ -478,30 +494,7 @@ async def test_d36_uses_shared_lookup_identity_not_a_new_registry(monkeypatch):
 # --- D-37: default demotion when parked author is not registered --------
 
 
-def test_d37_resolve_default_target_returns_parked_when_registered():
-    assert (
-        decision_page._resolve_default_target("Bohr", ["Bohr", "human"])
-        == "Bohr"
-    )
 
-
-def test_d37_resolve_default_target_demotes_when_parked_not_in_choices():
-    """★ Critical case: parked author is ``pr-gate-relay`` (msg-131 shape).
-    Default is "宛先を送らない" (empty), NOT ``human`` — a decision that
-    "returned to itself" would look like the loop kept going when it did
-    not (msg-146 §3 D-37 逐語)."""
-    assert (
-        decision_page._resolve_default_target("pr-gate-relay", ["Bohr", "human"])
-        == decision_page.NO_TARGET_VALUE
-    )
-
-
-def test_d37_resolve_default_target_empty_parked_is_no_target():
-    """Empty parked author (rare: last msg lacks author) → no target."""
-    assert (
-        decision_page._resolve_default_target("", ["Bohr", "human"])
-        == decision_page.NO_TARGET_VALUE
-    )
 
 
 @pytest.mark.asyncio
@@ -554,141 +547,9 @@ async def test_d37_default_is_no_target_when_parked_author_is_pr_gate_relay():
 # pr-gate-relay ∴ D-37 never fired). These tests close that gap 0-tap.
 
 
-def test_d37_participant_choices_returns_parked_unregistered_true(monkeypatch):
-    """The tuple's 4th element (``parked_author_unregistered``) is TRUE
-    iff Prismind actively answered ``found=False`` for the parked author.
-
-    This is the exact predicate the D-37 line hangs on. Locking it as a
-    unit so a template edit and a backend edit cannot drift silently."""
-    async def per_name(name: str, **_):
-        # Only "pr-gate-relay" is unregistered; everything else registered.
-        if name == "pr-gate-relay":
-            return _lookup(found=False)
-        return _lookup(found=True)
-
-    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
-
-    messages = [
-        {"author": "Bohr", "content": "propose", "next_participant": "human"},
-        {"author": "pr-gate-relay", "content": "review posted",
-         "next_participant": "human"},
-    ]
-    choices, unknown, any_unknown, parked_unregistered = asyncio.run(
-        decision_page._participant_choices_registered(
-            messages, parked_author="pr-gate-relay"
-        )
-    )
-    assert "pr-gate-relay" not in choices
-    assert unknown == set()
-    assert any_unknown is False
-    # ★ The D-37 predicate.
-    assert parked_unregistered is True
 
 
-def test_d37_participant_choices_parked_unregistered_false_when_registered(monkeypatch):
-    """When Prismind answers ``found=True`` for the parked author, D-37
-    does not fire — the default sits on the parked author as designed."""
-    async def per_name(name: str, **_):
-        return _lookup(found=True)
 
-    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
-
-    messages = [
-        {"author": "Bohr", "content": "propose", "next_participant": "human"},
-    ]
-    _c, _u, any_unknown, parked_unregistered = asyncio.run(
-        decision_page._participant_choices_registered(
-            messages, parked_author="Bohr"
-        )
-    )
-    assert any_unknown is False
-    assert parked_unregistered is False
-
-
-def test_d37_participant_choices_parked_unknown_does_not_set_unregistered(monkeypatch):
-    """★ D-37 vs D-38 orthogonality: when Prismind is UNREACHABLE for the
-    parked author (``unavailable_reason`` set → UNKNOWN verdict), the
-    D-37 flag stays FALSE. D-38's ``verification_unavailable`` line is
-    what covers this case; showing the D-37 "not a registered identity"
-    line here would be a false accusation (we did not measure anything).
-    """
-    async def per_name(name: str, **_):
-        return _lookup(found=False, unavailable_reason="prismind down")
-
-    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
-
-    messages = [
-        {"author": "pr-gate-relay", "content": "x", "next_participant": "human"},
-    ]
-    _c, _u, any_unknown, parked_unregistered = asyncio.run(
-        decision_page._participant_choices_registered(
-            messages, parked_author="pr-gate-relay"
-        )
-    )
-    assert any_unknown is True                # D-38 line will fire
-    assert parked_unregistered is False       # D-37 line stays silent
-
-
-def test_d37_participant_choices_empty_parked_author_never_sets_flag(monkeypatch):
-    """An empty parked author has nothing to accuse ∴ the flag is FALSE
-    unconditionally. Rules out a degenerate case where a missing
-    ``last_msg.author`` would light up the D-37 line."""
-    async def per_name(name: str, **_):
-        return _lookup(found=False)
-
-    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
-
-    messages = [{"author": "Bohr", "content": "x", "next_participant": "human"}]
-    _c, _u, _any_unknown, parked_unregistered = asyncio.run(
-        decision_page._participant_choices_registered(messages, parked_author="")
-    )
-    assert parked_unregistered is False
-
-
-@pytest.mark.asyncio
-async def test_d37_line_appears_when_parked_author_is_unregistered():
-    """★ msg-155 §5 gap-closer / msg-146 §3 逐語 ("理由を画面に 1 行出す"):
-    Prismind is UP, the parked author is ``pr-gate-relay``, ∴ the page
-    renders a *specific* 1-line reason so the user knows WHY the default
-    landed on "宛先を送らない" (a silent demotion would look like a bug).
-
-    The exact string is asserted so a rewrite that softens or drops the
-    message trips this test — the reason line is the whole point of D-37.
-    """
-    payload = {
-        "thread": {"title": "T-d37-line", "status": "active"},
-        "messages": [
-            {"author": "Bohr", "content": "propose", "next_participant": "human"},
-            {"author": "pr-gate-relay", "content": "review posted",
-             "next_participant": "human"},
-        ],
-        "mode": "full",
-    }
-    adapter = _adapter_returning(payload)
-
-    async def per_name(name: str, **_):
-        if name == "pr-gate-relay":
-            return _lookup(found=False)
-        return _lookup(found=True)
-
-    with (
-        patch.object(chatroom_tools, "_adapter", return_value=adapter),
-        patch.object(decision_page, "_resolve_identity", side_effect=per_name),
-    ):
-        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
-
-    assert r.status_code == 200
-    # The 1-line reason names the specific identity (the offending name)
-    # and states the remedy (select a target OR write NEXT: in the body).
-    assert "登録済 identity ではありません" in r.text
-    assert "既定を" in r.text and "宛先を送らない" in r.text
-    # The offending name appears — future eyes need to see WHICH name
-    # tripped the check, not just "some author was unregistered".
-    assert "pr-gate-relay" in r.text
-    # The remedy is spelled out (both options).
-    assert "select" in r.text and "NEXT:" in r.text
-    # The container class is stable so CSS / a11y hooks are safe.
-    assert 'class="decision-parked-unregistered"' in r.text
 
 
 @pytest.mark.asyncio
@@ -948,3 +809,177 @@ def test_no_target_value_and_label_are_defined_on_decisions_module():
     assert decision_page.NO_TARGET_VALUE == ""
     assert isinstance(decision_page.NO_TARGET_LABEL, str)
     assert decision_page.NO_TARGET_LABEL  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# 宛先候補は設定から (2026-09-14)
+# ---------------------------------------------------------------------------
+#
+# 以前は「スレッドの発言者 + human」だった。実測でそこには pr-gate-relay /
+# orchestrator / operator-lane が混ざり、人の判断を機械側の役に手渡せた。逆に
+# Fermi はどのスレッドでも発言しないので永久に選べなかった。カードが人に回った
+# 時点でその人は誰にでも回せる ∴ 出どころはスレッドの状態ではなく設定。
+#
+# これに伴い D-37（駐機著者を既定にし、置けないときだけ降格する）を撤去した。
+# 既定は常に sentinel ＝ 降格が起きない ∴ 降格の理由行も要らない。
+
+
+def test_candidates_come_from_settings_not_from_who_spoke(monkeypatch):
+    """発言者は候補にならない。設定に無い identity は出ない。"""
+    monkeypatch.setattr(
+        decision_page, "get_settings",
+        lambda: SimpleNamespace(
+            decision_next_participant_choices=["Bohr", "Heisenberg", "human"]
+        ),
+    )
+    messages = [
+        {"author": "pr-gate-relay", "content": "review posted"},
+        {"author": "orchestrator", "content": "opened"},
+    ]
+
+    got = decision_page._candidate_authors(messages, parked_author="pr-gate-relay")
+
+    assert got == ["Bohr", "Heisenberg", "human"]
+    assert "pr-gate-relay" not in got
+    assert "orchestrator" not in got
+
+
+def test_a_configured_identity_is_offered_even_if_it_never_spoke(monkeypatch):
+    """`Fermi` はどのスレッドでも発言しない ∴ 発言者由来では永久に選べない。"""
+    monkeypatch.setattr(
+        decision_page, "get_settings",
+        lambda: SimpleNamespace(decision_next_participant_choices=["Fermi"]),
+    )
+
+    assert decision_page._candidate_authors([{"author": "Bohr"}], "Bohr") == ["Fermi"]
+
+
+def test_the_default_target_is_always_the_sentinel():
+    """既定は誰でもない。**選ぶのは人。**
+
+    駐機著者を既定にすると、`NEXT: Heisenberg` のスレッドで既定が著者の Bohr に
+    なる ——— 何も触らずに送るとスレッドが名指していない相手に回る。sentinel なら
+    本文の `NEXT:` 行がそのまま効く ＝「触らなければスレッドの指示どおり」。
+    """
+    assert (
+        decision_page._resolve_default_target("Bohr", ["Bohr", "human"])
+        == decision_page.NO_TARGET_VALUE
+    )
+    assert (
+        decision_page._resolve_default_target("pr-gate-relay", ["Bohr", "human"])
+        == decision_page.NO_TARGET_VALUE
+    )
+    assert (
+        decision_page._resolve_default_target("", ["Bohr"])
+        == decision_page.NO_TARGET_VALUE
+    )
+
+
+def test_the_registry_filter_still_drops_an_unregistered_configured_name(
+    monkeypatch,
+):
+    """設定は候補の**出どころ**であって認可ではない。D-36 / D-38 は不変。"""
+    async def per_name(name: str, **_):
+        return _lookup(found=name != "Ghost")
+
+    monkeypatch.setattr(decision_page, "_resolve_identity", per_name)
+    monkeypatch.setattr(
+        decision_page, "get_settings",
+        lambda: SimpleNamespace(
+            decision_next_participant_choices=["Bohr", "Ghost", "human"]
+        ),
+    )
+
+    choices, unknown, any_unknown = asyncio.run(
+        decision_page._participant_choices_registered([], parked_author="")
+    )
+
+    assert choices == ["Bohr", "human"]
+    assert unknown == set()
+    assert any_unknown is False
+
+
+# ---------------------------------------------------------------------------
+# 比較表 (2026-09-14)
+# ---------------------------------------------------------------------------
+
+
+def test_i21_lint_actually_matches_something():
+    """**lint が空振りしていないこと。**
+
+    ``test_i21_no_anchor_tag_inside_decision_choice_label`` は match を
+    回すだけなので、**マッチ 0 件でも緑になる**。選択肢をカードから表へ
+    書き換えたときクラス名が変われば、あの lint は誰にも何も言わずに
+    無効化されていた。件数をここで留める。
+    """
+    from pathlib import Path
+    import re
+
+    src = Path("src/magickit/templates/decisions_thread.html").read_text(
+        encoding="utf-8"
+    )
+    labels = re.findall(
+        r'<label[^>]*class="[^"]*decision-choice[^"]*"[^>]*>(.*?)</label>',
+        src,
+        re.DOTALL,
+    )
+    # 選択肢行のラベルと sentinel の 2 つ。増えるぶんには構わないが、
+    # 0 や 1 は「選択に使う label が lint の外に出た」という意味。
+    assert len(labels) >= 2, f"I-21 lint covers only {len(labels)} label(s)"
+
+
+@pytest.mark.asyncio
+async def test_options_render_as_a_comparison_table(isolated_material_store):
+    """行=選択肢 / 列=選択肢・得るもの・失うもの。
+
+    縦積みのカードだと同じ次元を選択肢間で見比べられない。表の目的は
+    「横に読むと 1 案、縦に読むと同じ次元の比較」。
+    """
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD, head_msg_id="msg-1",
+        signature=None, question="どう解くか",
+        options=[
+            {"id": "A", "label": "スカラへ射影する", "gain": "有界", "loss": "情報損失"},
+            {"id": "B", "label": "sidecar に全文", "gain": "忠実", "loss": "sink 増"},
+        ],
+        recommendation="A", recommendation_reason="安いため", unknowns=None,
+    )
+    adapter = _adapter_for_thread(last_msg_id="msg-1")
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    assert 'class="table table-stack decision-choice-table"' in r.text
+    for header in ("選択肢", "得るもの", "失うもの"):
+        assert f'data-label="{header}"' in r.text or f">{header}<" in r.text
+    # radio の配線は表になっても不変 (単一 group / value は "id: label")
+    assert 'type="radio" name="content" value="A: スカラへ射影する"' in r.text
+    assert 'type="radio" name="content" value="(自由記述のみ)"' in r.text
+    # 推奨に印
+    assert "推奨" in r.text
+
+
+@pytest.mark.asyncio
+async def test_the_table_is_absent_when_there_are_no_options(
+    isolated_material_store,
+):
+    """選択肢が無いとき (J-stale / J-absent) は表ごと出さない。
+
+    見出しだけの空表は「選択肢がある」と誤読させる。sentinel radio は残る
+    ——— あれが無いと form が空の ``content`` を送って 422 になる (I-12)。
+    """
+    store = isolated_material_store()
+    await store.put_material(
+        project=PROJECT, thread_id=THREAD, head_msg_id="msg-1",
+        signature=None, question="選択肢の無い問い", options=None,
+        recommendation=None, recommendation_reason=None, unknowns=None,
+    )
+    adapter = _adapter_for_thread(last_msg_id="msg-1")
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter):
+        r = await _get(f"/dashboard/decisions/{PROJECT}/{THREAD}")
+
+    assert r.status_code == 200
+    # クラス名は <style> に常時あるので、表の *マークアップ* で見る。
+    assert '<table class="table table-stack decision-choice-table"' not in r.text
+    assert 'type="radio" name="content" value="(自由記述のみ)"' in r.text
