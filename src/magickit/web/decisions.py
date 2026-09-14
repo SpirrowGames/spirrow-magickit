@@ -302,47 +302,32 @@ def _parked_author(last_msg: dict[str, Any]) -> str:
 def _candidate_authors(
     messages: list[dict[str, Any]], parked_author: str
 ) -> list[str]:
-    """Return the candidate identity list *before* the registry filter.
+    """「次の担当」の候補。**設定リストがそのまま候補。**
 
-    Bohr §3 (msg-146): candidate generation is unchanged — this is the
-    "who might we hand off to" question, which we can answer from thread
-    state without Prismind. The filter that decides *which* of these
-    resolve to a registered identity is applied in
-    ``_participant_choices_registered`` below.
+    引数は後方互換のために残してあるが読まない。2026-09-14 まではここが
+    「スレッドの発言者 + ``human``」を返していて、**候補がスレッドの状態から
+    生えていた**。それが誤りだった理由は 2 つある。
 
-    Ordering rules (Bohr §3 D-37): ``parked_author`` sits at index 0 so
-    the default ``selected`` in the template lines up with the parked
-    author (subject to the D-37 caveat that the default is *demoted* to
-    "宛先を送らない" when it does not resolve as registered). ``human`` is
-    appended at the end; it is a measured constant (see A-23(i) in
-    msg-146 §5) and always belongs in the candidate list even when the
-    thread has never seen a message from ``human``.
+    - 機械側の役が候補に入る。材料付きスレッド 20 本の実測で、発言者には
+      ``pr-gate-relay`` が 129 回、``orchestrator`` / ``operator-lane`` も
+      現れる。人の判断を ``orchestrator`` に手渡せる選択肢が出ていた。
+    - **スレッドが名指している当人が選べない。** ``Fermi`` はどのスレッドでも
+      発言していないので候補に一度も入らなかった。``NEXT: Heisenberg`` の
+      スレッドで Heisenberg が選べない、も同じ形で起きていた。
 
-    **The old ``none`` / ``pr-review*`` exclusion is deliberately gone.**
-    The registry filter answers the same question with the actual
-    authority (I-19 / D-36) — keeping a spelled-out denylist here would
-    reintroduce the "two implementations of the same rule" trap that
-    msg-140 §4 named. Every render path now goes through
-    ``_participant_choices_registered`` (the D-31 error rerender was
-    unified onto ``_render_decision_page`` — msg-186 R-9 / msg-252 §1),
-    so the filter is no longer bypassable.
+    カードが人に回った時点で、その人は**誰にでも**回せる ∴ 候補は「誰が喋った
+    か」ではなく「誰に回してよいか」で、それは magickit 側の設定
+    (``decision_next_participant_choices``) が持つ。mindwire の roster の写し
+    ではない ——— roster は「ループが誰を起動できるか」で、別の問い。
+
+    未登録の名前はこの後 ``_participant_choices_registered`` (D-36 / D-38
+    fail-closed) が落とす。ここは候補の**出どころ**であって認可ではない。
     """
     seen: dict[str, None] = {}
-    if parked_author:
-        seen[parked_author] = None
-    for msg in messages:
-        author = str(msg.get("author") or "").strip()
-        if not author or author in seen:
-            continue
-        seen[author] = None
-    # ``human`` is a measured constant (A-23(i), msg-146 §5): the gate
-    # accepts it. It always belongs in the candidate list; a later filter
-    # is allowed to drop it (D-38 fail-closed) only when Prismind actively
-    # answered "not registered" — the "no verdict" case keeps it, since
-    # that is what the constant is *for*.
-    for h in _HUMAN_IDENTITIES:
-        if h not in seen:
-            seen[h] = None
+    for name in get_settings().decision_next_participant_choices:
+        cleaned = str(name or "").strip()
+        if cleaned and cleaned not in seen:
+            seen[cleaned] = None
     return list(seen.keys())
 
 
@@ -455,7 +440,7 @@ async def _participant_choices_registered(
 ) -> tuple[list[str], set[str], bool, bool]:
     """Return the registered subset of the candidate list (I-19 / D-37 / D-38).
 
-    Returns ``(choices, unknown_names, any_unknown, parked_author_unregistered)``:
+    Returns ``(choices, unknown_names, any_unknown)``:
 
     - ``choices`` is the ordered list of identity names to place in the
       select. It contains only names whose verdict is REGISTERED (D-36:
@@ -467,15 +452,6 @@ async def _participant_choices_registered(
       unavailable" notice (msg-146 §3 D-38 degradation copy).
     - ``any_unknown`` is a convenience flag; true iff Prismind was
       unreachable for at least one candidate.
-    - ``parked_author_unregistered`` is true iff the parked author was
-      non-empty AND Prismind actively answered UNREGISTERED for it (not
-      UNKNOWN, not "no lookup happened"). This is the D-37 condition:
-      Prismind is up, and it is *this one name* that is not a registered
-      identity ∴ the default target has been demoted to "宛先を送らない"
-      and the caller must render the specific 1-line reason (msg-146 §3
-      / msg-155 §5). D-38's "verification_unavailable" line covers a
-      different failure mode (Prismind unreachable); the two flags are
-      orthogonal and the template renders them independently.
 
     I-19: the verdict comes from ``chatroom_tools._lookup_identity``,
     the exact function the POST-time gate calls. A second implementation
@@ -516,30 +492,33 @@ async def _participant_choices_registered(
         elif verdict == _LookupVerdict.UNKNOWN:
             unknown.add(name)
         # UNREGISTERED is silently dropped — that is the point of the filter.
-    parked_author_unregistered = bool(
-        parked_author and parked_verdict == _LookupVerdict.UNREGISTERED
-    )
-    return choices, unknown, bool(unknown), parked_author_unregistered
+    # D-37 の 4 つ目の戻り値 (``parked_author_unregistered``) は 2026-09-14 に
+    # 撤去した。あれは「既定を駐機著者に置き、置けないときだけ降格した」理由を
+    # 画面に出すためのもので、既定が常に sentinel になった今は**説明する対象が
+    # 存在しない**。降格が起きないのだから降格の理由も無い。
+    # D-38 の ``unknown`` / ``any_unknown`` は別物なので残る (Prismind が
+    # 読めなかった、は依然として起きるし、再試行で変わりうる)。
+    del parked_verdict
+    return choices, unknown, bool(unknown)
 
 
 def _resolve_default_target(
     parked_author: str, choices: list[str]
 ) -> str:
-    """D-37: default value for the select.
+    """既定はいつでも「宛先を送らない」。**選ぶのは人。**
 
-    Returns the parked author iff it appears in the registered choices;
-    otherwise ``NO_TARGET_VALUE``. The design keeps the parked author's
-    behaviour as spec §2.3 promised, and *demotes* the default to "don't
-    send" when the parked actor cannot be handed off to — which is
-    exactly the case for ``pr-gate-relay`` (msg-140), the trigger for
-    this whole change.
+    D-37 は駐機 msg の著者を既定に置き、著者が候補に無いときだけ sentinel へ
+    降格していた。候補が設定リストになった今、著者を既定にする根拠は消えた
+    ——— そして残すと**積極的に誤導する**: ``NEXT: Heisenberg`` と書いてある
+    スレッドで、既定が著者の ``Bohr`` になる。読み手が何も触らずに送れば、
+    スレッドが名指していない相手に回る。
 
-    Deliberately does not silently substitute ``human``: a decision that
-    the human "returned to themselves" would look like the loop kept
-    going when it actually did not (msg-146 §3 D-37 text).
+    sentinel を既定にすると、何も選ばなければ ``content`` の本文にある
+    ``NEXT:`` 行がそのまま効く ∴ 「触らなければスレッドの指示どおり」になる。
+
+    引数は後方互換のために残す。D-37 の「``human`` を黙って既定にしない」は
+    そのまま成立している ——— 既定は誰でもない。
     """
-    if parked_author and parked_author in choices:
-        return parked_author
     return NO_TARGET_VALUE
 
 
@@ -1077,7 +1056,9 @@ async def _render_decision_page(
     messages = result.get("messages") or []
     thread_meta = result.get("thread") or {}
 
-    if not messages or not _is_parked_to_human(messages[-1]):
+    if not messages or not await _is_waiting_on_the_human(
+        project, thread_id, messages, thread_meta
+    ):
         return await _render_not_waiting_view(
             request,
             project=project,
@@ -1103,6 +1084,47 @@ async def _render_decision_page(
         submitted_freeform_value=submitted_freeform_value,
         submitted_next_participant_value=submitted_next_participant_value,
     )
+
+
+async def _is_waiting_on_the_human(
+    project: str,
+    thread_id: str,
+    messages: list[dict[str, Any]],
+    thread_meta: dict[str, Any],
+) -> bool:
+    """このスレッドは今、人の番か。**やること board と同じ答えを返す。**
+
+    2 つの根拠のどちらかで真。**OR であって置き換えではない。**
+
+    1. ``_is_parked_to_human`` — 駐機 msg が人を名指している。従来の唯一の
+       根拠で、**材料が無くても真になれる**のがここでは効く: mindwire の
+       D-34 は「材料の PUT が失敗しても通知は出す」と決めている ∴ 明示的な
+       ``NEXT: human`` で PUT だけ落ちた回を freshness で判定すると、通知を
+       受けて開いた人が J-absent の判断画面すら見られなくなる。
+
+    2. **材料が新鮮 ∧ スレッドが開いている ∧ 末尾が自分の決裁でない** ———
+       :mod:`magickit.web.board` の判断カードと**同じ 3 条件**を、同じ関数で
+       評価する。これが無いと guard (i) の Tier-C 差し戻し
+       (``NEXT: <implementer>`` だが conductor は人で停止し、材料を push して
+       くる) を取りこぼす。
+
+    2 が要る理由は実測されている (2026-09-14): 板に出ているカードを開くと
+    この関数の旧実装が「判断待ちではありません ... 宛先が違います」と答えて
+    いた。``NEXT:`` 行は「次に動く *はず* の人」で、**誰の番かを決めているのは
+    conductor の停止理由**のほう。board.py の module docstring に経緯がある。
+
+    ∴ **板に出たカードは必ず judgement で開く**。2 つの画面が同じ問いに違う
+    答えを出す状態は、どちらを信じればいいか読み手に決めさせることになる。
+    """
+    if _is_parked_to_human(messages[-1]):
+        return True
+    if _thread_write_state(thread_meta) == "closed":
+        return False
+    if _is_human_decide(messages[-1]):
+        return False
+    material, _ok = await _load_material(project, thread_id)
+    head_msg_id = _head_msg_id_from_thread(thread_meta)
+    return _classify_judgement_state(material, head_msg_id) == "fresh"
 
 
 async def _render_judgement_view(
@@ -1151,7 +1173,6 @@ async def _render_judgement_view(
         participant_choices,
         _unknown_names,
         verification_unavailable,
-        parked_author_unregistered,
     ) = await _participant_choices_registered(messages, parked_author)
     default_target = _resolve_default_target(parked_author, participant_choices)
 
@@ -1214,7 +1235,6 @@ async def _render_judgement_view(
             "thread_head_msg_id": head_msg_id,
             "choice_options": choice_options,
             "verification_unavailable": verification_unavailable,
-            "parked_author_unregistered": parked_author_unregistered,
             "no_target_value": NO_TARGET_VALUE,
             "no_target_label": NO_TARGET_LABEL,
             "freeform_only_value": _FREEFORM_ONLY_VALUE,
@@ -1279,7 +1299,6 @@ async def _render_not_waiting_view(
         nw_participant_choices,
         _nw_unknown_names,
         nw_verification_unavailable,
-        nw_parked_author_unregistered,
     ) = await _participant_choices_registered(messages, default_next)
     nw_default_target = _resolve_default_target(default_next, nw_participant_choices)
 
@@ -1317,7 +1336,6 @@ async def _render_not_waiting_view(
             "participant_choices": nw_participant_choices,
             "verification_unavailable": nw_verification_unavailable,
             "parked_author": default_next,
-            "parked_author_unregistered": nw_parked_author_unregistered,
             "no_target_value": NO_TARGET_VALUE,
             "no_target_label": NO_TARGET_LABEL,
             "freeform_only_value": _FREEFORM_ONLY_VALUE,
