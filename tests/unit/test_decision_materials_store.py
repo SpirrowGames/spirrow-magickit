@@ -162,3 +162,46 @@ async def test_distinct_keys_isolated(store):
     assert a is not None and b is not None
     assert a["question"] == "qA"
     assert b["question"] == "qB"
+
+
+@pytest.mark.asyncio
+async def test_stop_reason_column_is_added_to_a_pre_existing_table(tmp_path):
+    """列ができる前に作られた DB (本番で 57 行) が読み書きできること。
+
+    このアプリに alembic は無い ∴ ``_create_tables`` の中の冪等な
+    ``ADD COLUMN`` が移行の全部で、**既存行は NULL で読み戻る** =
+    「この材料には理由が付いていない」。
+    """
+    import aiosqlite
+
+    db = str(tmp_path / "old.db")
+    async with aiosqlite.connect(db) as conn:
+        # stop_reason の無い、当時のスキーマ。
+        await conn.execute("""
+            CREATE TABLE decision_materials (
+                project TEXT NOT NULL, thread_id TEXT NOT NULL,
+                head_msg_id TEXT NOT NULL, signature TEXT, question TEXT,
+                options_json TEXT, recommendation TEXT,
+                recommendation_reason TEXT, unknowns_json TEXT,
+                stored_at TEXT NOT NULL, UNIQUE(project, thread_id)
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO decision_materials (project, thread_id, head_msg_id,"
+            " stored_at) VALUES ('p', 'T-old', 'msg-1', '2026-09-01T00:00:00Z')"
+        )
+        await conn.commit()
+
+    store = DecisionMaterialStore(db_path=db)
+
+    old = await store.get_material(project="p", thread_id="T-old")
+    assert old is not None
+    assert old["stop_reason"] is None
+
+    await store.put_material(
+        project="p", thread_id="T-new", head_msg_id="msg-2", signature=None,
+        stop_reason="human", question=None, options=None, recommendation=None,
+        recommendation_reason=None, unknowns=None,
+    )
+    new = await store.get_material(project="p", thread_id="T-new")
+    assert new is not None and new["stop_reason"] == "human"

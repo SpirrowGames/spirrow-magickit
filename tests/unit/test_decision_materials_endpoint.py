@@ -253,3 +253,52 @@ async def test_get_material_reads_back_stored_row():
     assert stored["recommendation_reason"] == put_body["recommendation_reason"]
     assert stored["unknowns"] == put_body["unknowns"]
     assert "stored_at" in stored
+
+
+# --- stop_reason (spec §1.1) ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_reason_round_trips_verbatim():
+    """語彙の持ち主は mindwire ∴ 受け側は正規化も検証もしない。
+
+    知らない token を弾くと、mindwire が ``StopReason`` を足すたびに
+    magickit の schema bump が要る結合ができる (この受け口が permissive
+    である理由は spec §1.1 の注記そのもの)。
+    """
+    thread = "T-stop-reason-verbatim"
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/{thread}/material",
+        {"head_msg_id": "msg-1", "stop_reason": "a_reason_magickit_never_heard_of"},
+    )
+    assert r.status_code == 200
+
+    got = await _get(f"/v1/decisions/{PROJECT}/{thread}/material")
+    assert got.status_code == 200
+    assert got.json()["stop_reason"] == "a_reason_magickit_never_heard_of"
+
+
+@pytest.mark.asyncio
+async def test_stop_reason_is_optional():
+    """mindwire がまだ送っていない期間、PUT は今までどおり通る。
+
+    受け口を先に出して供給側を後から変えられるのは、この 1 点による。
+    """
+    thread = "T-stop-reason-absent"
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/{thread}/material", {"head_msg_id": "msg-1"}
+    )
+    assert r.status_code == 200
+    got = await _get(f"/v1/decisions/{PROJECT}/{thread}/material")
+    assert got.json()["stop_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_non_string_stop_reason_is_rejected():
+    """permissive は「型を見ない」ではない。列に入る形かどうかは見る。"""
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/T-stop-reason-bad/material",
+        {"head_msg_id": "msg-1", "stop_reason": ["human"]},
+    )
+    assert r.status_code == 400
+    assert r.json()["error_type"] == "InvalidMaterialPayload"

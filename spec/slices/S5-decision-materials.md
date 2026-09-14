@@ -59,6 +59,7 @@ Content-Type: application/json
 |---|---|---|---|
 | `head_msg_id` | string | **必須** | 材料生成時の thread の head msg id (例 `"msg-2640"`)。**鮮度判定に使うキー** |
 | `signature` | string | 任意 | composer の署名。**Magickit は parse しない**。保存のみ |
+| `stop_reason` | string | 任意 | conductor が止まった理由 (mindwire の `StopReason` token、例 `"human"` / `"round_cap"`)。**verbatim で保存し parse しない**。語彙の持ち主は mindwire ∴ magickit は知らない値を捨てず、やること board がそのまま表示する |
 | `composer_status` | string | 任意 | `"ok"` 以外はエラー (§1.3) |
 | `question` | string | 任意 | 判断の要旨 (散文) |
 | `options` | array | 任意 | 選択肢の配列。要素は `{"id": "A", "label": "…", "gain": "…", "loss": "…"}` |
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS decision_materials (
     thread_id      TEXT NOT NULL,
     head_msg_id    TEXT NOT NULL,
     signature      TEXT,
+    stop_reason    TEXT,
     question       TEXT,
     options_json   TEXT,             -- JSON serialized list of option dicts
     recommendation TEXT,
@@ -119,6 +121,20 @@ CREATE TABLE IF NOT EXISTS decision_materials (
     UNIQUE(project, thread_id)
 );
 ```
+
+`stop_reason` は**後から足した列**で、既存 DB (本番で 57 行) には
+`PRAGMA table_info` で有無を見てから `ALTER TABLE ... ADD COLUMN` する。
+このアプリに alembic は無い (あるのは conclair) ∴ 移行梯子ではなく
+`_create_tables` 内の冪等な 1 手で足りる形にしてある。**列ができる前に
+書かれた行は `NULL` で読み戻る** = 「この材料には理由が付いていない」。
+
+### 2.1.1 なぜ `signature` を割らずに列を足したか
+
+`signature` は実際には `<reason>:<msg_id>` という形で届いており、停止理由は
+そこから取り出せる。**取り出さない。** §1.1 が「Magickit は parse しない」と
+書いている欄を parse し始めると、受け側が供給側の内部表現を解釈することになり
+(msg-111 §3 が禁じている形)、mindwire が署名の綴りを変えた日に board が黙って
+壊れる。理由が要るなら理由の欄を作る、が本 spec の答え。
 
 - `composer_status` は保存しない — PUT で `"ok"` 以外を弾いた後に到達する経路
   だけが書き込む ∴ 保存された材料は定義上「composer_status == ok」である。
