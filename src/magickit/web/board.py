@@ -8,10 +8,26 @@
 
 板に載るもの (3 種、実測の性質つき)
 -----------------------------------
-- **判断待ち** — mindwire が push した判断材料のうち、``head_msg_id`` が
-  スレッドの ``last_msg_id`` と一致するもの。一致 = 駐機 msg がまだ末尾
-  = **まだ僕の番**。materials table は消えない (答えた後も行は残る) ので、
-  この照合をせずに材料の存在だけで並べると回答済みが延々並ぶ。
+- **判断待ち** — 3 つ全部を満たすものだけ。**1 つでも落とすと板は
+  「僕の番ではないもの」で埋まる** (実測: 鮮度だけ見ていた頃、5 枚中
+  本当に僕の番だったのは 1 枚)。
+
+  1. **鮮度** — 材料の ``head_msg_id`` がスレッドの ``last_msg_id`` と
+     一致する。materials table は消えない (答えた後も行は残る) ので、
+     これをせずに材料の存在だけで並べると回答済みが延々並ぶ。
+  2. **スレッドが開いている** — ``decisions._thread_write_state`` が
+     ``"closed"`` (``resolved`` / ``superseded``) でない。**鮮度だけでは
+     resolved が落ちない**: 解決した msg がそのまま末尾になるので
+     (``resolved_by_msg == last_msg_id``)、鮮度は構造的に一致し続ける。
+  3. **駐機が人宛** — ``decisions._is_parked_to_human`` が真。
+     ``next_participant`` が別の identity を指していれば、それは僕への
+     駐機ではなく他者への handoff。
+
+  2 と 3 は**判断ページの関数をそのまま呼ぶ** (``decisions.py:1080`` が
+  judgement 分岐に入る条件と同一)。かつてこの docstring は「判断ページと
+  同じ規則」と書いていたが、実装していたのは 1 だけで、**板と判断ページは
+  実際に食い違っていた** ——— 板が判断待ちと言うカードを開くと判断ページが
+  「判断待ちではありません」と答える、という形で。
 - **deploy 承認待ち** — ``status == pending_approval`` の deploy request。
   ローカルの file store ∴ Conclair が落ちていても読める。
 - **止まったループ** — 稼働状況ページと **同じ** ``ops.classify`` で
@@ -79,7 +95,7 @@ from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.deploy import records
 from magickit.mcp.pr_gate_ledger import parse_pr_ref
 from magickit.utils.logging import get_logger
-from magickit.web import identity, ops
+from magickit.web import decisions, identity, ops
 from magickit.web.deps import parse_ts, templates
 
 logger = get_logger(__name__)
@@ -224,6 +240,10 @@ class _Live:
     #: 判断待ちの判定ができた project 集合。ここに無い project の消えた
     #: 判断カードには「進んだ」と書けない (読めていないだけかもしれない)。
     decided_projects: set[str] = field(default_factory=set)
+    #: 鮮度は通ったが駐機が人宛でなかったカードの ``item_key``。完了列の
+    #: 理由づけがこれを見ないと「スレッドが進みました」と嘘をつく
+    #: ——— 進んでいない。宛先が僕ではなかっただけ。
+    not_parked_to_me: set[str] = field(default_factory=set)
 
 
 def _pr_link(*texts: str) -> CardLink | None:
@@ -262,11 +282,18 @@ async def _collect_decisions(
 ) -> None:
     """材料 × live スレッドの照合で「まだ僕の番」の判断だけを出す。
 
-    照合の規則は判断ページの ``_classify_judgement_state`` と同じ
-    ``head_msg_id == last_msg_id``。**片方が読めないときは J-fresh に
-    倒さない**という向きもそのまま: スレッドが引けなかった project は
-    カードを出さず、読めなかったと板の上に書く。ここで「たぶん待って
-    いる」と出すと、板は答え済みの決裁で埋まって読まれなくなる。
+    規則は module docstring の 3 つ (鮮度 / 開いている / 人宛)。2 と 3 は
+    判断ページの関数を**呼ぶ** ——— 同じ問いに 2 つの実装を持たせない。
+
+    **片方が読めないときは J-fresh に倒さない**という向きはそのまま:
+    スレッドが引けなかった project はカードを出さず、読めなかったと板の
+    上に書く。ここで「たぶん待っている」と出すと、板は答え済みの決裁で
+    埋まって読まれなくなる。
+
+    ただし**駐機 msg が読めなかったときだけは逆に倒す** (カードを残す)。
+    宛先が確認できないことと、宛先が他人であることは別で、前者で消すと
+    「僕への依頼が黙って board から消える」という、この板が存在する理由
+    そのものを壊す向きの取りこぼしになる。
     """
     by_project: dict[str, list[dict[str, Any]]] = {}
     for material in materials:
@@ -274,6 +301,12 @@ async def _collect_decisions(
     by_project.pop("", None)
     if not by_project:
         return
+
+    #: 鮮度とスレッド状態を通ったカード。宛先の照合はこの後でまとめて行う
+    #: ——— 駐機 msg は ``list_threads`` に含まれず 1 本ずつ取りに行く必要が
+    #: あるので、**ここまで絞ってから**取る。head == tail を満たす材料だけが
+    #: 対象なので実測で 1 桁本 (板全体で 5 本) にしかならない。
+    candidates: list[Card] = []
 
     # 材料を持つ project だけ引く。板の判断カードは材料が前提なので、
     # 材料の無い project のスレッドを読んでも 1 枚も増えない。
@@ -311,6 +344,12 @@ async def _collect_decisions(
             head = thread.get("last_msg_id")
             if not head or head != material.get("head_msg_id"):
                 continue  # スレッドが進んだ ∴ もう僕の番ではない
+            if decisions._thread_write_state(thread) == "closed":
+                # resolved / superseded。判断ページはこのスレッドに対して
+                # 投稿フォームすら描かない ∴ 板がこれを「待っている」と
+                # 言うと、開いた先で「クローズされています」に出迎えられる。
+                # 鮮度では絶対に落ちない (解決 msg が末尾になるため)。
+                continue
             question = str(material.get("question") or "")
             # 材料 (question → recommendation) → スレッド題名 の順に見る。
             # 材料が先なのは、それが「今の問い」だから: 題名は古い PR を
@@ -320,7 +359,7 @@ async def _collect_decisions(
                 str(material.get("recommendation") or ""),
                 str(thread.get("title") or ""),
             )
-            live.cards.append(
+            candidates.append(
                 Card(
                     key=f"decision:{project}:{thread_id}",
                     kind="decision",
@@ -335,6 +374,72 @@ async def _collect_decisions(
                     fingerprint=str(head),
                 )
             )
+
+    await _keep_only_parked_to_me(adapter, candidates, live)
+
+
+async def _keep_only_parked_to_me(
+    adapter: ChatroomAdapter, candidates: list[Card], live: _Live
+) -> None:
+    """駐機 msg が**僕宛**のカードだけを board に載せる。
+
+    判定は判断ページの :func:`decisions._is_parked_to_human` をそのまま
+    呼ぶ ——— ``next_participant`` が human を指すか、その field を持たない
+    旧 msg なら本文の単独行 ``NEXT: human``。**同じ問いを 2 回実装しない**
+    のがここの要点で、板が「待っている」と言ったカードを開いた先の判断
+    ページが「宛先が違います」と答える、という食い違いはそれで起きていた。
+
+    駐機 msg は ``list_threads`` には入っていない ∴ 1 本ずつ取りに行く。
+    対象は鮮度とスレッド状態を通ったものだけ (実測 5 本) で、板全体でも
+    1 桁本にしかならない ——— ``head == last_msg_id`` を満たす材料の数が
+    そのまま上限になる。
+
+    **読めなかったら残す。** 宛先が他人だと分かることと、宛先を確認でき
+    ないことは別で、後者で消すのは「僕への依頼が黙って消える」向きの
+    取りこぼし。落とした分は件数として板の上に出す (0 件なら何も出さない)
+    ——— 材料があるのに人宛の駐機になっていないのは mindwire 側の通知が
+    壊れている可能性があり、黙って消すとその故障が板から見えなくなる。
+    """
+    if not candidates:
+        return
+
+    results = await asyncio.gather(
+        *(
+            adapter.get_thread(project=str(c.project), thread_id=str(c.thread_id))
+            for c in candidates
+        ),
+        return_exceptions=True,
+    )
+
+    withheld = 0
+    for card, result in zip(candidates, results):
+        if isinstance(result, BaseException) or ops._is_error(result):
+            logger.warning(
+                "board: parked msg unreadable, keeping the card",
+                project=card.project,
+                thread_id=card.thread_id,
+                error=str(result),
+            )
+            live.cards.append(card)
+            continue
+        messages = result.get("messages") or []
+        if not messages:
+            # 権威が空を返した。宛先を確認できていない ∴ 残す側に倒す。
+            live.cards.append(card)
+            continue
+        if decisions._is_parked_to_human(messages[-1]):
+            live.cards.append(card)
+        else:
+            live.not_parked_to_me.add(card.key)
+            withheld += 1
+
+    if withheld:
+        live.notices.append(
+            f"判断材料はあるが駐機が人宛になっていないものが {withheld} 件あります"
+            "（次の担当が別の identity を指しているか、宛先が付いていません）。"
+            "板には出していません — 心当たりが無ければ mindwire 側の通知の"
+            "故障かもしれません。"
+        )
 
 
 # --- deploy 承認待ち -------------------------------------------------------
@@ -482,6 +587,11 @@ def _gone_reason(row: dict[str, Any], live: _Live) -> str:
     kind = row.get("kind")
     project = row.get("project")
     thread_id = row.get("thread_id")
+
+    if str(row.get("item_key", "")) in live.not_parked_to_me:
+        # スレッドは動いていない。駐機の宛先が僕ではなかっただけ ∴
+        # 下の「進みました」に落とすと、起きていないことを断定する。
+        return "駐機の宛先が人ではありません（次の担当が別の identity です）"
 
     if kind == "decision" and project and thread_id:
         thread = live.threads.get((str(project), str(thread_id)))
