@@ -60,10 +60,18 @@ class DecisionMaterialStore:
         """Create the decision_materials table if missing.
 
         Idempotent -- ``CREATE TABLE IF NOT EXISTS`` + a ``UNIQUE`` constraint
-        that is either satisfied at creation or already present. **No
-        migration ladder** for this table -- it is greenfield in this PR and
-        does not carry data through a schema change (any future schema
-        change lives with alembic like the rest of the app).
+        that is either satisfied at creation or already present.
+
+        **The one column added after the fact is ``stop_reason``**, and it
+        is added here rather than by a migration tool because this app has
+        no alembic (that is conclair). An earlier revision of this docstring
+        said a future schema change "lives with alembic like the rest of the
+        app"; there is no alembic in this app, so that sentence promised a
+        ladder that does not exist. The honest shape for a nullable column
+        on a table whose writer is a single UPSERT is the guarded
+        ``ADD COLUMN`` below: it runs once, costs nothing after that, and
+        every row written before it reads back as ``None`` -- which is
+        exactly what "we did not record a reason for this one" means.
         """
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS decision_materials (
@@ -71,6 +79,7 @@ class DecisionMaterialStore:
                 thread_id      TEXT NOT NULL,
                 head_msg_id    TEXT NOT NULL,
                 signature      TEXT,
+                stop_reason    TEXT,
                 question       TEXT,
                 options_json   TEXT,
                 recommendation TEXT,
@@ -80,6 +89,16 @@ class DecisionMaterialStore:
                 UNIQUE(project, thread_id)
             )
         """)
+        # Pre-existing databases (57 rows on production when this shipped)
+        # were created without stop_reason. PRAGMA rather than catching the
+        # duplicate-column error: a swallowed OperationalError here would
+        # also swallow a genuinely broken table.
+        cursor = await conn.execute("PRAGMA table_info(decision_materials)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "stop_reason" not in columns:
+            await conn.execute(
+                "ALTER TABLE decision_materials ADD COLUMN stop_reason TEXT"
+            )
         # No index on (project, thread_id) beyond UNIQUE -- SQLite creates an
         # implicit index for UNIQUE, and that is the only lookup pattern.
         await conn.commit()
@@ -92,6 +111,7 @@ class DecisionMaterialStore:
         head_msg_id: str,
         signature: str | None,
         question: str | None,
+        stop_reason: str | None = None,
         options: list[dict[str, Any]] | None,
         recommendation: str | None,
         recommendation_reason: str | None,
@@ -125,16 +145,17 @@ class DecisionMaterialStore:
             await conn.execute(
                 """
                 INSERT OR REPLACE INTO decision_materials (
-                    project, thread_id, head_msg_id, signature,
+                    project, thread_id, head_msg_id, signature, stop_reason,
                     question, options_json, recommendation,
                     recommendation_reason, unknowns_json, stored_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
                     thread_id,
                     head_msg_id,
                     signature,
+                    stop_reason,
                     question,
                     options_json,
                     recommendation,
@@ -169,7 +190,7 @@ class DecisionMaterialStore:
             await self._create_tables(conn)
             cursor = await conn.execute(
                 """
-                SELECT project, thread_id, head_msg_id, signature,
+                SELECT project, thread_id, head_msg_id, signature, stop_reason,
                        question, options_json, recommendation,
                        recommendation_reason, unknowns_json, stored_at
                 FROM decision_materials
@@ -187,6 +208,7 @@ class DecisionMaterialStore:
             "thread_id": row["thread_id"],
             "head_msg_id": row["head_msg_id"],
             "signature": row["signature"],
+            "stop_reason": row["stop_reason"],
             "question": row["question"],
             "options": (
                 json.loads(row["options_json"]) if row["options_json"] else None
@@ -222,7 +244,7 @@ class DecisionMaterialStore:
             await self._create_tables(conn)
             cursor = await conn.execute(
                 """
-                SELECT project, thread_id, head_msg_id, signature, question,
+                SELECT project, thread_id, head_msg_id, signature, stop_reason, question,
                        recommendation, stored_at
                 FROM decision_materials
                 ORDER BY stored_at DESC

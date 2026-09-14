@@ -193,6 +193,7 @@ async def _put_material(db_path, *, project="p", thread_id="T-1", head="msg-9", 
         head_msg_id=head,
         signature=kw.get("signature"),
         question=kw.get("question", "どちらにしますか"),
+        stop_reason=kw.get("stop_reason"),
         options=kw.get("options"),
         recommendation=kw.get("recommendation"),
         recommendation_reason=None,
@@ -1134,3 +1135,89 @@ def test_the_board_and_the_decision_page_share_both_predicates():
 
     assert board.decisions._is_human_decide is decisions_module._is_human_decide
     assert board.decisions._thread_write_state is decisions_module._thread_write_state
+
+
+# --- 停止理由をカードに出す ----------------------------------------------
+#
+# 材料が来ていること自体は「conductor が人で止まった」までしか言わない。
+# Tier-C の判断依頼と、ラウンド上限に当たっただけの異常が同じ顔で並ぶと、
+# 板は「何を待たれているか」を答えなくなる。
+
+
+@pytest.mark.asyncio
+async def test_a_known_stop_reason_is_translated_on_the_card(
+    temp_db_path, monkeypatch
+):
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9", stop_reason="human")
+    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.detail == "人の判断で停止"
+    assert card.subline == "p · 人の判断で停止"
+
+
+@pytest.mark.asyncio
+async def test_an_anomaly_reads_differently_from_a_decision(
+    temp_db_path, monkeypatch
+):
+    """``round_cap`` は判断依頼ではない。同じ文言にしたら足した意味が無い。"""
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9", stop_reason="round_cap")
+    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.detail == "ラウンド上限"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_reason_is_shown_verbatim_not_dropped(
+    temp_db_path, monkeypatch
+):
+    """語彙の持ち主は mindwire ∴ 知らない値は訳さず**そのまま出す**。
+
+    黙って捨てると、mindwire が ``StopReason`` を足した日に板は理由が
+    無いふりをする。読めない語が出るほうが、理由が消えるより良い。
+    """
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9", stop_reason="brand_new_reason")
+    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.detail == "brand_new_reason"
+
+
+@pytest.mark.asyncio
+async def test_a_material_with_no_reason_says_nothing_rather_than_unknown(
+    temp_db_path, monkeypatch
+):
+    """field ができる前に保存された材料 (本番に 57 行) がこれ。
+
+    「不明」と書かない —— 理由が不明なのではなく、この材料には理由が
+    付いていない。副題は project だけに戻る。
+    """
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9")
+    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.detail == ""
+    assert card.subline == "p"
+
+
+def test_the_board_does_not_parse_the_signature_for_a_reason():
+    """``signature`` は spec §1.1 が「parse しない」と書いている欄。
+
+    実際には ``<reason>:<msg_id>`` で届くので取り出せてしまうが、取り出せる
+    ことと取り出してよいことは別。理由は ``stop_reason`` から読む。
+    """
+    assert board._stop_reason_label({"signature": "human:msg-9"}) == ""
+    assert board._stop_reason_label({"stop_reason": "human"}) == "人の判断で停止"

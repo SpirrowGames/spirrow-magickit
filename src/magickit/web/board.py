@@ -32,8 +32,12 @@
   Tier-C ゲートとして人に差し戻す** (``conductor/core.py`` `_route`) ∴
   ``NEXT: Heisenberg`` と書いてあるスレッドがそのまま僕の判断待ちになる。
   材料が来ていること自体が「conductor が人で止まった」の言い換えで
-  (push は ``$needsHuman`` な停止理由でしか発火しない)、その停止理由は
-  材料の ``signature`` (``<reason>:<msg_id>``) にも入っている。
+  (push は ``$needsHuman`` な停止理由でしか発火しない)。**その停止理由は
+  材料の ``stop_reason`` field で受け取り、カードの副題に出す** ———
+  ``human`` (Tier-C) と ``round_cap`` / ``empty_thread`` (異常) が同じ顔で
+  並ぶと、板は「何を待たれているか」を答えなくなる。``signature`` にも
+  同じ値が混ざっているが、**あれは parse してはいけない**
+  (``spec/slices/S5-decision-materials.md`` §1.1: 保存のみ)。
 - **deploy 承認待ち** — ``status == pending_approval`` の deploy request。
   ローカルの file store ∴ Conclair が落ちていても読める。
 - **止まったループ** — 稼働状況ページと **同じ** ``ops.classify`` で
@@ -135,6 +139,45 @@ _KIND_ORDER = {"deploy": 0, "decision": 1, "loop": 2}
 #: 判断カードに載せる問いの長さ。稼働状況ページの digest と同じ考え方で、
 #: 全文は ``title`` 属性に入れる。
 _QUESTION_CHARS = 140
+
+#: conductor の停止理由 → カードの副題に出す短い語。
+#:
+#: **語彙の持ち主は mindwire** (``conductor/core.py`` の ``StopReason``)。
+#: ここにあるのは訳であって定義ではない ∴ **知らない値は訳さずそのまま出す**
+#: (下の ``_stop_reason_label``)。知らない語を黙って捨てると、mindwire が
+#: 新しい停止理由を足した日に、板は理由が無いふりをする。
+#:
+#: ``human`` は「明示的な ``NEXT: human``」と「guard (i) の Tier-C 差し戻し」の
+#: **両方**を指す。magickit からこの 2 つは区別できない (どちらも同じ token で
+#: 来る) ので、区別できるふりをしない文言にしてある。
+_STOP_REASON_LABELS = {
+    "human": "人の判断で停止",
+    "no_handoff_to_human": "NEXT が読めず人へ",
+    "no_progress_to_human": "応答が無く人へ",
+    "self_handoff_to_human": "自分宛の NEXT で人へ",
+    "round_cap": "ラウンド上限",
+    "empty_thread": "スレッドが空",
+}
+
+
+def _stop_reason_label(material: dict[str, Any]) -> str:
+    """停止理由の表示語。記録が無ければ空文字。
+
+    3 状態あり、**どれも別の意味**なので同じ見た目にしない:
+
+    - 既知の token → 訳語
+    - 知らない token → **その token をそのまま**。mindwire が
+      ``StopReason`` に足した新しい理由が、magickit の辞書を待たずに
+      画面へ出る。読めない語が出るのは、理由が消えるより良い。
+    - 記録が無い (``None`` / 空) → 空文字。``stop_reason`` field が
+      できる前に保存された材料と、mindwire がまだ送っていない期間が
+      これに当たる。**「不明」とは書かない** — 理由が不明なのではなく、
+      この材料には理由が付いていない。
+    """
+    token = str(material.get("stop_reason") or "").strip()
+    if not token:
+        return ""
+    return _STOP_REASON_LABELS.get(token, token)
 
 def _actor(request: Request) -> str | None:
     """列を動かした人。名乗りが無ければ ``None`` で、``"unknown"`` とは書かない。
@@ -377,6 +420,9 @@ async def _collect_decisions(
                     note_full=question,
                     project=project,
                     thread_id=thread_id,
+                    # 副題は「project · 停止理由」。判断カードの title は
+                    # スレッドの題名なので、どちらも新しい情報になる。
+                    detail=_stop_reason_label(material),
                     fingerprint=str(head),
                 )
             )

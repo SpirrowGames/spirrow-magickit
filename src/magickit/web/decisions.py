@@ -1551,6 +1551,19 @@ async def put_decision_material(
             "InvalidMaterialPayload",
             "signature must be a string when present",
         )
+    # Why the conductor stopped, as mindwire's own StopReason token (e.g.
+    # "human", "no_progress_to_human", "round_cap"). Stored verbatim and
+    # never parsed: the vocabulary is mindwire's, and a receiver that
+    # splits or normalises it starts deciding what counts as a reason.
+    # This is a *field* precisely because `signature` may not be read --
+    # spec §1.1 says so -- and the reason was previously only reachable by
+    # splitting that string.
+    stop_reason = body.get("stop_reason")
+    if stop_reason is not None and not isinstance(stop_reason, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "stop_reason must be a string when present",
+        )
     question = body.get("question")
     if question is not None and not isinstance(question, str):
         return _bad_request(
@@ -1591,6 +1604,7 @@ async def put_decision_material(
             thread_id=thread_id,
             head_msg_id=head_msg_id,
             signature=signature,
+            stop_reason=stop_reason,
             question=question,
             options=options,
             recommendation=recommendation,
