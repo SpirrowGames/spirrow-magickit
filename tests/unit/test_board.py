@@ -783,3 +783,135 @@ def test_a_decision_card_keeps_the_project_in_its_subline():
     )
 
     assert card.subline == "p"
+
+
+# --- カードから次の一手へ行けること --------------------------------------
+#
+# 板は「何が待っているか」までしか答えない ∴ 行き止まりのカードは、読んだ
+# 人にもう一度どこかを探させる。飛び先が **正しい先を指していること** と、
+# 指す根拠が無いときに **推測しないこと** の両方をここで留める。
+
+
+@pytest.mark.asyncio
+async def test_a_decision_card_links_to_the_pr_its_material_names(
+    temp_db_path, monkeypatch
+):
+    """材料が PR を名指していれば、その PR へ 1 クリックで行ける。
+
+    専用の欄は無く、``question`` の本文に混ざって来る (実測 57 件中 26 件)。
+    """
+    _no_deploys(monkeypatch)
+    await _put_material(
+        temp_db_path,
+        question="SpirrowGames/spirrow-magickit#50 の pin で十分ですか",
+    )
+    adapter = _adapter(threads={"p": [_thread()]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    (link,) = card.links
+    assert link.href == "https://github.com/SpirrowGames/spirrow-magickit/pull/50"
+    assert link.label == "PR #50"
+    assert link.external is True
+
+
+@pytest.mark.asyncio
+async def test_a_decision_with_no_pr_gets_no_pr_link(temp_db_path, monkeypatch):
+    """PR が無い判断のほうが多い。**無いものを推測しない。**
+
+    ここで「たぶんこのリポジトリだろう」と番号を作ると、板は存在しない
+    PR を指し、押した人はそれが板の間違いだと分からない。
+    """
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, question="どちらにしますか")
+    adapter = _adapter(threads={"p": [_thread()]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.links == []
+
+
+@pytest.mark.asyncio
+async def test_the_material_wins_over_a_stale_pr_in_the_thread_title(
+    temp_db_path, monkeypatch
+):
+    """題名は古い PR を名指したまま残るが、材料は駐機のたびに書き直る。"""
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, question="SpirrowGames/r#2 でどうですか")
+    adapter = _adapter(threads={"p": [_thread(title="SpirrowGames/r#1 の件")]})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.links[0].href.endswith("/pull/2")
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_card_links_to_its_own_row_not_the_top_of_the_list(
+    temp_db_path, monkeypatch
+):
+    """承認ボタンは行の中にある ∴ 一覧の頭に落とすと board から来た意味が無い。"""
+    request = records.DeployRequest(
+        request_id="abc123",
+        target="spirrow-prismind",
+        requested_by="loop",
+        reason="merged",
+        created_at=_ago(5),
+        status=records.STATUS_PENDING,
+    )
+    store = AsyncMock()
+    store.list_requests = lambda **_: [request]
+    monkeypatch.setattr(records, "get_store", lambda: store)
+    adapter = _adapter(summaries={"items": []})
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.href == "/dashboard/deploys#deploy-abc123"
+
+
+@pytest.mark.asyncio
+async def test_a_loop_card_keeps_dashboard_and_adds_the_chatroom(
+    temp_db_path, monkeypatch
+):
+    """RESUME は /dashboard にしかない ∴ 題名はそこを指したまま。
+
+    ``#<project>`` を稼働状況ページに張らないのは効かないから: ops 表は
+    HTMX の後読みで、ブラウザは表が届く前にスクロールを終えている。
+    """
+    _no_deploys(monkeypatch)
+    adapter = _adapter(
+        summaries={"items": [_summary(project="spirrow-mindwire")]},
+        control={
+            "desired_state": "hold",
+            "configured": True,
+            "observed_state": "hold",
+            "observed_at": _ago(1),
+        },
+    )
+
+    context = await _collect(adapter, _settings(temp_db_path))
+
+    (card,) = _cards(context)
+    assert card.kind == "loop"
+    assert card.href == "/dashboard"
+    (link,) = card.links
+    assert link.href == "/ui/projects/spirrow-mindwire/threads"
+    assert link.external is False
+
+
+def test_the_board_and_the_ledger_agree_on_what_a_pr_reference_is():
+    """PR の指し方を板が別に定義していないこと。
+
+    2 箇所で定義すると、ledger が PR と認めない文字列を板が PR として
+    指す (あるいはその逆) が起こる。板は ``parse_pr_ref`` を呼ぶだけ。
+    """
+    from magickit.mcp import pr_gate_ledger
+
+    assert board.parse_pr_ref is pr_gate_ledger.parse_pr_ref
+    assert board._pr_link("no pr here") is None
+    assert board._pr_link("https://github.com/o/r/pull/7").href == (
+        "https://github.com/o/r/pull/7"
+    )

@@ -1043,6 +1043,11 @@ textarea {
    `-webkit-line-clamp` は Chrome / Safari / Firefox すべてが対応する
    (`display: -webkit-box` の接頭辞つき記法のまま標準化された)。効かない
    ブラウザでは切られずに全文が出るだけで、壊れはしない。 */
+/* 題名はリンク。以前は gray-900 + text-decoration:none で、hover して
+   初めて下線が出た ∴ 実測で**ただの太字にしか見えず**、判断ページへ
+   行けることが板の上に表れていなかった。押せると分かる最小限だけ足す:
+   色はリンク色、下線は常時 (薄く、下げて) ——— カードは題名・副題・問い
+   が縦に並ぶので、下線を濃く敷くと行間が潰れて一覧性のほうが落ちる。 */
 .board-card-title {
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -1050,11 +1055,41 @@ textarea {
     -webkit-box-orient: vertical;
     overflow: hidden;
     font-weight: 600;
-    color: var(--gray-900);
-    text-decoration: none;
+    color: var(--primary-color);
+    text-decoration: underline;
+    text-decoration-color: rgba(79, 70, 229, 0.35);
+    text-underline-offset: 2px;
     line-height: 1.35;
 }
-.board-card-title:hover { text-decoration: underline; }
+.board-card-title:hover,
+.board-card-title:focus-visible { text-decoration-color: var(--primary-color); }
+
+/* 題名とは別の飛び先 (PR / chatroom)。カードの主役は問いなので、
+   チップは小さく、題名より弱く置く。 */
+.board-card-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+}
+.board-card-link {
+    display: inline-block;
+    padding: 1px 7px;
+    border: 1px solid var(--gray-200);
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--gray-600);
+    text-decoration: none;
+    background: var(--gray-50);
+}
+.board-card-link:hover,
+.board-card-link:focus-visible {
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+}
+/* 外向き (GitHub) は矢印を足して、押す前に外へ出ると分かるようにする。 */
+.board-card-link.is-external::after { content: " \2197"; }
 
 .board-card-sub { font-size: 11px; margin-top: 3px; }
 

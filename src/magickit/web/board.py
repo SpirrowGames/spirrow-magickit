@@ -30,6 +30,30 @@
 いない」という状態が**構造的に作れない**のはこのためで、これは板の
 見た目ではなく板が信用できるかどうかの話。
 
+カードは行き止まりにしない
+--------------------------
+板は「何が待っているか」までしか答えない ∴ **次の一手がある場所へは
+カードから 1 クリックで行けること**。飛び先は種別ごとに違う:
+
+- **判断** — 題名が判断ページへ。加えて、材料が PR を名指していれば
+  その PR へのリンクを添える。PR 参照の切り出しは
+  :func:`magickit.mcp.pr_gate_ledger.parse_pr_ref` を**呼ぶ**: PR の
+  指し方を 2 箇所で定義すると、ledger が PR と認めない文字列を板が
+  PR として指す (あるいはその逆) ということが起きる。
+- **承認** — deploy 一覧の**その行**へ (``#deploy-<id>``)。あのページは
+  サーバ描画なのでアンカーが効く。
+- **ループ** — 題名は ``/dashboard`` (RESUME のボタンがある場所)、
+  加えてそのプロジェクトの chatroom へ。**稼働状況ページに
+  ``#<project>`` を張らないのは効かないから**: ops 表は HTMX の後読みで、
+  ブラウザは表が届く前にスクロールを済ませてしまう。
+
+**PR リンクだけが外向き**で、これは :mod:`tests.unit.test_templates_no_external_assets`
+が禁じている「オリジン付き URL をテンプレートに書く」ことには当たらない
+——— URL はここで組み立てて ``card.links`` に載せ、テンプレートは
+相対・絶対の区別を知らないまま出す。あの規則が守っているのは**資産**
+(HTMX や CSS) で、届かなければページが無言で死ぬもののこと。この
+リンクは人が押すもので、押せなければ押した人に見える。
+
 読めないものは空欄にしない
 --------------------------
 Conclair が読めないとき、判断待ちは「0 件」ではなく **判定不能**。
@@ -53,6 +77,7 @@ from magickit.config import Settings, get_settings
 from magickit.core.board_lanes import DEFAULT_LANE, LANES, BoardLaneStore, SeenItem
 from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.deploy import records
+from magickit.mcp.pr_gate_ledger import parse_pr_ref
 from magickit.utils.logging import get_logger
 from magickit.web import identity, ops
 from magickit.web.deps import parse_ts, templates
@@ -108,6 +133,25 @@ def _actor(request: Request) -> str | None:
 _LOOP_ON_BOARD = ("held", "stalled")
 
 
+#: GitHub の PR ページ。``parse_pr_ref`` が返した参照からだけ作る。
+_PR_URL = "https://github.com/{owner}/{repo}/pull/{number}"
+
+
+@dataclass(frozen=True)
+class CardLink:
+    """カードから出ていく脇道 1 本 (題名のリンクとは別)。
+
+    ``external`` はホストの外へ出るかどうか。テンプレートは真のときだけ
+    新しいタブで開き ``rel`` を付ける ——— 板は 20 秒ごとに描き直るので、
+    同じタブで GitHub に出ると戻ってきたときに板が別物になっている。
+    """
+
+    href: str
+    label: str
+    title: str = ""
+    external: bool = False
+
+
 @dataclass
 class Card:
     """板に載る 1 枚。live な項目だけがこれになる。"""
@@ -125,6 +169,8 @@ class Card:
     thread_id: str | None = None
     #: 副題として出す短い語 (停止疑いの閾値など)。
     detail: str = ""
+    #: 題名の飛び先とは別に添える脇道 (PR / chatroom など)。
+    links: list[CardLink] = field(default_factory=list)
 
     #: 移動時点の同一性。次の描画で変わっていたら「更新あり」。
     fingerprint: str = ""
@@ -178,6 +224,27 @@ class _Live:
     #: 判断待ちの判定ができた project 集合。ここに無い project の消えた
     #: 判断カードには「進んだ」と書けない (読めていないだけかもしれない)。
     decided_projects: set[str] = field(default_factory=set)
+
+
+def _pr_link(*texts: str) -> CardLink | None:
+    """最初に PR を名指している文字列から、その PR へのリンクを 1 本。
+
+    判断材料は「どの PR の話か」を ``question`` の本文に書く形で運んで
+    くる (実測 57 件中 26 件)。専用の欄は無い ∴ ここは本文から拾う。
+    拾えないときに**推測しない**のがこの関数の全部で、板が指す PR は
+    必ず材料がその文字列で名指したものになる。
+    """
+    for text in texts:
+        ref = parse_pr_ref(text or "")
+        if ref is None:
+            continue
+        return CardLink(
+            href=_PR_URL.format(owner=ref.owner, repo=ref.repo, number=ref.number),
+            label=f"PR #{ref.number}",
+            title=ref.slug,
+            external=True,
+        )
+    return None
 
 
 def _shorten(text: str, limit: int) -> str:
@@ -245,12 +312,21 @@ async def _collect_decisions(
             if not head or head != material.get("head_msg_id"):
                 continue  # スレッドが進んだ ∴ もう僕の番ではない
             question = str(material.get("question") or "")
+            # 材料 (question → recommendation) → スレッド題名 の順に見る。
+            # 材料が先なのは、それが「今の問い」だから: 題名は古い PR を
+            # 名指したまま残ることがあるが、材料は駐機のたびに書き直る。
+            pr = _pr_link(
+                question,
+                str(material.get("recommendation") or ""),
+                str(thread.get("title") or ""),
+            )
             live.cards.append(
                 Card(
                     key=f"decision:{project}:{thread_id}",
                     kind="decision",
                     title=str(thread.get("title") or thread_id),
                     href=f"/dashboard/decisions/{project}/{thread_id}",
+                    links=[pr] if pr else [],
                     since=parse_ts(material.get("stored_at")),
                     note=_shorten(question, _QUESTION_CHARS),
                     note_full=question,
@@ -286,7 +362,10 @@ def _collect_deploys(live: _Live) -> None:
                 key=f"deploy:{request.request_id}",
                 kind="deploy",
                 title=f"{request.target} の deploy 承認",
-                href="/dashboard/deploys",
+                # 一覧の頭ではなく**その申請の行**へ。承認ボタンは行の中に
+                # あるので、申請が溜まっているときに一覧の頭に落とされると
+                # 板から来た意味が無い。deploys.html はサーバ描画 ∴ 効く。
+                href=f"/dashboard/deploys#deploy-{request.request_id}",
                 since=parse_ts(request.created_at),
                 note=_shorten(request.reason or "", _QUESTION_CHARS),
                 note_full=str(request.reason or ""),
@@ -376,6 +455,15 @@ async def _collect_loops(
                 note_full=note,
                 project=row.project,
                 detail=detail,
+                # 題名は /dashboard (RESUME の場所)。何を言ったきり止まって
+                # いるのかは chatroom にしかないので、そこへも 1 本。
+                links=[
+                    CardLink(
+                        href=f"/ui/projects/{row.project}/threads",
+                        label="チャットルーム",
+                        title=f"{row.project} のスレッド一覧",
+                    )
+                ],
                 fingerprint=f"{row.status}:{row.desired or ''}",
             )
         )
@@ -662,4 +750,12 @@ async def board_set_lane(
     )
 
 
-__all__ = ["router", "collect", "Card", "DoneCard", "LANE_COLUMNS", "DONE_COLUMN"]
+__all__ = [
+    "router",
+    "collect",
+    "Card",
+    "CardLink",
+    "DoneCard",
+    "LANE_COLUMNS",
+    "DONE_COLUMN",
+]

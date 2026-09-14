@@ -50,6 +50,23 @@
 
                 <a class="board-card-title" href="{{ card.href }}" title="{{ card.title }}">{{ card.title }}</a>
 
+                {#
+                  題名とは別の飛び先 (PR / chatroom)。URL は board.py が
+                  組み立てて渡す ∴ ここには外部オリジンの直書きが無く、
+                  test_templates_no_external_assets が見ている「資産を
+                  よそから引く」形にもならない。外向きだけ別タブで開く。
+                #}
+                {% if card.links %}
+                <div class="board-card-links">
+                    {% for link in card.links %}
+                    <a class="board-card-link{% if link.external %} is-external{% endif %}"
+                       href="{{ link.href }}"
+                       {% if link.title %}title="{{ link.title }}"{% endif %}
+                       {% if link.external %}target="_blank" rel="noopener noreferrer"{% endif %}>{{ link.label }}</a>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
                 {% if card.subline %}
                 <div class="muted board-card-sub">{{ card.subline }}</div>
                 {% endif %}
