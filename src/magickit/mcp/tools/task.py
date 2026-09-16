@@ -1009,7 +1009,18 @@ async def _refresh_task_attachments(
             content = attachment_entry.get("content", "")
             try:
                 attachment_info = json.loads(content)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            # The search above is semantic, so it can return attachments
+            # recorded for other tasks. The UTID stored inside the entry is
+            # what decides membership -- the same rule _get_linked_documents
+            # applies, and for a sharper reason here: an unfiltered sibling
+            # is not only reported under this task, it is re-recorded under
+            # this task's UTID further down (tags and source are rebuilt
+            # from `utid`) while its own content still names the other one,
+            # leaving a knowledge entry that contradicts its own tags.
+            if not isinstance(attachment_info, dict) or attachment_info.get("utid") != utid:
                 continue
 
             file_path = attachment_info.get("file_path", "")
