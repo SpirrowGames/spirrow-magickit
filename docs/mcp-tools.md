@@ -272,6 +272,9 @@ add_task(
 #   "linked_docs": ["doc-12345"],
 #   ...
 # }
+# 注: attach_files / attach_docs は UTID を必要とし、UTID は Prismind の
+#     get_progress が返す root_folder_id から生成される。これが取れない
+#     プロジェクトでは添付・リンクはスキップされ、warnings にその旨が入る。
 
 # 使用例: タスク一覧取得（フィルタリング）
 list_tasks(
