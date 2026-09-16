@@ -99,13 +99,25 @@ class TestIsClosePost:
     def test_decide_with_normalized_string_is_close(self) -> None:
         assert chatroom_tools._is_close_post("decide", "T-1") is True
 
-    def test_expects_pre_normalized_input(self) -> None:
-        # Documents the contract: callers MUST normalize first. Because
-        # normalization collapses ``""`` to ``None``, this helper never
-        # sees ``""`` in the live paths; but if it did, ``is not None``
-        # would misclassify it. The two ingress sites are covered by the
-        # SSOT test below, which is how we guarantee the contract holds.
-        assert chatroom_tools._is_close_post("decide", "") is True
+    def test_empty_string_evaluates_false(self) -> None:
+        # Pins Einstein's blocking objection (msg-725) + Bohr's chosen
+        # fix (msg-726): the predicate must be self-defending against an
+        # unnormalized ``""``. An accidental unnormalized ``""`` reaching
+        # ``_is_close_post`` must drop to the standard role gate (i.e.
+        # ``False`` here), not misroute to the close-gate authorization
+        # path. This flips the earlier ``test_expects_pre_normalized_input``
+        # from documenting a footgun to pinning the structural defense:
+        # the predicate applies ``_normalize_closes_thread`` internally,
+        # so caller discipline is no longer the invariant.
+        assert chatroom_tools._is_close_post("decide", "") is False
+
+    def test_normalization_is_idempotent(self) -> None:
+        # Guards against a future edit that accidentally over-normalizes:
+        # a pre-normalized non-empty string must still evaluate as a
+        # close. Live callers normalize once at ingress for the adapter
+        # forwarding step; internal normalization inside the predicate
+        # must be a no-op on that already-normalized value.
+        assert chatroom_tools._is_close_post("decide", "T-1") is True
 
 
 # --- SSOT: both ingress sites route through _is_close_post -----------

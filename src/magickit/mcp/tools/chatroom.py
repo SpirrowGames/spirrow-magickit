@@ -109,8 +109,15 @@ CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 #   ``is None`` / ``is not None`` terms, not ``bool()`` terms.
 #
 #   ``_is_close_post`` is the single-source-of-truth predicate. Both
-#   ingress paths call this exact function after normalizing. There is no
-#   second copy anywhere; ``test_close_detection_ssot.py`` pins that.
+#   ingress paths call this exact function. There is no second copy
+#   anywhere; ``test_close_detection_ssot.py`` pins that. The predicate
+#   is *self-defending*: it applies ``_normalize_closes_thread`` to its
+#   input internally, so an unnormalized ingress cannot misroute the
+#   authorization gate. Caller-side normalization is not a security
+#   invariant — the invariant lives inside the predicate. Because
+#   ``_normalize_closes_thread`` is idempotent, live callers that also
+#   normalize before forwarding to the adapter (they must, because the
+#   wire value is data, not a flag) pay nothing for this defense.
 #
 # Conclair-side baseline (spirrow-conclair @ current main, recorded here
 # so a future reader can see the "what we chose not to mimic"):
@@ -152,12 +159,21 @@ def _normalize_closes_thread(value: str | None) -> str | None:
 def _is_close_post(msg_type: str, closes_thread: str | None) -> bool:
     """The single-source-of-truth "is this a close?" predicate.
 
-    ``closes_thread`` MUST already be normalized (``_normalize_closes_thread``).
+    Self-defending: idempotent normalization is applied inside so an
+    unnormalized ingress (a stray ``""`` reaching this helper) cannot
+    misroute the authorization gate. An accidental unnormalized ``""``
+    collapses to ``None`` here and drops to the standard role gate,
+    which is the same gate the value's semantics ("no thread being
+    closed") demand. Live callers still normalize once at ingress for
+    the adapter-forwarding step — the wire value is data, not a flag —
+    and pay nothing extra for this defense because normalization is
+    idempotent.
+
     A close is exactly a ``decide`` msg carrying a non-None normalized
     ``closes_thread``. Both ingress paths call this and no other; a copy
     elsewhere is the dual-management fault this helper exists to prevent.
     """
-    return msg_type == "decide" and closes_thread is not None
+    return msg_type == "decide" and _normalize_closes_thread(closes_thread) is not None
 
 
 # --- design-decide naysayer gate ---------------------------------------
