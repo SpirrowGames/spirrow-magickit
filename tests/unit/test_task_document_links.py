@@ -193,3 +193,237 @@ class TestInitProjectWritesTheId:
             await init_project(project="demo")
 
         assert "root_folder_id" not in adapter.update_project.await_args.kwargs
+
+
+def _doc_link_entry(utid: str, doc_id: str, knowledge_id: str = "") -> dict[str, Any]:
+    """A knowledge entry shaped the way add_task writes document links."""
+    import json
+
+    return {
+        "id": knowledge_id or f"k-{doc_id}",
+        "content": json.dumps({"type": "doc_link", "doc_id": doc_id, "utid": utid}),
+        "category": "task_doc_link",
+    }
+
+
+class TestReadLinkedDocs:
+    """get_task reads back what attach_docs wrote.
+
+    Before this, the link was write-only: nothing queried task_doc_link,
+    so a task could be linked to a design document with no way to ask
+    what it was linked to.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.settings = MagicMock()
+        self.settings.prismind_url = "http://localhost:8112"
+        self.settings.prismind_timeout = 30.0
+        task._settings = self.settings
+
+    def _adapter(self, entries: list[dict[str, Any]], *, project_uid: str = "folder-uid-1"):
+        adapter = AsyncMock()
+        adapter.call = AsyncMock(return_value={
+            "success": True,
+            "task": {"task_id": "T01", "name": "Design doc task"},
+            "phase": "Phase 1",
+            "project": "demo",
+        })
+        progress: dict[str, Any] = {"current_phase": "Phase 1", "phases": []}
+        if project_uid:
+            progress["root_folder_id"] = project_uid
+        adapter.get_progress = AsyncMock(return_value=progress)
+        adapter.search_knowledge = AsyncMock(return_value=entries)
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_returns_linked_documents(self):
+        utid = "folder-uid-1:phase1:T01"
+        adapter = self._adapter([
+            _doc_link_entry(utid, "doc-123"),
+            _doc_link_entry(utid, "doc-456"),
+        ])
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings, task_id="T01", phase="Phase 1", project="demo"
+            )
+
+        assert [d["doc_id"] for d in result["linked_docs"]] == ["doc-123", "doc-456"]
+        assert result["linked_docs"][0]["knowledge_id"] == "k-doc-123"
+
+        query = adapter.search_knowledge.await_args.kwargs
+        assert query["category"] == "task_doc_link"
+        assert query["query"] == f"utid:{utid}"
+
+    @pytest.mark.asyncio
+    async def test_ignores_entries_belonging_to_other_tasks(self):
+        """The search is semantic; the recorded UTID decides membership."""
+        utid = "folder-uid-1:phase1:T01"
+        adapter = self._adapter([
+            _doc_link_entry(utid, "doc-123"),
+            _doc_link_entry("folder-uid-1:phase1:T99", "doc-999"),
+        ])
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings, task_id="T01", phase="Phase 1", project="demo"
+            )
+
+        assert [d["doc_id"] for d in result["linked_docs"]] == ["doc-123"]
+
+    @pytest.mark.asyncio
+    async def test_collapses_duplicate_doc_ids(self):
+        utid = "folder-uid-1:phase1:T01"
+        adapter = self._adapter([
+            _doc_link_entry(utid, "doc-123", "k-1"),
+            _doc_link_entry(utid, "doc-123", "k-2"),
+        ])
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings, task_id="T01", phase="Phase 1", project="demo"
+            )
+
+        assert len(result["linked_docs"]) == 1
+        assert result["linked_docs"][0]["knowledge_id"] == "k-1"
+
+    @pytest.mark.asyncio
+    async def test_skips_unparseable_entries(self):
+        utid = "folder-uid-1:phase1:T01"
+        adapter = self._adapter([
+            {"id": "k-bad", "content": "not json"},
+            {"id": "k-none", "content": None},
+            _doc_link_entry(utid, "doc-123"),
+        ])
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings, task_id="T01", phase="Phase 1", project="demo"
+            )
+
+        assert [d["doc_id"] for d in result["linked_docs"]] == ["doc-123"]
+
+    @pytest.mark.asyncio
+    async def test_search_failure_does_not_fail_get_task(self):
+        adapter = self._adapter([])
+        adapter.search_knowledge = AsyncMock(side_effect=RuntimeError("prismind down"))
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings, task_id="T01", phase="Phase 1", project="demo"
+            )
+
+        assert result["success"] is True
+        assert result["linked_docs"] == []
+
+    @pytest.mark.asyncio
+    async def test_no_project_id_yields_no_links(self):
+        adapter = self._adapter([], project_uid="")
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings, task_id="T01", phase="Phase 1", project="demo"
+            )
+
+        assert result["linked_docs"] == []
+        adapter.search_knowledge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_can_be_turned_off(self):
+        adapter = self._adapter([])
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.get_task_impl(
+                settings=self.settings,
+                task_id="T01",
+                phase="Phase 1",
+                project="demo",
+                include_linked_docs=False,
+            )
+
+        assert "linked_docs" not in result
+        adapter.get_progress.assert_not_awaited()
+
+
+class TestStartTaskSurfacesLinks:
+    """start_task hands the linked documents to whoever picks the task up."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.settings = MagicMock()
+        self.settings.prismind_url = "http://localhost:8112"
+        self.settings.prismind_timeout = 30.0
+        self.settings.cognilens_url = "http://localhost:8111"
+        self.settings.cognilens_timeout = 30.0
+        task._settings = self.settings
+
+    def _adapter(self, *, project_uid: str, entries: list[dict[str, Any]] | None = None):
+        adapter = AsyncMock()
+        progress: dict[str, Any] = {
+            "current_phase": "Phase 1",
+            "phases": [{
+                "phase": "Phase 1",
+                "tasks": [{"task_id": "T01", "name": "Design doc task", "status": "not_started"}],
+            }],
+        }
+        if project_uid:
+            progress["root_folder_id"] = project_uid
+        adapter.get_progress = AsyncMock(return_value=progress)
+        adapter.start_task = AsyncMock(return_value={"success": True, "message": "started"})
+        adapter.search_knowledge = AsyncMock(return_value=entries or [])
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_context_carries_linked_docs(self):
+        utid = "folder-uid-1:phase1:T01"
+        adapter = self._adapter(
+            project_uid="folder-uid-1",
+            entries=[_doc_link_entry(utid, "doc-123")],
+        )
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.start_task_impl(
+                settings=self.settings,
+                task_id="T01",
+                project="demo",
+                refresh_attachments=False,
+            )
+
+        assert result["success"] is True
+        assert [d["doc_id"] for d in result["context"]["linked_docs"]] == ["doc-123"]
+
+    @pytest.mark.asyncio
+    async def test_missing_project_id_warns_about_both_features(self):
+        """refresh_attachments used to no-op here without a word."""
+        adapter = self._adapter(project_uid="")
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.start_task_impl(
+                settings=self.settings,
+                task_id="T01",
+                project="demo",
+                refresh_attachments=True,
+            )
+
+        assert result["success"] is True
+        assert result["attachment_status"] == {}
+        warning = next(w for w in result["warnings"] if "project_uid" in w)
+        assert "document links" in warning
+        assert "attachment refresh" in warning
+
+    @pytest.mark.asyncio
+    async def test_missing_project_id_warns_about_links_alone(self):
+        adapter = self._adapter(project_uid="")
+
+        with patch.object(task, "PrismindAdapter", return_value=adapter):
+            result = await task.start_task_impl(
+                settings=self.settings,
+                task_id="T01",
+                project="demo",
+                refresh_attachments=False,
+            )
+
+        warning = next(w for w in result["warnings"] if "project_uid" in w)
+        assert "document links" in warning
+        assert "attachment refresh" not in warning
