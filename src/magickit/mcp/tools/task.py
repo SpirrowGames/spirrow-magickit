@@ -26,6 +26,7 @@ from magickit.adapters.cognilens import CognilensAdapter, CognilensError
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.mcp.tools.document import smart_create_document_impl
+from magickit.mcp.tools.project import get_project_uid
 from magickit.utils.logging import get_logger
 from magickit.utils.user import get_current_user
 
@@ -885,6 +886,72 @@ async def list_tasks_impl(
     }
 
 
+async def _get_linked_documents(
+    prismind: PrismindAdapter,
+    utid: str,
+    project: str,
+    user: str,
+) -> list[dict[str, Any]]:
+    """Read back the documents attach_docs linked to a task.
+
+    add_task writes one knowledge entry per link (category
+    ``task_doc_link``, content ``{"type", "doc_id", "utid"}``). Nothing
+    read those entries back, so a link was write-only: attach_docs
+    reported success and no tool could then tell you what a task was
+    linked to.
+
+    The search is semantic, so it can return entries belonging to other
+    tasks; the UTID recorded in each entry is what actually decides
+    membership, not the score.
+
+    Args:
+        prismind: Prismind adapter instance.
+        utid: UTID of the task whose links to read.
+        project: Project identifier.
+        user: User identifier.
+
+    Returns:
+        List of {"doc_id", "knowledge_id"}, in the order first seen,
+        with duplicate doc_ids collapsed. Empty on any failure -- a
+        missing link list must not take down get_task.
+    """
+    try:
+        entries = await prismind.search_knowledge(
+            query=f"utid:{utid}",
+            category="task_doc_link",
+            project=project,
+            limit=50,
+            user=user,
+        )
+    except Exception as e:
+        logger.warning("Failed to search document links", utid=utid, error=str(e))
+        return []
+
+    linked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for entry in entries:
+        try:
+            info = json.loads(entry.get("content", ""))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if not isinstance(info, dict) or info.get("utid") != utid:
+            continue
+
+        doc_id = info.get("doc_id", "")
+        if not doc_id or doc_id in seen:
+            continue
+
+        seen.add(doc_id)
+        linked.append({
+            "doc_id": doc_id,
+            "knowledge_id": entry.get("id", entry.get("knowledge_id", "")),
+        })
+
+    return linked
+
+
 async def _refresh_task_attachments(
     settings: Settings,
     prismind: PrismindAdapter,
@@ -1182,13 +1249,34 @@ async def start_task_impl(
     except Exception as e:
         logger.warning("Failed to get related context", error=str(e))
 
-    # Refresh file attachments if enabled
+    # Both linked documents and file attachments hang off the task's UTID,
+    # so resolve it once.
+    project_uid = progress.get("project_uid") or progress.get("root_folder_id", "")
+    utid = generate_utid(project_uid, task_phase, task_id) if project_uid else ""
+
     attachment_status: dict[str, Any] = {}
-    if refresh_attachments:
-        # Generate UTID to search for attachments
-        project_uid = progress.get("project_uid") or progress.get("root_folder_id", "")
-        if project_uid:
-            utid = generate_utid(project_uid, task_phase, task_id)
+
+    if not utid:
+        # Say it out loud. Silently returning an empty context here is what
+        # made attach_docs look like it had linked the documents to nothing.
+        skipped = "document links"
+        if refresh_attachments:
+            skipped = "document links and attachment refresh"
+        warnings.append(
+            f"Skipped {skipped}: they require project_uid, which get_progress "
+            f"did not return for this project."
+        )
+    else:
+        # Documents linked to this task when it was added
+        context["linked_docs"] = await _get_linked_documents(
+            prismind=prismind,
+            utid=utid,
+            project=project,
+            user=effective_user,
+        )
+
+        # Refresh file attachments if enabled
+        if refresh_attachments:
             attachment_status = await _refresh_task_attachments(
                 settings=settings,
                 prismind=prismind,
@@ -1504,26 +1592,70 @@ async def block_task_impl(
     }
 
 
+async def _resolve_linked_docs_for_task(
+    prismind: PrismindAdapter,
+    task_id: str,
+    phase: str,
+    project: str,
+    user: str,
+) -> list[dict[str, Any]]:
+    """Resolve a task's UTID, then read its document links.
+
+    get_task talks to Prismind's get_task, which does not carry the
+    project id, so the id has to be fetched separately before a UTID can
+    be built. Returns [] when the id or the phase is unavailable -- a
+    task with no resolvable UTID has no links by definition.
+    """
+    if not phase:
+        return []
+
+    project_uid = await get_project_uid(project, prismind, user)
+    if not project_uid:
+        logger.warning(
+            "Cannot resolve document links without project_uid",
+            project=project,
+            task_id=task_id,
+        )
+        return []
+
+    return await _get_linked_documents(
+        prismind=prismind,
+        utid=generate_utid(project_uid, phase, task_id),
+        project=project,
+        user=user,
+    )
+
+
 async def get_task_impl(
     settings: Settings,
     task_id: str,
     phase: str = "",
     project: str = "",
     include_related_knowledge: bool = False,
+    include_linked_docs: bool = True,
     user: str = "",
 ) -> dict[str, Any]:
-    """Get a single task by ID with optional related knowledge.
+    """Get a single task by ID with its linked documents.
+
+    Note that include_related_knowledge and include_linked_docs answer
+    different questions. The former is a semantic search over the task's
+    name and notes -- whatever happens to read as similar. The latter is
+    an exact lookup of the documents attach_docs was told to link, which
+    is the only way to get those back out.
 
     Args:
         settings: Application settings
         task_id: Task ID to retrieve
         phase: Phase name (specify if task_id exists in multiple phases)
         project: Project ID
-        include_related_knowledge: Include related knowledge entries
+        include_related_knowledge: Include semantically similar knowledge
+        include_linked_docs: Include documents linked via attach_docs.
+            Costs one extra Prismind round-trip to resolve the project id;
+            pass False on hot paths that do not need them.
         user: User identifier for multi-user support
 
     Returns:
-        Dict with task details and optional related knowledge
+        Dict with task details, linked documents, and optional related knowledge
     """
     effective_user = user or get_current_user()
 
@@ -1559,6 +1691,16 @@ async def get_task_impl(
         "project": result.get("project"),
         "message": result.get("message"),
     }
+
+    # Read back the documents attach_docs linked to this task
+    if include_linked_docs:
+        response["linked_docs"] = await _resolve_linked_docs_for_task(
+            prismind=prismind,
+            task_id=task_id,
+            phase=result.get("phase") or phase,
+            project=project,
+            user=effective_user,
+        )
 
     # Get related knowledge if requested
     if include_related_knowledge:
@@ -2222,24 +2364,29 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         phase: str,
         project: str = "",
         include_related_knowledge: bool = False,
+        include_linked_docs: bool = True,
         user: str = "",
     ) -> dict[str, Any]:
         """Get a single task by ID with full details.
 
-        USE THIS WHEN: You need detailed information about a specific task.
+        USE THIS WHEN: You need detailed information about a specific task,
+        including which design documents it was linked to.
         This tool:
         - Retrieves task with all fields (name, status, priority, etc.)
-        - Optionally includes related knowledge entries
+        - Returns the documents linked via add_task(attach_docs=...)
+        - Optionally includes semantically related knowledge entries
 
         Args:
             task_id: Task ID to retrieve (required)
             phase: Phase name (required; pass empty string to auto-resolve when task_id is unique across all phases)
             project: Project ID (empty for current)
-            include_related_knowledge: Include related knowledge entries
+            include_related_knowledge: Include semantically similar knowledge
+            include_linked_docs: Include documents linked via attach_docs
+                (one extra round-trip; pass False if you do not need them)
             user: User identifier for multi-user support (auto-detected if empty)
 
         Returns:
-            Dict with task details and optional related knowledge
+            Dict with task details, linked_docs, and optional related knowledge
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
@@ -2250,6 +2397,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             phase=phase,
             project=project,
             include_related_knowledge=include_related_knowledge,
+            include_linked_docs=include_linked_docs,
             user=user,
         )
 

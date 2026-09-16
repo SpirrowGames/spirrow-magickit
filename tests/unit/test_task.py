@@ -673,6 +673,10 @@ class TestGetTask:
                 settings=self.mock_settings,
                 task_id="T01",
                 include_related_knowledge=True,
+                # Document links search knowledge too; keep the call count
+                # below about related knowledge alone. See
+                # tests/unit/test_task_document_links.py for that path.
+                include_linked_docs=False,
             )
 
             assert result["success"] is True
