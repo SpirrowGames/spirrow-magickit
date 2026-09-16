@@ -1107,10 +1107,22 @@ async def test_a_confirmed_negative_still_posts_and_only_it_does(wired) -> None:
 
     Why there is no matching pair on ``chatroom_open_thread``: it delegates to
     the same ``_check_role_allowed`` helper on the same branch, with no
-    bespoke call-site or wrapping (chatroom.py L1250). The distinction pinned
-    here is a property of that helper's stage-1 return, so covering the post
-    entry covers the open entry too; a refactor that gives open its own path
-    is the trigger to add a matching pair, not now.
+    bespoke call-site or wrapping. The distinction pinned here is a property
+    of that helper's stage-1 return, so covering the post entry covers the
+    open entry too *while the two call-sites feed the helper the same
+    identifier*. Trigger to add a matching pair (msg-273 §2): (i) open stops
+    delegating to ``_check_role_allowed`` -- either by gaining its own path
+    or by wrapping the helper -- OR (ii) the ``actor``/``role`` open hands to
+    the helper stops being derived from the propose-message author. Today
+    (i) is why the pin is on post: open calls the helper with
+    ``author=owner`` and post calls it with ``author=author``; those name the
+    same identity because the propose-msg's author *is* the owner, so
+    pinning either arm covers the other. On the day (ii) breaks that
+    identity -- e.g. open starts resolving the actor from somewhere other
+    than the propose-msg author -- the post pin goes green on traffic the
+    open path would let through, and the matching open pair is required.
+    Both triggers are recorded here rather than in the thread so a future
+    edit sees them next to the code they gate.
 
     Embodiment defence (msg-270 §4 / ADR-2026-05-29-12): ``msg_type="report"``
     is outside ``MANDATORY_EMBODIMENT_MSG_TYPES``, AND a valid ``embodiment``
