@@ -25,7 +25,7 @@
       autoescape に任せる。`html.unescape()` も入れない (Tier-C msg-118 §3 実測)。
 #}
 
-{% block title %}判断 — {{ thread_title or thread_id }}{% endblock %}
+{% block title %}判断 — {{ project }} / {{ thread_title or thread_id }}{% endblock %}
 
 {% block head %}
 <style>
@@ -40,6 +40,21 @@
     box-sizing: border-box;
   }
   .decision-container * { box-sizing: border-box; }
+
+  /* どのプロダクトの議題か。題名より **前** に読ませる。
+     このページは板 (/dashboard/decisions) と Discord alert から直接
+     開かれる ∴ 開いた人が最初に見るのがここで、それまで画面上に
+     プロダクトを示すものは URL しか無かった。
+     板のカード副題 (board.py の ``Card.subline``) と同じ綴り = project
+     id そのまま。表示名は Prismind に問い合わせないと判らず、判断ページは
+     Conclair が落ちていても描けなければならない ∴ 依存を増やさない。 */
+  .decision-product {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #57606a;
+    margin: 0 0 0.25rem;
+    overflow-wrap: anywhere;
+  }
 
   .decision-question {
     background: #ddf4ff;
@@ -373,6 +388,12 @@
 
 {% block content %}
 <div class="decision-container">
+  {# 4 mode すべてが project を持つ ∴ 分岐の外に 1 度だけ置く。
+     mode ごとに書くと、増えた mode で黙って抜ける。 #}
+  {% if project %}
+    <p class="decision-product">{{ project }}</p>
+  {% endif %}
+
   {% if mode == "judgement" %}
     <h1>判断 — <code>{{ thread_id }}</code></h1>
     {% if thread_title and thread_title != thread_id %}
@@ -808,7 +829,7 @@
   {% elif mode == "not_found" %}
     <h1>スレッドが見つかりません</h1>
     <p>{{ error_message }}</p>
-    <p style="color:#57606a;">プロジェクト <code>{{ project }}</code> にこの ID のスレッドは
+    <p style="color:#57606a;">このプロダクトにこの ID のスレッドは
     存在しません. URL に typo が無いか確かめてください.</p>
 
   {% elif mode == "unavailable" %}
