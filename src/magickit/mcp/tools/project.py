@@ -40,7 +40,8 @@ async def get_project_uid(project: str, prismind: PrismindAdapter, user: str = "
     """
     try:
         progress = await prismind.get_progress(project=project, user=user)
-        # Check both project_uid (new) and root_folder_id (legacy)
+        # root_folder_id is the name Prismind actually speaks; project_uid is
+        # Magickit's own spelling, kept first for payloads that use it.
         return progress.get("project_uid") or progress.get("root_folder_id", "") or None
     except Exception as e:
         logger.warning(

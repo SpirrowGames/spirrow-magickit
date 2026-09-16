@@ -303,7 +303,14 @@ start_task(
 
 # 使用例: タスク取得
 get_task(task_id="T01", include_related_knowledge=True)
-# -> {"task": {...}, "related_knowledge": [...]}
+# -> {
+#   "task": {...},
+#   "linked_docs": [{"doc_id": "doc-12345", "knowledge_id": "k-..."}],
+#   "related_knowledge": [...]
+# }
+# linked_docs は attach_docs で張ったリンクの引き当て（完全一致）。
+# related_knowledge はタスク名・備考での意味検索であって別物。
+# リンクが不要なら include_linked_docs=False で往復を1回減らせる。
 
 # 使用例: タスク更新（名前・優先度変更）
 update_task(
