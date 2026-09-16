@@ -226,10 +226,20 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
             logger.info("Prismind setup_project succeeded", project=project, result=setup_parsed)
 
-            # Extract root_folder_id as project_uid (unique project identifier)
+            # Extract root_folder_id (the project's unique identifier, which
+            # we surface to callers as project_uid)
             root_folder_id = setup_parsed.get("root_folder_id", "")
 
-            # Step 2: Update project with template metadata and project_uid
+            # Step 2: Update project with template metadata and the project id.
+            # Send it under the name Prismind actually accepts: update_project
+            # has no project_uid parameter, so the old spelling was dropped on
+            # the floor and the id was never written back. Omit the key when
+            # setup_project gave us nothing, rather than blanking the stored
+            # value with "".
+            update_fields: dict[str, Any] = {}
+            if root_folder_id:
+                update_fields["root_folder_id"] = root_folder_id
+
             update_result = await prismind.update_project(
                 project=project,
                 name=display_name,
@@ -239,8 +249,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 template=template,
                 status="active",
                 created_at=datetime.now().isoformat(),
-                project_uid=root_folder_id,  # Store root_folder_id as project_uid
                 user=effective_user,
+                **update_fields,
             )
             update_parsed = _parse_result(update_result)
             logger.info("Prismind update_project result", project=project, result=update_parsed)

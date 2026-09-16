@@ -736,7 +736,16 @@ async def add_task_impl(
 
     # Step 7: Link existing documents
     linked_docs: list[str] = []
-    if attach_docs and utid:
+    if attach_docs and not utid:
+        # Without a UTID there is nothing to hang the link on. Say so:
+        # returning linked_docs: [] on an otherwise successful add_task is
+        # indistinguishable from "the documents were linked to nothing".
+        warnings.append(
+            "Document links require project_uid, which get_progress did not "
+            "return for this project; attach_docs was skipped. Set up the "
+            "project with init_project first."
+        )
+    elif attach_docs:
         for doc_id in attach_docs:
             try:
                 # Record the link as knowledge
