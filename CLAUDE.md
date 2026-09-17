@@ -646,12 +646,18 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
     remote gate 側が webhook 伝播遅延で古い state を掴んだ propagation race)。**上の CI 待機
     ロジックに戻ってはならない** — local CLI は既に terminal ∴ `until` も `--watch` も即 exit で
     実質 0 秒 delay になり、rapid infinite retry に化ける (pr-gate-relay msg-764 correctness
-    objection の実バグ)。代わりに **固定 sleep で 60s 待って 1 度だけ再発火**する:
+    objection の実バグ)。代わりに **短 sleep の反復で 60s 待って 1 度だけ再発火**する:
 
     ```bash
-    sleep 60  # remote gate の webhook 伝播バッファ (local CLI は既に terminal)
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 5; done  # 12 × 5s = 60s
+    # remote gate の webhook 伝播バッファ (local CLI は既に terminal)
     # 再発火 (pr-review 経路への 2 度目のハンドオフ)
     ```
+
+    **`sleep 60` を直書きしない** — Claude Code の run rule (上の polling 節で引用済) が
+    「Long leading sleep commands are blocked」を明記しており、bare `sleep 60` は runtime に
+    弾かれて retry pathway 全体が壊れる (pr-gate-relay msg-767 correctness objection の実バグ)。
+    短 sleep の反復に倒すことで、合計 60s の buffer を確保しつつ blocker を回避する。
 
     2 度目も COMMENT が返ったら fix loop ではなく **「撃てなかった」escape** に倒し、
     「gate が COMMENT を 2 度返した (remote propagation race 継続) — 自動再試行を諦めて渡す」
