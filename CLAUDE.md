@@ -578,12 +578,32 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
 発火させる。**artifact (`spirrowgames-ops` の APPROVED review、head sha 紐づき) が GitHub 上に
 成立するまで `NEXT: human` を出さない。**
 
+- **check row が現れるまで待つ (pre-queue race)**: PR 作成直後は GitHub Actions が
+  check suite を parse するまで数秒〜十数秒あり、この間 `gh pr checks` は **empty
+  (0 行) を返す**。これを「completed」と誤判定して gate を撃つと、gate 側の CI 参照が
+  pending/unknown を見て D-2 の `COMMENT` を返す (下記の COMMENT 分岐で拾うが、pre-queue で
+  無駄撃ちしないのが先)。**empty は completed ではない** — 少なくとも 1 件の check row が
+  現れてから状態評価を始める
 - CI が **pending** の間は待つ (`gh pr checks` などの決定論的手段で確認)。gate はまだ撃たない
+- **polling は sleep 付き until-loop で書く**: `until [ "$(gh pr checks <n> | grep -c
+  pending)" -eq 0 ]; do sleep 10; done` のような形。tight-loop で連打すると agent
+  iteration / context を食い尽くして session が crash する (Claude Code の run rule:
+  「Long leading sleep commands are blocked. To poll until a condition is met, use
+  Monitor with an until-loop」)。長時間 CI では `run_in_background` を使って turn を
+  跨ぐことも許される
 - CI が完了したら **SUCCESS でも FAILURE でも** gate を撃つ — FAILURE 時に AI 側で
   fix loop に戻す事前判定はしない。ADR-2026-06-03-16 の gate 側 L1 短絡 (failure 時に
   Lexora を呼ばずに `REQUEST_CHANGES` を返す) と同じ責務を AI 側に実装すると二重管理になる
-- gate が返すのは **APPROVE** か **REQUEST_CHANGES** の 2 択 (pending 中に撃たないので
-  pending 由来の `COMMENT` は生じない)。`REQUEST_CHANGES` → fix loop、`APPROVE` → `NEXT: human`
+- **gate の返り値は 3 種** (ADR-2026-06-03-16 D-2 の分岐表: `SUCCESS→内容 review` /
+  `FAILURE→REQUEST_CHANGES 短絡` / `PENDING→COMMENT 保留` / `UNKNOWN→fail-closed`):
+  - `APPROVE` → artifact 成立 ∴ `NEXT: human`
+  - `REQUEST_CHANGES` → fix loop に戻る (判別子不要 — L1 短絡でも内容起因でも AI が返すべき
+    action は「直せ」で同じ)
+  - `COMMENT` → 撃つのが早すぎた (pre-queue race か、race で pending が gate 側から見えなかった)。
+    **その場で即再発火しない** — 上の CI 待機ロジックに戻り、CI が真に settle したことを
+    再確認してから撃ち直す。**「pending 由来 RC」という phantom branch を作らない** — ADR D-2 は
+    pending を明確に `COMMENT` で返し `REQUEST_CHANGES` に潰さない (T-merged-to-main-without-gate-artifact
+    msg-751 §1 の ADR 読了報告)
 - head が動いたら CI も artifact もやり直し (新しい head sha に対する CI 完了を再度待って
   gate を撃ち直す)。前 head の APPROVED は無効
 - CI 取得や gate 発火が構造的に不能な場合 (token 権限欠如・network・gate エラー等) は
