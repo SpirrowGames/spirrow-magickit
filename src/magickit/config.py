@@ -159,6 +159,45 @@ class Settings(BaseSettings):
     # into an archive nobody scrolls.
     board_done_days: int = Field(default=7)
 
+    # Board (`/dashboard/decisions`) — マージ (merge) lane.
+    # ----------------------------------------------------
+    #
+    # T-merged-to-main-without-gate-artifact (Bohr msg-829 §5) closes the
+    # prospective side of the failure: a merge into `main` never fired the
+    # independent naysayer because the ledger stream that would carry it
+    # was never opened. The board's マージ lane makes 「未依頼」 (un-
+    # requested) visible per open PR, so no live PR can escape it.
+    #
+    # `board_pr_repo_allowlist` is a hard-coded list (owner, repo) rather
+    # than repo discovery for one reason: 「測ってから足す」 -- we count
+    # the API cost only for repos we're sure carry PRs that merit the
+    # naysayer, and voxelworld / playproof / phanthand are explicitly
+    # excluded until measured (msg-829 §4). The value is `list[str]` with
+    # `owner/repo` grammar because YAML doesn't cleanly express tuples.
+    #
+    # Empty list disables the lane entirely (skips all GitHub calls). This
+    # is the correct default outside production: a dev host without the
+    # implementer PAT never calls GitHub at all.
+    board_pr_repo_allowlist: list[str] = Field(
+        default_factory=lambda: [
+            "SpirrowGames/spirrow-magickit",
+            "SpirrowGames/spirrow-conclair",
+            "SpirrowGames/spirrow-lexora",
+            "SpirrowGames/spirrow-cognilens",
+            "SpirrowGames/spirrow-prismind",
+            "SpirrowGames/spirrow-mindwire",
+        ]
+    )
+
+    # UI poll interval (seconds) and data refresh interval (seconds) — the
+    # (a) branch of Bohr msg-823 §5. The UI polls fast so drag/drop stays
+    # snappy; the underlying data (which costs GitHub API calls) refreshes
+    # far less often. The two are unlinked on purpose: coupling them would
+    # blow through the rate-limit budget on the first user who opened the
+    # board on a second monitor.
+    board_ui_poll_seconds: int = Field(default=20)
+    board_pr_refresh_seconds: int = Field(default=300)
+
     # Chatroom thread digests. Magickit is the producer (Cognilens -> Lexora
     # `light`); Conclair stores and renders. See core/digest_producer.py.
     #
@@ -447,8 +486,21 @@ class Settings(BaseSettings):
             flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
 
         # Board view settings
-        if board := yaml_config.get("board"):
+        if (board := yaml_config.get("board")) is not None:
             flat_config["board_done_days"] = board.get("done_days")
+            # `is not None` so an explicit empty list (「マージ lane を
+            # 全 repo で無効にする」) is honoured rather than silently
+            # falling back to the six-repo default.
+            if "pr_repo_allowlist" in board:
+                flat_config["board_pr_repo_allowlist"] = list(
+                    board.get("pr_repo_allowlist") or []
+                )
+            if "ui_poll_seconds" in board:
+                flat_config["board_ui_poll_seconds"] = board.get("ui_poll_seconds")
+            if "pr_refresh_seconds" in board:
+                flat_config["board_pr_refresh_seconds"] = board.get(
+                    "pr_refresh_seconds"
+                )
 
         # Who may approve a deploy from the dashboard. An explicit empty
         # list is meaningful (nobody), so this reads the key rather than
