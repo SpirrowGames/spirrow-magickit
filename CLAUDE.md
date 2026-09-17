@@ -422,9 +422,12 @@ URL の分割は**形**であって登録順ではない: 板は 1 セグメン�
 ## 稼働状況ページ (`web/ops.py`)
 
 `/dashboard` = **稼働状況**。「自律ループが今回っているのか、止まっているのか、何を待っているのか」に
-1 画面で答える。従来の Magickit 内部ダッシュボード (自前 SQLite の task queue / locks / events) は
-`/dashboard/system` に移動した — あれは Magickit というサービスの状態であって、コードを書いている
-ループの状態ではない。
+1 画面で答える。従来の Magickit 内部ダッシュボード (自前 SQLite の task queue / locks / events / Chatroom
+summary panel) は一時 `/dashboard/system` に移動していたが、
+**T-dashboard-system-page-retirement-unfiled msg-741 の Tier-C 判定 (2026-09-17) で退役**した。
+`/dashboard/system` は 404、nav の `System` は消えている。同じデータが必要な診断は
+`/v1/tasks` API と `state_manager` から直接引く (姉妹 carve-out
+`T-task-queue-processing-loop-not-running-on-main` 参照)。
 
 データ源はすべて Conclair (Magickit は集約と判定のみ): `GET /v1/projects` (thread 数・status 内訳・
 gate 数・最終メッセージ時刻) / `GET /v1/projects/{p}/control` (`desired` と `observed`=heartbeat) /

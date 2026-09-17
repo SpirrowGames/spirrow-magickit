@@ -7,7 +7,6 @@ why). Conclair stays a loopback-only leaf service.
 from __future__ import annotations
 
 from magickit.web.board import router as board_router
-from magickit.web.chatroom_dashboard import router as dashboard_router
 from magickit.web.chatroom_digest import router as digest_router
 from magickit.web.chatroom_proxy import close_client, router
 from magickit.web.chatroom_writes import router as writes_router
@@ -19,7 +18,6 @@ from magickit.web.ops import router as ops_router
 __all__ = [
     "router",
     "writes_router",
-    "dashboard_router",
     "digest_router",
     "decision_summary_router",
     "decisions_router",

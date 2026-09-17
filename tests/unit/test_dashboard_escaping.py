@@ -1,15 +1,18 @@
 """The dashboard fragments build HTML with f-strings, so they must escape.
 
 These panels render names and ids that came from somewhere else -- a task
-name arrives through the MCP tools, a lock's resource_type is a free-form
-string on the lock request -- and they go straight into markup. The
-dashboard is the one place a human reads them.
+name arrives through the MCP tools -- and they go straight into markup.
+The dashboard is the one place a human reads them.
 
 The handlers are closures inside `create_app`, and reaching them over HTTP
 would need the app's lifespan, which opens the real SQLite file the
 running service holds a lock on. They are called directly instead, with a
 stub request carrying a fake state manager: the escaping is a property of
 the handler, not of the transport.
+
+The `/dashboard/queue` and `/dashboard/locks` fragments used to have
+escaping tests here too; they were retired with `/dashboard/system` on
+T-dashboard-system-page-retirement-unfiled (msg-741, 2026-09-17).
 """
 
 from __future__ import annotations
@@ -55,13 +58,6 @@ class _Task:
 
 
 @dataclass
-class _Lock:
-    resource_type: str = PAYLOAD
-    resource_id: str = PAYLOAD
-    holder_id: str = PAYLOAD
-
-
-@dataclass
 class _Project:
     name: str = PAYLOAD
     description: str = PAYLOAD
@@ -88,28 +84,6 @@ class _StateManager:
 async def _render(app, method, path, request, **kwargs):
     response = await sole_route(app, method, path).endpoint(request, **kwargs)
     return response.body.decode()
-
-
-@pytest.mark.asyncio
-async def test_queue_fragment_escapes_task_names():
-    app = create_app()
-    queue = SimpleNamespace(get_all_tasks=lambda: _async([_Task()]))
-    body = await _render(
-        app, "GET", "/dashboard/queue", _request(task_queue=queue)
-    )
-
-    assert PAYLOAD not in body
-    assert ESCAPED in body
-
-
-@pytest.mark.asyncio
-async def test_locks_fragment_escapes_resource_strings():
-    app = create_app()
-    request = _request(state_manager=_StateManager(get_active_locks=[_Lock()]))
-    body = await _render(app, "GET", "/dashboard/locks", request)
-
-    assert PAYLOAD not in body
-    assert ESCAPED in body
 
 
 @pytest.mark.asyncio
@@ -150,7 +124,3 @@ async def test_task_detail_escapes_every_field_it_shows():
     # The fields that only appear when set must be covered too, not just
     # the ones every task has.
     assert "Error" in body and "Result" in body and "Depends on" in body
-
-
-async def _async(value):
-    return value

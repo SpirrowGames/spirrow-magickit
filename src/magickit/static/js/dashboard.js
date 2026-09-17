@@ -5,9 +5,6 @@
 
 // Global WebSocket connection
 let ws = null;
-let wsReconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_DELAY = 3000;
 
 /**
  * Show a modal by ID
@@ -49,37 +46,10 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
-/**
- * Connect to WebSocket for real-time updates
- */
-function connectWebSocket() {
-    // Get WebSocket URL from current location
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/projects/default`;
-
-    console.log('Connecting to WebSocket:', wsUrl);
-
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = function() {
-        console.log('WebSocket connected');
-        wsReconnectAttempts = 0;
-    };
-
-    ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        handleWebSocketMessage(data);
-    };
-
-    ws.onclose = function() {
-        console.log('WebSocket disconnected');
-        attemptReconnect();
-    };
-
-    ws.onerror = function(error) {
-        console.error('WebSocket error:', error);
-    };
-}
+// `connectWebSocket()` (the default-project variant) lived here until
+// T-dashboard-system-page-retirement-unfiled (msg-741, 2026-09-17) retired
+// its only caller, dashboard.html. `connectProjectWebSocket` below is still
+// used by tasks.html.
 
 /**
  * Connect to WebSocket for a specific project
@@ -98,7 +68,6 @@ function connectProjectWebSocket(projectId) {
 
     ws.onopen = function() {
         console.log('Project WebSocket connected:', projectId);
-        wsReconnectAttempts = 0;
     };
 
     ws.onmessage = function(event) {
@@ -116,22 +85,10 @@ function connectProjectWebSocket(projectId) {
     };
 }
 
-/**
- * Attempt to reconnect WebSocket
- */
-function attemptReconnect() {
-    if (wsReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.log('Max reconnect attempts reached');
-        return;
-    }
-
-    wsReconnectAttempts++;
-    console.log(`Attempting to reconnect (${wsReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-
-    setTimeout(function() {
-        connectWebSocket();
-    }, RECONNECT_DELAY);
-}
+// `attemptReconnect()` and its two RECONNECT_* constants were the reconnect
+// path for `connectWebSocket`, which was retired with `/dashboard/system` on
+// T-dashboard-system-page-retirement-unfiled (msg-741, 2026-09-17).
+// `connectProjectWebSocket` deliberately does not reconnect.
 
 /**
  * Handle incoming WebSocket messages
@@ -324,20 +281,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // No WebSocket here. This used to open one on any path under
     // /dashboard, on top of whichever connection the page had already
     // opened for itself, and it did something different and wrong on each
-    // of the three:
-    //
-    //   /dashboard        two connections, so the "Connected to real-time
-    //                     updates" toast appeared twice, and the first
-    //                     socket was left open with nothing referencing it
-    //                     -- `ws` is a single global and the second
-    //                     connect overwrote it.
-    //   /dashboard/tasks  it ran 500ms after the page subscribed to the
-    //                     selected project, overwrote `ws`, and left the
-    //                     page subscribed to `default` instead. The project
-    //                     filter looked like it did nothing.
-    //   /dashboard/projects  a connection no part of the page listens to.
-    //
-    // Each template that wants live updates opens its own connection and
-    // knows which project it wants: dashboard.html calls connectWebSocket,
+    // of the pages that took it. Each template that wants live updates
+    // opens its own connection and knows which project it wants:
     // tasks.html calls connectProjectWebSocket with the filter's value.
 });
