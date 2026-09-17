@@ -590,26 +590,47 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
 
   ```bash
   # 1. check row が現れるまで待つ (pre-queue race, 最大 120s で bail out)
+  #    stdout・stderr・exit code の 3 つを別々に見て
+  #    (a) checks 出現 / (b) 「no checks reported」で benign wait / (c) hard failure で即 escape
+  #    を区別する。stderr を捨てると (b) と (c) が判別不能になる (pr-gate-relay msg-770)。
   tries=0
-  until [ -n "$(gh pr checks <n> 2>/dev/null)" ]; do
-    tries=$((tries+1))
-    if [ $tries -ge 24 ]; then
-      echo "no CI checks for #<n> after 120s — path filter で skip されているか未設定" >&2
-      echo "→ 「撃てなかった」escape に倒し、スレッドに差し戻す" >&2
-      exit 1
+  while true; do
+    err_file=$(mktemp)
+    out=$(gh pr checks <n> 2>"$err_file"); rc=$?
+    err=$(cat "$err_file"); rm -f "$err_file"
+
+    # (a) checks 出現 → 次ステップ (--watch) へ
+    if [ -n "$out" ]; then break; fi
+
+    # (b) benign「no checks reported」→ pre-queue か checkless PR、bail-out まで待つ
+    if [ $rc -eq 1 ] && echo "$err" | grep -q "no checks reported"; then
+      tries=$((tries+1))
+      if [ $tries -ge 24 ]; then
+        echo "no CI checks for #<n> after 120s — path filter で skip か未設定" >&2
+        echo "→ 「撃てなかった」escape に倒し、スレッドに差し戻す" >&2
+        exit 1
+      fi
+      sleep 5
+      continue
     fi
-    sleep 5
+
+    # (c) hard failure (auth 失効 / network / rate limit / 予期しない stderr) → 即 escape
+    #     ここで benign と混同すると「path filter で skip」の嘘診断を吐く (msg-770)
+    echo "gh pr checks が hard failure: rc=$rc stderr=$err" >&2
+    echo "→ 「撃てなかった」escape に倒し、スレッドに差し戻す" >&2
+    exit 2
   done
   # 2. 完了 (pass/fail 確定) まで watch
   gh pr checks <n> --watch --interval 10 || true
   ```
 
-  bail-out 節が無いと、path-filter で CI を skip した PR (docs-only の一部設定など) で
-  `gh pr checks` が「no checks reported」を stderr に、stdout は空を返し続けて loop が
-  **無限に hang** する (pr-gate-relay msg-764 edge-case objection の実バグ)。120s は
-  「まだ queue されていない」と「そもそも設定されていない」を実用上区別するための閾値。
-  bail-out した場合は本規則の escape hatch (下記「CI 取得や gate 発火が構造的に不能な場合」)
-  にそのまま合流する — 「たぶん通る」で渡さない。
+  「stderr 捨て + stdout 空チェックだけ」だと、path filter skip (benign) と auth 失効 /
+  network 障害 (hard failure) が **区別できず**、後者を 120s 待たされた挙句「path filter
+  で skip か未設定」と嘘の診断で escape することになる (pr-gate-relay msg-770 correctness
+  objection の実バグ)。`gh pr checks` は「no checks reported」のみ exit code 1 + 特定
+  stderr で返し、それ以外の error は別の stderr 文字列を出す ∴ **stderr を捨てずに
+  pattern match して分岐する**。120s の bail-out はあくまで「本当に checks が無い PR」
+  (path filter / 未設定) のためであって、hard failure を隠すためではない。
 
   `--watch` は `gh` に built-in で、非終端状態 (`pending` / `in_progress` / `queued` / ...)
   を internally 正規化してから完了で exit する。`|| true` は failure 時の exit code 1 を
