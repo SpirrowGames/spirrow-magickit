@@ -447,17 +447,18 @@ async def post_message(
     # without role") stage 2 is guaranteed to refuse. The close path owes the
     # caller the stage-2 envelope instead (msg-041 Q3).
     #
-    # ``_normalize_closes_thread`` + ``_is_close_post`` are the single-source-
-    # of-truth close-detection helpers on the Magickit side
-    # (T-close-detection-truthiness-seam / Einstein msg-244). The browser
-    # form and the MCP tool both normalize at ingress and call the same
-    # predicate; there is exactly one definition of "is this a close?" on
+    # ``_classify_closes`` is the single-source-of-truth close classifier
+    # on the Magickit side (T-close-detection-truthiness-seam / Einstein
+    # msg-244 / msg-731 / msg-783). It returns a ``_CloseClassification``
+    # carrying both the gate-routing boolean (``is_close``) and the
+    # canonical ``str | None`` wire value (``closes_thread_norm``) from a
+    # single pass. The browser form and the MCP tool both call this and
+    # no other; there is exactly one definition of "is this a close?" on
     # this repo, and the same normalized value flows to the adapter below.
-    closes_thread_norm = chatroom_tools._normalize_closes_thread(closes_thread)
-    closes = chatroom_tools._is_close_post(type, closes_thread_norm)
+    closes = chatroom_tools._classify_closes(type, closes_thread)
     gate = await (
         chatroom_tools._check_close_permitted(author=author, role=role)
-        if closes
+        if closes.is_close
         else chatroom_tools._check_role_allowed(author=author, role=role)
     )
     if gate.error is not None:
@@ -497,7 +498,7 @@ async def post_message(
         resolved_override_reason: str | None = None
         resolved_close_sanction: dict[str, str] | None = None
 
-        if closes:
+        if closes.is_close:
             # ★ ここに渡す ``body_content=content`` は既に合成後の値である
             # (spec §3.4 の罠回避 / msg-097 §4.2): opt-in 分岐で ``content``
             # 自体を差し替えたので、`_enforce_close_policies` が生の
@@ -540,7 +541,7 @@ async def post_message(
             reply_to=reply_to or None,
             references_threads=_parse_csv(references_threads),
             related_tasks=_parse_csv(related_tasks),
-            closes_thread=closes_thread_norm,
+            closes_thread=closes.closes_thread_norm,
             tags=_parse_csv(tags),
             commit_ref=commit_ref or None,
             embodiment=embodiment or None,
