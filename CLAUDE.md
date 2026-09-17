@@ -586,7 +586,7 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
   現れてから状態評価を始める
 - CI が **pending** の間は待つ (`gh pr checks` などの決定論的手段で確認)。gate はまだ撃たない
 - **polling は sleep 付き until-loop で書く**。canonical パターン (二段構え、pre-queue と
-  pending を両方カバー):
+  非終端状態を両方カバー):
 
   ```bash
   # 1. check row が現れるまで待つ (pre-queue race)
@@ -595,16 +595,24 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
   gh pr checks <n> --watch --interval 10 || true
   ```
 
-  `--watch` を使わない場合の一行版:
+  `--watch` は `gh` に built-in で、非終端状態 (`pending` / `in_progress` / `queued` / ...)
+  を internally 正規化してから完了で exit する。`|| true` は failure 時の exit code 1 を
+  吸収 — 本規則では失敗でも gate を撃つので loop 抜けを止めない。
 
-  ```bash
-  until out=$(gh pr checks <n>); [ -n "$out" ] && ! grep -q pending <<<"$out"; do sleep 10; done
-  ```
+  **自作 grep で「pending の不在」を判定しない**。`gh pr checks` の text 出力は check の
+  種類によって非終端状態が `pending` 以外 (`in_progress` / `queued` 等) で現れる場合があり、
+  `grep -q pending` や `grep -c pending` は non-terminal を「terminal」と誤読して loop を
+  早抜けさせる。実測されたバグ 2 件:
 
-  **`until [ "$(gh pr checks <n> | grep -c pending)" -eq 0 ]; do ...` は書かない** —
-  pre-queue で `gh pr checks` が empty を返すと `grep -c pending` は 0 を出し、`[ 0 -eq 0 ]`
-  が真になって初回 iteration で loop を抜ける ∴ 「empty は completed ではない」を破る
-  (pr-gate-relay msg-758 correctness objection の実バグ)。**pending count 単独で判定しない**。
+  - `until [ "$(gh pr checks <n> | grep -c pending)" -eq 0 ]; do ...` — pre-queue で
+    empty を返すと `[ 0 -eq 0 ]` が真、初回で抜ける (pr-gate-relay msg-758)
+  - `until out=$(gh pr checks <n>); [ -n "$out" ] && ! grep -q pending <<<"$out"; do ...` —
+    `in_progress` の check が並んでいるとき `grep -q pending` は miss、`! ...` が真、
+    非空 `$out` と AND で真、CI 走行中に loop を抜ける (pr-gate-relay msg-761)
+
+  ∴ **状態判定は `--watch` に任せる。**独自の bucket 判定が必要なら `gh pr checks <n>
+  --json bucket -q '[.[].bucket] | unique'` を使い、bucket の enum (`pass` / `fail` /
+  `pending` / `skipping` / `cancel`) に対して集合演算する — text 出力の単純 grep は書かない。
 
   tight-loop で連打すると agent iteration / context を食い尽くして session が crash する
   (Claude Code の run rule: 「Long leading sleep commands are blocked. To poll until a
