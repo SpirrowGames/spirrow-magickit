@@ -589,11 +589,27 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
   非終端状態を両方カバー):
 
   ```bash
-  # 1. check row が現れるまで待つ (pre-queue race)
-  until [ -n "$(gh pr checks <n> 2>/dev/null)" ]; do sleep 5; done
+  # 1. check row が現れるまで待つ (pre-queue race, 最大 120s で bail out)
+  tries=0
+  until [ -n "$(gh pr checks <n> 2>/dev/null)" ]; do
+    tries=$((tries+1))
+    if [ $tries -ge 24 ]; then
+      echo "no CI checks for #<n> after 120s — path filter で skip されているか未設定" >&2
+      echo "→ 「撃てなかった」escape に倒し、スレッドに差し戻す" >&2
+      exit 1
+    fi
+    sleep 5
+  done
   # 2. 完了 (pass/fail 確定) まで watch
   gh pr checks <n> --watch --interval 10 || true
   ```
+
+  bail-out 節が無いと、path-filter で CI を skip した PR (docs-only の一部設定など) で
+  `gh pr checks` が「no checks reported」を stderr に、stdout は空を返し続けて loop が
+  **無限に hang** する (pr-gate-relay msg-764 edge-case objection の実バグ)。120s は
+  「まだ queue されていない」と「そもそも設定されていない」を実用上区別するための閾値。
+  bail-out した場合は本規則の escape hatch (下記「CI 取得や gate 発火が構造的に不能な場合」)
+  にそのまま合流する — 「たぶん通る」で渡さない。
 
   `--watch` は `gh` に built-in で、非終端状態 (`pending` / `in_progress` / `queued` / ...)
   を internally 正規化してから完了で exit する。`|| true` は failure 時の exit code 1 を
@@ -626,10 +642,23 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
   - `APPROVE` → artifact 成立 ∴ `NEXT: human`
   - `REQUEST_CHANGES` → fix loop に戻る (判別子不要 — L1 短絡でも内容起因でも AI が返すべき
     action は「直せ」で同じ)
-  - `COMMENT` → 撃つのが早すぎた (pre-queue race か、race で pending が gate 側から見えなかった)。
-    **その場で即再発火しない** — 上の CI 待機ロジックに戻り、CI が真に settle したことを
-    再確認してから撃ち直す。**「pending 由来 RC」という phantom branch を作らない** — ADR D-2 は
-    pending を明確に `COMMENT` で返し `REQUEST_CHANGES` に潰さない (T-merged-to-main-without-gate-artifact
+  - `COMMENT` → gate が pending / unknown を見た (local `gh` は既に terminal を見ているのに
+    remote gate 側が webhook 伝播遅延で古い state を掴んだ propagation race)。**上の CI 待機
+    ロジックに戻ってはならない** — local CLI は既に terminal ∴ `until` も `--watch` も即 exit で
+    実質 0 秒 delay になり、rapid infinite retry に化ける (pr-gate-relay msg-764 correctness
+    objection の実バグ)。代わりに **固定 sleep で 60s 待って 1 度だけ再発火**する:
+
+    ```bash
+    sleep 60  # remote gate の webhook 伝播バッファ (local CLI は既に terminal)
+    # 再発火 (pr-review 経路への 2 度目のハンドオフ)
+    ```
+
+    2 度目も COMMENT が返ったら fix loop ではなく **「撃てなかった」escape** に倒し、
+    「gate が COMMENT を 2 度返した (remote propagation race 継続) — 自動再試行を諦めて渡す」
+    と書いてスレッドに差し戻す。無限再試行は turn 予算を焼き切るだけで、状態を進めない。
+
+    **「pending 由来 RC」という phantom branch を作らない** — ADR D-2 は pending を明確に
+    `COMMENT` で返し `REQUEST_CHANGES` に潰さない (T-merged-to-main-without-gate-artifact
     msg-751 §1 の ADR 読了報告)
 - head が動いたら CI も artifact もやり直し (新しい head sha に対する CI 完了を再度待って
   gate を撃ち直す)。前 head の APPROVED は無効
