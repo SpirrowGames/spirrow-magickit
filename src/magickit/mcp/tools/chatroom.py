@@ -121,8 +121,8 @@ CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 #   evaluation site. Callers unpack the object and use both attributes;
 #   they never re-derive either one, so no dual-management remains.
 #
-#   ``_CloseClassification`` is a ``frozen=True, slots=True`` dataclass
-#   with ``__bool__`` overridden to return ``is_close``. That means:
+#   ``_CloseClassification`` is a ``frozen=True`` dataclass with
+#   ``__bool__`` overridden to return ``is_close``. That means:
 #     - ``frozen=True``: the object cannot mutate between the gate
 #       decision and the adapter-forward step (structural invariant, not
 #       caller discipline).
@@ -132,6 +132,11 @@ CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 #       True" — which would invariantly route to the close gate. This
 #       pins msg-783's blocking objection at the type layer, not the
 #       caller-discipline layer.
+#   (No ``slots=True``: Einstein's msg-785 advisory correctly noted that
+#   ``slots`` protects only against runtime attribute injection — which
+#   ``frozen=True`` already prevents — and does not stop a source-level
+#   field addition. Human direction (msg following msg-789) instructed
+#   removing it as unnecessary boilerplate for this goal.)
 #
 # Conclair-side baseline (spirrow-conclair @ current main, recorded here
 # so a future reader can see the "what we chose not to mimic"):
@@ -154,7 +159,7 @@ CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 # ``""`` because Magickit never sends it.
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _CloseClassification:
     """SSOT result of ``_classify_closes``: gate routing + wire value.
 

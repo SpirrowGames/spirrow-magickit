@@ -29,9 +29,12 @@ Two things this file pins:
    ``web/chatroom_writes.py``) route their "is this a close?" decision
    and their adapter-forwarded ``closes_thread`` value through
    ``_classify_closes`` — replacing the stray ``bool(closes_thread)``
-   copies that msg-243 identified as dual management (Principle 2). The
-   text pin also catches a re-introduction of the old ``_is_close_post``
-   API so the two-function seam cannot silently return.
+   copies that msg-243 identified as dual management (Principle 2). An
+   AST-level pin also catches a re-introduction of the old
+   ``_is_close_post`` API so the two-function seam cannot silently
+   return; PR-gate #84 msg-789 flagged the earlier substring pin as
+   bypassable by whitespace or a Name rename, so the pin walks the
+   parsed tree instead.
 
 2. The Conclair-side baseline that msg-243 Step 1 asked for is
    *documented* here (not mimicked). Conclair's close detection lives at
@@ -50,6 +53,7 @@ Two things this file pins:
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -384,36 +388,113 @@ async def test_browser_post_forwards_normalized_closes_thread_to_adapter() -> No
     assert chat.post_message.call_args.kwargs["closes_thread"] is None
 
 
-# --- text pin: no stray copies of the old two-function seam -----------
+# --- AST pin: no stray copies of the old two-function seam ------------
 
 
-def test_no_bool_closes_thread_copies_in_ingress_sites() -> None:
-    """Belt-and-braces text pin: neither ingress site contains a stray
-    ``bool(closes_thread)`` or a re-introduction of the old
-    ``_is_close_post`` API. If a future edit brings either back, this
-    test fails and the reviewer sees that dual management is back."""
+def _find_bool_of_closes_thread(tree: ast.AST) -> list[ast.Call]:
+    """Return every ``bool(<expr>)`` call whose argument subtree
+    references a ``Name`` with id ``closes_thread``. AST-based so the
+    check is invariant under whitespace, line-breaks, and expression
+    shape (``bool( closes_thread )``, ``bool(closes_thread or None)``,
+    ``bool((closes_thread))`` all resolve to the same shape here).
+
+    Chosen over a substring match on the source (PR-gate #84 msg-789
+    advisory): a substring pin was bypassed by whitespace or an alias
+    rename; this walks the parsed tree so formatting cannot silently
+    return the seam."""
+    hits: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "bool"):
+            continue
+        for arg in node.args:
+            for sub in ast.walk(arg):
+                if isinstance(sub, ast.Name) and sub.id == "closes_thread":
+                    hits.append(node)
+                    break
+    return hits
+
+
+def _find_is_close_post_calls(tree: ast.AST) -> list[ast.Call]:
+    """Return every call to the retired ``_is_close_post`` predicate.
+    Catches both ``_is_close_post(...)`` and any attribute form
+    ``<module>._is_close_post(...)`` — the retired name is what matters,
+    not the qualifier."""
+    hits: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "_is_close_post":
+            hits.append(node)
+        elif isinstance(func, ast.Attribute) and func.attr == "_is_close_post":
+            hits.append(node)
+    return hits
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["mcp/tools/chatroom.py", "web/chatroom_writes.py"],
+)
+def test_no_bool_closes_thread_copies_in_ingress_sites(rel: str) -> None:
+    """AST-level pin: neither ingress site contains a stray
+    ``bool(<expr involving closes_thread>)`` or a re-introduction of
+    the retired ``_is_close_post`` API. If a future edit brings either
+    back, this test fails and the reviewer sees that dual management is
+    back. AST walk means whitespace, line-breaks, and parenthesization
+    cannot bypass the check the way a substring match could."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "src" / "magickit"
-    for rel in ("mcp/tools/chatroom.py", "web/chatroom_writes.py"):
-        text = (root / rel).read_text(encoding="utf-8")
-        # Strip out the running commentary that intentionally references
-        # the historical patterns — comments alone must not fail the
-        # pin, but a real call would.
-        code_lines = [
-            line for line in text.splitlines()
-            if not line.lstrip().startswith("#")
-        ]
-        code = "\n".join(code_lines)
-        assert "bool(closes_thread)" not in code, (
-            f"{rel} contains a stray bool(closes_thread) — that's the very "
-            "dual-management seam T-close-detection-truthiness-seam removed. "
-            "Call _classify_closes on the raw ingress instead."
-        )
-        assert "_is_close_post(" not in code, (
-            f"{rel} contains an _is_close_post( call — that predicate was "
-            "retired in msg-784 because its ``str`` argument was an "
-            "authorization footgun. Call _classify_closes on the raw "
-            "ingress instead and read ``.is_close`` / ``.closes_thread_norm`` "
-            "off the returned _CloseClassification."
-        )
+    source = (root / rel).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(root / rel))
+
+    bool_hits = _find_bool_of_closes_thread(tree)
+    assert not bool_hits, (
+        f"{rel}:{bool_hits[0].lineno} contains a bool(<expr with "
+        "closes_thread>) — that's the very dual-management seam "
+        "T-close-detection-truthiness-seam removed. Call _classify_closes "
+        "on the raw ingress instead and read ``.is_close`` off the "
+        "returned _CloseClassification."
+    )
+
+    icp_hits = _find_is_close_post_calls(tree)
+    assert not icp_hits, (
+        f"{rel}:{icp_hits[0].lineno} contains an _is_close_post( call — "
+        "that predicate was retired in msg-784 because its ``str`` "
+        "argument was an authorization footgun. Call _classify_closes "
+        "on the raw ingress instead and read ``.is_close`` / "
+        "``.closes_thread_norm`` off the returned _CloseClassification."
+    )
+
+
+def test_ast_pin_helpers_are_wired_correctly() -> None:
+    """Self-test for the AST helpers themselves so a bug in the pin
+    cannot silently render it inert. If a future edit breaks the AST
+    walker (e.g., accidentally matches ``Attribute`` instead of
+    ``Name`` for ``bool``), the pin above would go quiet without this
+    positive test firing.
+
+    Also demonstrates the whitespace/formatting robustness the PR-gate
+    #84 advisory asked for: the same seam expressed three different
+    ways all get detected."""
+    src = (
+        "def f(closes_thread):\n"
+        "    a = bool(closes_thread)\n"                 # canonical form
+        "    b = bool( closes_thread )\n"               # spaces inside call
+        "    c = bool(closes_thread or None)\n"         # expr, not just Name
+        "    d = _is_close_post('decide', closes_thread)\n"
+        "    return a, b, c, d\n"
+    )
+    tree = ast.parse(src)
+    assert len(_find_bool_of_closes_thread(tree)) == 3
+    assert len(_find_is_close_post_calls(tree)) == 1
+
+    # And a negative case: an unrelated bool() on a different Name
+    # must NOT match — the pin is scoped to closes_thread specifically,
+    # not to every use of bool() in the module.
+    clean_src = "def f(x):\n    return bool(x)\n"
+    assert _find_bool_of_closes_thread(ast.parse(clean_src)) == []
+    assert _find_is_close_post_calls(ast.parse(clean_src)) == []
