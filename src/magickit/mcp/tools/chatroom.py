@@ -10,6 +10,7 @@ envelope (`{error_type, error, details}`) when the upstream returned
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 from fastmcp import FastMCP
@@ -99,26 +100,43 @@ CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 #
 # Einstein's advisory (msg-244): don't paper over the seam by measuring
 # and mimicking Conclair's own string-parsing rules on the far side of
-# the wire — remove the ambiguity at Magickit's ingress instead. So this
-# is what these two helpers do, and they are the only place close
-# detection lives on the Magickit side:
+# the wire — remove the ambiguity at Magickit's ingress instead. Human
+# direction (msg-779) and the PR-gate advisory (msg-731): eliminate the
+# residual dual-management where a predicate normalized internally *and*
+# the caller normalized again for the adapter forward. Einstein's
+# blocking on the tuple design (msg-783): the return value itself must
+# be structurally safe against Python's default "non-empty container →
+# truthy" trap so that ``if _classify_closes(...):`` cannot silently
+# misroute the gate.
 #
-#   ``_normalize_closes_thread`` collapses the raw ingress string
-#   (which the MCP schema and the FastAPI form both spell as ``str = ""``)
-#   into the canonical ``str | None`` — ``None`` when the field is empty,
-#   the string itself otherwise. Everything downstream reasons in
-#   ``is None`` / ``is not None`` terms, not ``bool()`` terms.
+# The resulting SSOT is one function returning one dataclass, and it is
+# the only place close detection lives on the Magickit side:
 #
-#   ``_is_close_post`` is the single-source-of-truth predicate. Both
-#   ingress paths call this exact function. There is no second copy
-#   anywhere; ``test_close_detection_ssot.py`` pins that. The predicate
-#   is *self-defending*: it applies ``_normalize_closes_thread`` to its
-#   input internally, so an unnormalized ingress cannot misroute the
-#   authorization gate. Caller-side normalization is not a security
-#   invariant — the invariant lives inside the predicate. Because
-#   ``_normalize_closes_thread`` is idempotent, live callers that also
-#   normalize before forwarding to the adapter (they must, because the
-#   wire value is data, not a flag) pay nothing for this defense.
+#   ``_classify_closes`` takes the raw ingress ``msg_type`` and
+#   ``closes_thread`` string and returns a ``_CloseClassification`` in
+#   a single pass. The two outputs — the gate-routing boolean
+#   (``is_close``) and the canonical ``str | None`` forwarded to Conclair
+#   (``closes_thread_norm``) — are computed together, so they cannot
+#   drift, and the normalization knowledge lives at exactly one
+#   evaluation site. Callers unpack the object and use both attributes;
+#   they never re-derive either one, so no dual-management remains.
+#
+#   ``_CloseClassification`` is a ``frozen=True`` dataclass with
+#   ``__bool__`` overridden to return ``is_close``. That means:
+#     - ``frozen=True``: the object cannot mutate between the gate
+#       decision and the adapter-forward step (structural invariant, not
+#       caller discipline).
+#     - ``__bool__`` returns ``is_close``: even an accidental direct
+#       truthiness check (``if _classify_closes(...):``) degrades to the
+#       gate decision instead of Python's default "non-empty object →
+#       True" — which would invariantly route to the close gate. This
+#       pins msg-783's blocking objection at the type layer, not the
+#       caller-discipline layer.
+#   (No ``slots=True``: Einstein's msg-785 advisory correctly noted that
+#   ``slots`` protects only against runtime attribute injection — which
+#   ``frozen=True`` already prevents — and does not stop a source-level
+#   field addition. Human direction (msg following msg-789) instructed
+#   removing it as unnecessary boilerplate for this goal.)
 #
 # Conclair-side baseline (spirrow-conclair @ current main, recorded here
 # so a future reader can see the "what we chose not to mimic"):
@@ -132,49 +150,70 @@ CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
 #     resolves the thread.
 #   - ``schemas.message.PostMessageRequest``: ``closes_thread: str | None
 #     = None`` with ``str_strip_whitespace=True``.
-# Because Magickit normalizes at ingress and the adapter forwards the
-# normalized value verbatim, Conclair only ever sees ``None`` or a
-# non-empty string — never ``""`` — so the empty-string edge case Conclair
-# tolerates cannot arise on this wire in the first place. That is what
-# lets these helpers stop where they stop: they don't need to know what
-# Conclair does with ``""`` because Magickit never sends it.
+# Because ``_classify_closes`` collapses ``""`` to ``None`` before either
+# output is produced, and callers forward ``closes_thread_norm``
+# verbatim, Conclair only ever sees ``None`` or a non-empty string —
+# never ``""`` — so the empty-string edge case Conclair tolerates cannot
+# arise on this wire in the first place. That is what lets this helper
+# stop where it stops: it does not need to know what Conclair does with
+# ``""`` because Magickit never sends it.
 
 
-def _normalize_closes_thread(value: str | None) -> str | None:
-    """Collapse the ingress ``closes_thread`` string into ``str | None``.
+@dataclass(frozen=True)
+class _CloseClassification:
+    """SSOT result of ``_classify_closes``: gate routing + wire value.
 
-    The MCP tool and the FastAPI form both declare ``closes_thread`` as
-    ``str = ""`` (a required string with an empty default), so ``value``
-    here is either ``None`` (from a Python caller that omits the kwarg
-    entirely) or a ``str``. Empty ``str`` and ``None`` collapse to
-    ``None`` — the canonical "not a close" marker. Any non-empty string
-    is returned verbatim; the string's *meaning* (matches ``thread_id``?
-    matches some other thread? garbage?) is Conclair's to judge and is
-    not our concern at this seam.
+    ``is_close`` decides which role gate fires (``_check_close_permitted``
+    when true, ``_check_role_allowed`` otherwise). ``closes_thread_norm``
+    is the ``str | None`` forwarded to the adapter (and thus to Conclair)
+    as the ``closes_thread`` field. Both are computed together in one
+    pass so they cannot drift.
+
+    ``__bool__`` returns ``is_close`` so an accidental direct truthiness
+    check (``if classification:``) degrades to the gate decision rather
+    than Python's default "non-empty object → True" — which would
+    invariantly route to the close gate regardless of input. Defense-in-
+    depth for an authorization-routing return value (msg-783 blocking).
+    ``frozen=True`` pins the object against mutation between the gate
+    decision and the adapter-forward step.
     """
-    if value is None or value == "":
-        return None
-    return value
+
+    is_close: bool
+    closes_thread_norm: str | None
+
+    def __bool__(self) -> bool:
+        return self.is_close
 
 
-def _is_close_post(msg_type: str, closes_thread: str | None) -> bool:
-    """The single-source-of-truth "is this a close?" predicate.
+def _classify_closes(msg_type: str, raw: str | None) -> _CloseClassification:
+    """Single-source-of-truth close classifier.
 
-    Self-defending: idempotent normalization is applied inside so an
-    unnormalized ingress (a stray ``""`` reaching this helper) cannot
-    misroute the authorization gate. An accidental unnormalized ``""``
-    collapses to ``None`` here and drops to the standard role gate,
-    which is the same gate the value's semantics ("no thread being
-    closed") demand. Live callers still normalize once at ingress for
-    the adapter-forwarding step — the wire value is data, not a flag —
-    and pay nothing extra for this defense because normalization is
-    idempotent.
+    Takes the raw ingress ``msg_type`` and ``closes_thread`` string and
+    returns a ``_CloseClassification`` carrying both the gate-routing
+    boolean and the canonical ``str | None`` wire value. One evaluation,
+    two outputs — structurally impossible to drift, and normalization
+    knowledge lives in exactly one place.
 
+    Empty ``str`` and ``None`` collapse to ``None`` (Magickit's canonical
+    "not a close" marker). Any non-empty string is preserved verbatim as
+    data (Conclair compares this against ``thread.thread_id``; the
+    string's *meaning* is Conclair's to judge, not ours at this seam).
     A close is exactly a ``decide`` msg carrying a non-None normalized
-    ``closes_thread``. Both ingress paths call this and no other; a copy
-    elsewhere is the dual-management fault this helper exists to prevent.
+    ``closes_thread``.
+
+    Both ingress paths (the MCP ``chatroom_post_message`` tool and the
+    browser POST handler in ``web/chatroom_writes.py``) call this and no
+    other. A second copy elsewhere is the dual-management fault this
+    helper exists to prevent; ``test_close_detection_ssot.py`` pins
+    that neither ingress site contains a stray truthiness-on-the-
+    closes-thread copy or a re-introduction of the retired
+    two-function API.
     """
-    return msg_type == "decide" and _normalize_closes_thread(closes_thread) is not None
+    normalized = raw or None
+    return _CloseClassification(
+        is_close=(msg_type == "decide" and normalized is not None),
+        closes_thread_norm=normalized,
+    )
 
 
 # --- design-decide naysayer gate ---------------------------------------
@@ -1685,18 +1724,17 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         # stage -- the same reasoning that already routes this path through
         # `_enforce_close_policies` below.
         #
-        # Normalize the raw ingress ``closes_thread`` string once, at the
-        # top of the handler, then reason in ``is None`` / ``is not None``
-        # terms below. This kills the ``bool(str)`` truthiness seam
-        # (T-close-detection-truthiness-seam / Einstein msg-244): every
-        # ``closes_thread`` reference downstream — the gate switch, the
-        # ``_enforce_close_policies`` call, the adapter kwarg — sees the
-        # same canonical value.
-        closes_thread_norm = _normalize_closes_thread(closes_thread)
-        closes = _is_close_post(msg_type, closes_thread_norm)
+        # ``_classify_closes`` fuses normalization and the close-post
+        # decision in one pass and returns both outputs on a single
+        # ``_CloseClassification`` object (msg-782 / msg-784). The gate
+        # switch reads ``closes.is_close``; the adapter forward below
+        # sends ``closes.closes_thread_norm`` verbatim. No dual-management
+        # of the truthiness / normalization state (T-close-detection-
+        # truthiness-seam / Einstein msg-244 / msg-731 / msg-783).
+        closes = _classify_closes(msg_type, closes_thread)
         gate = await (
             _check_close_permitted(author=author, role=role)
-            if closes
+            if closes.is_close
             else _check_role_allowed(author=author, role=role)
         )
         if gate.error is not None:
@@ -1717,7 +1755,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             owner_override = False
             owner_override_reason_out: str | None = None
             close_sanction_out: dict[str, str] | None = None
-            if closes:
+            if closes.is_close:
                 policy = await _enforce_close_policies(
                     adapter,
                     project=project,
@@ -1743,7 +1781,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 reply_to=reply_to or None,
                 references_threads=references_threads,
                 related_tasks=related_tasks,
-                closes_thread=closes_thread_norm,
+                closes_thread=closes.closes_thread_norm,
                 tags=tags,
                 commit_ref=commit_ref or None,
                 embodiment=embodiment or None,
