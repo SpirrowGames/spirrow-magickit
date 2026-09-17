@@ -567,6 +567,46 @@ GitHub API は事前知識が強く信頼性が高い。上流通信は**ステ�
 回避した経緯がある。補足: Claude Code (CLI) は `tools/list_changed` を自動反映するので、
 CLI 利用に限れば動的 gate 方式も成立する (本構成はコネクタ = モバイル前提)。
 
+### PR 起票後の naysayer gate 自発火
+
+*(T-merged-to-main-without-gate-artifact msg-292 / msg-751 / msg-752 で確定。
+根拠: ADR-2026-06-03-16 (naysayer CI-gate) — thread 内引用で D-1 APPROVE⇒CI 緑 /
+D-2 failure→RC 短絡・pending→COMMENT / D-5 naysayer は one-shot / N-2 再 fire は
+orchestration。ADR 本文は本 repo に無く mindwire 側 ∴ 一次照合は thread quote まで。)*
+
+AI が PR を起票したら、head sha に対する CI が完了するのを待ってから独立 naysayer gate を
+発火させる。**artifact (`spirrowgames-ops` の APPROVED review、head sha 紐づき) が GitHub 上に
+成立するまで `NEXT: human` を出さない。**
+
+- CI が **pending** の間は待つ (`gh pr checks` などの決定論的手段で確認)。gate はまだ撃たない
+- CI が完了したら **SUCCESS でも FAILURE でも** gate を撃つ — FAILURE 時に AI 側で
+  fix loop に戻す事前判定はしない。ADR-2026-06-03-16 の gate 側 L1 短絡 (failure 時に
+  Lexora を呼ばずに `REQUEST_CHANGES` を返す) と同じ責務を AI 側に実装すると二重管理になる
+- gate が返すのは **APPROVE** か **REQUEST_CHANGES** の 2 択 (pending 中に撃たないので
+  pending 由来の `COMMENT` は生じない)。`REQUEST_CHANGES` → fix loop、`APPROVE` → `NEXT: human`
+- head が動いたら CI も artifact もやり直し (新しい head sha に対する CI 完了を再度待って
+  gate を撃ち直す)。前 head の APPROVED は無効
+- CI 取得や gate 発火が構造的に不能な場合 (token 権限欠如・network・gate エラー等) は
+  「撃てなかった」と書いて渡す。「たぶん通る」で渡さない
+- **handoff message に artifact の sha を書いても、それは人の確認材料にならない** —
+  人は GitHub PR で `spirrowgames-ops` の APPROVED を一次情報として視認する。本規則の目的は
+  artifact を **産む** ことであって **報告する** ことではない。chatroom に「gate 通した」旨の
+  欄・鏡・サマリーを作らない — 自然言語で書かれた「通した」は LLM の幻覚と区別不能で、
+  最も信用ならないものの信用度を継承する (T-merged-to-main-without-gate-artifact msg-287 / msg-288 §1)
+
+**位置付け**: `main` merge の Tier-C 固定は動かさない。本規則が塞ぐのは「AI が撃ち忘れたまま
+`NEXT: human` を出し、人が gate 未通過に気付かず merge する」経路であって、branch protection の
+代替ではない。branch protection はこの GitHub プランで不可 ∴ 最終強制点は「merge 前に人が
+GitHub PR 上で `spirrowgames-ops` の APPROVED を視認する」ままである
+(T-merged-to-main-without-gate-artifact msg-288 §2)。
+
+**残る穴 (解決済みではない)**: AI が撃たなかった場合 (幻覚 / 落ち / gate 自体のエラー) を
+拾う機構は本規則にない。人の視認統制も measured で不完全 (`spirrow-magickit` の直近 3 merge の
+うち 2 本が `spirrowgames-ops` の APPROVED 無しで `main` に載っていた、2026-09-06 実測、
+T-merged-to-main-without-gate-artifact §1)。着手条件は ①同型の未 gate merge がもう 1 本出たとき、
+②CI check として GitHub 上に出す候補が具体化したとき (branch protection が使えない本 repo で
+`required` にできないため advisory 止まり)。
+
 ## 設定
 
 `config/magickit_config.yaml`。環境変数で上書き可能 (`MAGICKIT_` prefix)。
