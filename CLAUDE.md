@@ -585,12 +585,31 @@ AI が PR を起票したら、head sha に対する CI が完了するのを待
   無駄撃ちしないのが先)。**empty は completed ではない** — 少なくとも 1 件の check row が
   現れてから状態評価を始める
 - CI が **pending** の間は待つ (`gh pr checks` などの決定論的手段で確認)。gate はまだ撃たない
-- **polling は sleep 付き until-loop で書く**: `until [ "$(gh pr checks <n> | grep -c
-  pending)" -eq 0 ]; do sleep 10; done` のような形。tight-loop で連打すると agent
-  iteration / context を食い尽くして session が crash する (Claude Code の run rule:
-  「Long leading sleep commands are blocked. To poll until a condition is met, use
-  Monitor with an until-loop」)。長時間 CI では `run_in_background` を使って turn を
-  跨ぐことも許される
+- **polling は sleep 付き until-loop で書く**。canonical パターン (二段構え、pre-queue と
+  pending を両方カバー):
+
+  ```bash
+  # 1. check row が現れるまで待つ (pre-queue race)
+  until [ -n "$(gh pr checks <n> 2>/dev/null)" ]; do sleep 5; done
+  # 2. 完了 (pass/fail 確定) まで watch
+  gh pr checks <n> --watch --interval 10 || true
+  ```
+
+  `--watch` を使わない場合の一行版:
+
+  ```bash
+  until out=$(gh pr checks <n>); [ -n "$out" ] && ! grep -q pending <<<"$out"; do sleep 10; done
+  ```
+
+  **`until [ "$(gh pr checks <n> | grep -c pending)" -eq 0 ]; do ...` は書かない** —
+  pre-queue で `gh pr checks` が empty を返すと `grep -c pending` は 0 を出し、`[ 0 -eq 0 ]`
+  が真になって初回 iteration で loop を抜ける ∴ 「empty は completed ではない」を破る
+  (pr-gate-relay msg-758 correctness objection の実バグ)。**pending count 単独で判定しない**。
+
+  tight-loop で連打すると agent iteration / context を食い尽くして session が crash する
+  (Claude Code の run rule: 「Long leading sleep commands are blocked. To poll until a
+  condition is met, use Monitor with an until-loop」)。長時間 CI では `run_in_background`
+  を使って turn を跨ぐことも許される
 - CI が完了したら **SUCCESS でも FAILURE でも** gate を撃つ — FAILURE 時に AI 側で
   fix loop に戻す事前判定はしない。ADR-2026-06-03-16 の gate 側 L1 短絡 (failure 時に
   Lexora を呼ばずに `REQUEST_CHANGES` を返す) と同じ責務を AI 側に実装すると二重管理になる
