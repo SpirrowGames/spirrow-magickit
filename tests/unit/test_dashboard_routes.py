@@ -3,9 +3,11 @@
 A path registered twice is not an error in Starlette -- it matches the
 first registration and the second becomes dead code. That is how the
 dashboard came to render a raw JSON dump where its stat cards belong:
-routes_v2's JSON `/dashboard/stats` is included before main.py's HTML
-handler of the same path, so the panel got JSON, with a 200, for as long
-as nobody looked at the page on purpose.
+routes_v2's JSON `/dashboard/stats` was collided against an HTML handler
+of the same path, so the panel got JSON, with a 200, for as long as
+nobody looked at the page on purpose. The HTML sibling has since been
+retired with `/dashboard/system`, but the collision test remains: any
+future fragment that regrows a duplicate is caught here.
 
 These tests check *which handler a path resolves to*, which is what the
 bug was actually about, and they need no database -- running the app's
@@ -43,28 +45,15 @@ def test_no_path_is_registered_twice():
     )
 
 
-def test_stats_fragment_resolves_to_the_html_handler():
-    assert sole_handler(create_app(), "GET", "/dashboard/_stats") == (
-        "magickit.main.dashboard_stats_html"
-    )
-
-
 def test_json_stats_api_keeps_its_path():
     """The typed, authenticated API keeps `/dashboard/stats` -- it is the
-    contract, and it has a test of its own. The fragment moved, not it."""
+    contract, and it has a test of its own. When the HTML fragment sibling
+    (`/dashboard/_stats`) existed, the test asserted no collision with this
+    path; the sibling was retired with `/dashboard/system`, and this
+    resolution check outlives it as the anchor for the plain-name route."""
     assert sole_handler(create_app(), "GET", "/dashboard/stats") == (
         "magickit.api.routes_v2.get_dashboard_stats"
     )
-
-
-def test_dashboard_template_points_at_a_route_that_exists():
-    """A rename that misses the template leaves the panel loading forever,
-    and a 404 in a polled HTMX target is silent on the page."""
-    source = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
-
-    assert 'hx-get="/dashboard/_stats"' in source
-
-    assert ("GET", "/dashboard/_stats") in route_table(create_app())
 
 
 def _htmx_targets():

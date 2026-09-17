@@ -36,7 +36,6 @@ from magickit.core.workspace_manager import WorkspaceManager
 from magickit.utils.logging import configure_logging, get_logger
 from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.web import close_client as close_chatroom_ui_client
-from magickit.web import dashboard_router as chatroom_dashboard_router
 from magickit.web import digest_router as chatroom_digest_router
 from magickit.web import (
     board_router,
@@ -275,14 +274,14 @@ def create_app() -> FastAPI:
     # being a leaf, cannot have one.
     app.include_router(chatroom_digest_router)
 
-    # Chatroom panel for the dashboard.
-    app.include_router(chatroom_dashboard_router)
-
     # 稼働状況 (ops) view. Claims "/dashboard" itself -- it answers the
     # question a human opens the dashboard to ask ("is anything running?"),
     # which the queue view below cannot: that one reports Magickit's own
-    # SQLite task table, not the autonomous loop. The queue view keeps its
-    # panels and moves to /dashboard/system.
+    # SQLite task table, not the autonomous loop. The former companion page
+    # `/dashboard/system` was retired by the Tier-C decision recorded on
+    # T-dashboard-system-page-retirement-unfiled (msg-741, 2026-09-17); its
+    # HTMX fragment endpoints and the Chatroom summary panel that only fed
+    # into it were removed with it.
     app.include_router(ops_router)
     app.include_router(deploys_router)
 
@@ -322,22 +321,13 @@ def create_app() -> FastAPI:
     # Include WebSocket routes
     app.include_router(ws_router)
 
-    # Dashboard HTML routes
+    # Dashboard HTML routes.
     #
-    # `/dashboard/system`, not `/dashboard`: this page reports Magickit's
-    # own queue, locks and events. That is a useful view of the service,
-    # but it is not the autonomous loop, and it held the URL a human
-    # reaches for when asking whether anything is running. `web/ops.py`
-    # answers that and now owns `/dashboard`.
-    @app.get("/dashboard/system", response_class=HTMLResponse)
-    async def dashboard_page(request: Request) -> HTMLResponse:
-        """Render the Magickit-internals dashboard page."""
-        if templates is None:
-            return HTMLResponse("<h1>Templates not configured</h1>", status_code=500)
-        return templates.TemplateResponse(
-            "dashboard.html",
-            {"request": request, "active_page": "system"},
-        )
+    # The former `/dashboard/system` page (and its per-panel HTMX fragments
+    # `_stats` / `events` / `locks` / `queue`, plus the Chatroom summary
+    # served by `web/chatroom_dashboard.py`) was retired by the Tier-C
+    # decision on T-dashboard-system-page-retirement-unfiled (msg-741,
+    # 2026-09-17). `/dashboard` itself is answered by `web/ops.py`.
 
     @app.get("/dashboard/projects", response_class=HTMLResponse)
     async def projects_page(request: Request) -> HTMLResponse:
@@ -397,49 +387,11 @@ def create_app() -> FastAPI:
 
     # Dashboard API endpoints for HTMX
     #
-    # `_stats`, not `stats`: routes_v2 serves the JSON DashboardStats API at
-    # /dashboard/stats, and it is registered first (include_router above runs
-    # before these decorators), so Starlette matched it and this handler was
-    # dead. The dashboard rendered a raw JSON dump where the stat cards
-    # belong -- silently, because both handlers answer 200.
-    #
-    # The API route keeps the plain name: it is typed, authenticated and
-    # covered by a test, so it is the contract. This one is a fragment for
-    # one template. The sibling fragments below (events / locks / queue) do
-    # not collide today and are left as they are; a duplicate-route test now
-    # fails loudly if that ever changes.
-    @app.get("/dashboard/_stats")
-    async def dashboard_stats_html(request: Request) -> HTMLResponse:
-        """Return stats cards HTML for HTMX."""
-        # Only the four task counters remain here. `Workspaces` and
-        # `Projects` were dropped because they collided in meaning with
-        # the Chatroom summary below them; see PR #45 and thread
-        # T-dashboard-panels-do-not-name-the-project for the Tier-C
-        # decision and its evidence.
-        state_manager = request.app.state.state_manager
-        stats = await state_manager.get_dashboard_stats()
+    # `/dashboard/_stats`: retired with `/dashboard/system` — see the
+    # decision note on `include_router(ops_router)` above. The JSON
+    # DashboardStats API at `/dashboard/stats` (routes_v2) is unchanged.
 
-        html = f"""
-        <div class="stat-card primary">
-            <div class="stat-value">{stats['total_tasks']}</div>
-            <div class="stat-label">Total Tasks</div>
-        </div>
-        <div class="stat-card success">
-            <div class="stat-value">{stats['tasks_by_status'].get('completed', 0)}</div>
-            <div class="stat-label">Completed</div>
-        </div>
-        <div class="stat-card warning">
-            <div class="stat-value">{stats['tasks_by_status'].get('running', 0)}</div>
-            <div class="stat-label">Running</div>
-        </div>
-        <div class="stat-card danger">
-            <div class="stat-value">{stats['tasks_by_status'].get('failed', 0)}</div>
-            <div class="stat-label">Failed</div>
-        </div>
-        """
-        return HTMLResponse(html)
-
-    # `_projects`, not `projects`: the same split as `_stats` above, for a
+    # `_projects`, not `projects`: the same split as `_tasks` below, for a
     # different cause. Nothing collided here -- there was simply no fragment
     # handler at all, so projects.html pointed its `#projects-list` at its
     # own page URL and HTMX swapped the whole page into the grid inside it.
@@ -647,92 +599,11 @@ def create_app() -> FastAPI:
 
         return HTMLResponse("".join(rows))
 
-    @app.get("/dashboard/events")
-    async def dashboard_events_html(request: Request) -> HTMLResponse:
-        """Return events list HTML for HTMX."""
-        state_manager = request.app.state.state_manager
-        events = await state_manager.get_recent_events(limit=10)
-
-        if not events:
-            return HTMLResponse('<p class="empty-state">No recent events</p>')
-
-        html = ""
-        for event in events:
-            event_class = event.event_type.value
-            html += f"""
-            <div class="event-item">
-                <div class="event-icon {event_class}">
-                    {_get_event_icon(event.event_type.value)}
-                </div>
-                <div class="event-content">
-                    <div class="event-title">Task {escape(event.event_type.value)}</div>
-                    <div class="event-time">{escape(event.task_id[:8])}... - {event.created_at.strftime('%H:%M:%S')}</div>
-                </div>
-            </div>
-            """
-        return HTMLResponse(html)
-
-    @app.get("/dashboard/locks")
-    async def dashboard_locks_html(request: Request) -> HTMLResponse:
-        """Return locks list HTML for HTMX."""
-        state_manager = request.app.state.state_manager
-        locks = await state_manager.get_active_locks()
-
-        if not locks:
-            return HTMLResponse('<p class="empty-state">No active locks</p>')
-
-        html = ""
-        for lock in locks:
-            html += f"""
-            <div class="lock-item">
-                <div class="lock-info">
-                    <div class="lock-resource">{escape(lock.resource_type)}: {escape(lock.resource_id[:8])}...</div>
-                    <div class="lock-holder">Held by: {escape(lock.holder_id[:8])}...</div>
-                </div>
-            </div>
-            """
-        return HTMLResponse(html)
-
-    @app.get("/dashboard/queue")
-    async def dashboard_queue_html(request: Request) -> HTMLResponse:
-        """Return task queue HTML for HTMX."""
-        task_queue = request.app.state.task_queue
-        tasks = await task_queue.get_all_tasks()
-
-        # Get pending/queued tasks
-        pending_tasks = [t for t in tasks if t.status.value in ('pending', 'queued', 'running')][:10]
-
-        if not pending_tasks:
-            return HTMLResponse('<p class="empty-state">Queue is empty</p>')
-
-        html = '<table class="table"><thead><tr><th>Name</th><th>Service</th><th>Priority</th><th>Status</th></tr></thead><tbody>'
-        for task in pending_tasks:
-            status_class = task.status.value
-            html += f"""
-            <tr>
-                <td>{escape(task.name)}</td>
-                <td>{escape(task.service.value)}</td>
-                <td>{task.priority}</td>
-                <td><span class="status-badge {escape(status_class)}">{escape(task.status.value)}</span></td>
-            </tr>
-            """
-        html += '</tbody></table>'
-        return HTMLResponse(html)
+    # `/dashboard/events`, `/dashboard/locks`, `/dashboard/queue`: retired
+    # with `/dashboard/system` — see the note above the ops router include.
+    # State is still reachable via `/v1/tasks` and the state_manager.
 
     return app
-
-
-def _get_event_icon(event_type: str) -> str:
-    """Get icon character for event type."""
-    icons = {
-        "created": "+",
-        "started": ">",
-        "completed": "V",
-        "failed": "X",
-        "cancelled": "-",
-        "updated": "*",
-    }
-    return icons.get(event_type, "?")
 
 
 # Create app instance
