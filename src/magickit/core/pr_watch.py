@@ -553,6 +553,10 @@ async def collect_pr_snapshots(
       production; the caller controls cycle frequency).
     - Only when needed: ``get_reviews`` per PR whose ``updated_at`` moved
       or whose 15-minute self-heal window expired (see module docstring).
+
+    Memory hygiene: ``state.call_log`` is pruned to the last rolling
+    hour at the end of every cycle, so long dormant periods (no open PRs
+    across any polled repo) cannot cause unbounded growth.
     """
     fetch_open_prs = fetch_open_prs or _fetch_open_prs
     fetch_reviews = fetch_reviews or _fetch_reviews
@@ -604,6 +608,15 @@ async def collect_pr_snapshots(
                 continue
             if snapshot is not None:
                 snapshots.append(snapshot)
+
+    # Decouple call-log hygiene from PR activity (PR-gate objection at
+    # d8bc61a §advisory — the pruner was only invoked inside `_rate_capped`,
+    # which is reached via `_snapshot_for_pr`; if every polled repo has zero
+    # open PRs for a prolonged quiet period, that path is skipped and
+    # `call_log` accumulates one float per repo per cycle indefinitely).
+    # Pruning once per cycle bounds the log to the last rolling hour
+    # regardless of PR activity, and self-heals the moment PRs return.
+    _prune_call_log(state, now=now)
 
     return snapshots, notices, failed_repos
 

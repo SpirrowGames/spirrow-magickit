@@ -322,6 +322,50 @@ async def test_call_log_prunes_after_an_hour():
     assert len(state.call_log) == 2
 
 
+@pytest.mark.asyncio
+async def test_call_log_pruned_at_cycle_end_even_when_all_repos_have_zero_prs():
+    """Dormant repos must not leak: pruning is decoupled from PR activity.
+
+    Regression pin for PR-gate advisory at d8bc61a. Before the fix, the
+    call log was only pruned inside `_rate_capped`, which is only reached
+    from `_snapshot_for_pr`. If every polled repo returns an empty PR
+    list for a prolonged period, that path is skipped and the log grows
+    one float per repo per cycle indefinitely. The fix invokes
+    `_prune_call_log` at the end of every `collect_pr_snapshots` cycle
+    so quiet periods self-bound to the last rolling hour.
+    """
+    state = PrWatchState()
+    # Seed the log with entries older than the 1-hour cutoff (strict:
+    # `_prune_call_log` keeps `t >= now - 3600.0`; with `now=3602.0` the
+    # cutoff is 2.0, so seeds must be < 2.0 to be dropped).
+    state.call_log.extend([0.0, 0.5, 1.0])
+
+    async def _empty_list(owner: str, repo: str):
+        # Zero open PRs → _snapshot_for_pr path is never taken, so
+        # `_rate_capped` (the old prune site) is never invoked.
+        return []
+
+    async def _unused_reviews(*args, **kwargs):
+        raise AssertionError("reviews should not be fetched when PRs are empty")
+
+    snapshots, notices, failed = await collect_pr_snapshots(
+        [("O", "R1"), ("O", "R2")],
+        state,
+        fetch_open_prs=_empty_list,
+        fetch_reviews=_unused_reviews,
+        now=3602.0,  # > 1 hour past the seeded entries
+    )
+    assert snapshots == []
+    assert notices == []
+    assert failed == set()
+
+    # The 3 seeded entries are pruned; only the 2 fresh `list_pull_requests`
+    # calls made during this cycle survive.
+    assert len(state.call_log) == 2
+    # And they all sit inside the rolling hour.
+    assert all(t >= 3602.0 - 3600.0 for t in state.call_log)
+
+
 # --- outage sentinel & notice ----------------------------------------------
 
 
