@@ -82,8 +82,11 @@ What this module does NOT know
 from __future__ import annotations
 
 import json
+import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from magickit.utils.logging import get_logger
@@ -100,6 +103,57 @@ SOFT_CAP_CALLS_PER_HOUR = 500
 
 #: The `state` value GitHub returns for an APPROVED review.
 _APPROVED = "APPROVED"
+
+# --- ledger-attached state (bounded closed-ledger discovery) ---------------
+#
+# The four-state UI was collapsed to three (msg-843 Option xxi) once the
+# audit found that ``Tier-C 決着`` cannot be distinguished from ``gate
+# 進行中`` structurally: both are cases where a ledger thread exists but no
+# APPROVE artifact does. The board now shows one ``ledger_attached`` state
+# in place of the two, primary-linking straight to the chatroom thread so
+# the human answers "what did I decide?" in one click.
+#
+# Making that state trustworthy costs one extra chatroom read per unseen
+# repo, and — for closed (resolved/superseded) ledger threads whose PR
+# stays open — a bounded pagination through the closed thread list. This
+# module owns that pagination's algebra (``compute_was_truncated_per_pr``
+# / ``resolve_old_prs_by_deep_pagination``) so the board can consume the
+# 3-way outcome (``found`` / ``definitive_absence`` / ``bounded_
+# ambiguity``) without re-implementing it.
+
+#: Key by which the ledger caches identify a PR.
+LedgerKey = tuple[str, str, int]
+
+#: TTL for a "we looked and didn't find a ledger" cache entry. Matched to
+#: the non-approved refetch cadence (msg-828) so both signals refresh in
+#: the same cycle rather than at drifting phases.
+_NEGATIVE_LEDGER_TTL = timedelta(minutes=15)
+
+#: Clock-skew buffer between GitHub's ``created_at`` and Conclair's
+#: ``last_activity_at`` (msg-859 Option xxvii). ADD this to the page
+#: horizon to make the definitive-absence condition *harder* to satisfy;
+#: subtracting would generate false absence for genuinely-gated PRs whose
+#: card would silently flip to 「未依頼」 — the exact silent failure this
+#: feature exists to detect. Never subtract.
+_CLOSED_LEDGER_HORIZON_SKEW = timedelta(minutes=5)
+
+#: Hard cap on additional pages the deep pagination will fetch beyond
+#: page 1. Env-overridable so operations can tune it against Conclair's
+#: closed-ledger backlog. Five pages × 100 items = 500 closed threads
+#: covered per PR before falling back to ``bounded_ambiguity``.
+_MAX_CLOSED_LEDGER_PAGES = int(os.environ.get("MAGICKIT_CLOSED_LEDGER_PAGES", "5"))
+
+#: Page size for Pass B and deep pagination. Matches ``list_threads``'s
+#: default; kept as a constant so tests can override without threading
+#: it through every call site.
+_LIST_THREADS_PAGE_LIMIT = 100
+
+#: Thread-owner filter for PR-gate ledger reads. Mirrors the driver's
+#: ``owner="orchestrator"`` (see :mod:`magickit.mcp.pr_gate_ledger`).
+_LEDGER_OWNER = "orchestrator"
+
+#: Tag the PR-review driver stamps on the threads it opens.
+_LEDGER_TAG = "pr-review"
 
 
 @dataclass(frozen=True)
@@ -121,6 +175,14 @@ class PrSnapshot:
     head_sha: str
     updated_at: str
     artifact_approved: bool
+    #: PR creation time (ISO-8601 UTC). Used by the closed-ledger deep
+    #: pagination's chronological fence — a PR older than a page's oldest
+    #: thread must be on that page or earlier, which lets the fence
+    #: prove definitive ledger absence without reading further pages.
+    #: Optional / defaults to empty for backward compat with mocked
+    #: snapshots that predate this feature; empty ``created_at`` skips
+    #: the chronological fence but is otherwise harmless.
+    created_at: str = ""
     approving_review_id: int | None = None
     #: True when the ``/reviews`` fetch was skipped due to the soft cap.
     #: Board treats this as ``gate 進行中`` unless the ledger says otherwise
@@ -146,6 +208,69 @@ class _CacheEntry:
     fetched_at: float
 
 
+@dataclass(frozen=True)
+class NegativeLedgerEntry:
+    """Records "we looked for PR X's ledger and did not find it".
+
+    A negative cache is the piece that keeps the closed-ledger discovery
+    from costing a Pass B every poll cycle. It carries two invalidation
+    triggers, both required:
+
+    - ``pr_updated_at``: any PR-side event bumps ``updated_at``, and a
+      new ledger thread being opened is exactly one such event (the driver
+      writes into chatroom, which does not touch GitHub, but the
+      review/comment/push that triggered the driver *did*). Bumps mean
+      the cache is stale by construction.
+    - ``cached_at``: a TTL fallback that catches cases where the ledger
+      appears with no matching PR-side event (e.g. a driver retry).
+
+    ``was_truncated`` splits the two failure modes the board must render
+    differently:
+
+    - ``False`` — *definitive absence*. Pass B (or deep pagination)
+      proved no ledger exists in the searched window; the "未依頼"
+      classification stands. No notice needed.
+    - ``True`` — *bounded ambiguity*. We ran out of pages before finding
+      the ledger; classification defaults to "未依頼" but a notice tells
+      the human that a deep-history ledger could exist. The board keeps
+      showing the notice while this entry lives.
+    """
+
+    pr_updated_at: str
+    cached_at: datetime
+    was_truncated: bool
+
+
+@dataclass(frozen=True)
+class DeepPaginationOutcome:
+    """Per-PR result from :func:`resolve_old_prs_by_deep_pagination`.
+
+    Exactly one field is populated — enforced by ``__post_init__`` — so
+    consumers dispatch on a discriminated union without needing to
+    inspect three separate booleans that could collectively lie.
+
+    - ``found``: ``(project, thread_dict)`` for the matched ledger thread.
+    - ``definitive_absence``: proved by chronological fence or exhausted
+      pool; no notice.
+    - ``bounded_ambiguity``: pages exhausted without proof; notice.
+    """
+
+    found: tuple[str, dict[str, Any]] | None = None
+    definitive_absence: bool = False
+    bounded_ambiguity: bool = False
+
+    def __post_init__(self) -> None:
+        flags = (
+            self.found is not None,
+            self.definitive_absence,
+            self.bounded_ambiguity,
+        )
+        if sum(flags) != 1:
+            raise ValueError(
+                f"exactly one DeepPaginationOutcome field must be set: {self!r}"
+            )
+
+
 @dataclass
 class PrWatchState:
     """Per-process state the watcher keeps between calls.
@@ -161,6 +286,20 @@ class PrWatchState:
     )
     #: Rolling window of API call timestamps (monotonic seconds).
     call_log: list[float] = field(default_factory=list)
+    #: Positive ledger cache: ``LedgerKey → (project, thread_id)``. Skips
+    #: the list_threads round trip on a subsequent poll when we already
+    #: know which thread the PR's ledger lives on. Invalidated implicitly
+    #: on ``get_thread`` failure (fall through to Pass B).
+    ledger_pointers: dict[LedgerKey, tuple[str, str]] = field(
+        default_factory=dict
+    )
+    #: Negative ledger cache: ``LedgerKey → NegativeLedgerEntry``. Answers
+    #: "already looked and did not find" so the board does not fire Pass
+    #: B every 5-minute cycle for the same 未依頼 PR. TTL + updated_at
+    #: gate the entry.
+    negative_ledger_cache: dict[LedgerKey, NegativeLedgerEntry] = field(
+        default_factory=dict
+    )
 
 
 def _first_json_payload(result: Any) -> Any:
@@ -236,11 +375,24 @@ def _needs_review_refetch(
     return (now - entry.fetched_at) > NON_APPROVED_REFETCH_SECONDS
 
 
-async def _fetch_open_prs(owner: str, repo: str) -> list[dict[str, Any]]:
-    """``list_pull_requests(state=open)`` for one repo, or [] on failure.
+#: Sentinel returned by :func:`_fetch_open_prs` on API failure. Distinct
+#: from ``[]`` (which means "we asked and this repo has no open PRs") so
+#: the caller can emit a truthful notice rather than silently drop the
+#: repo from the lane. Compared by identity (``is``), not equality.
+_FETCH_FAILED: object = object()
 
-    Failure returns [] rather than raising: one bad repo must not blank
-    the entire board. The caller records a notice for the user.
+
+async def _fetch_open_prs(
+    owner: str, repo: str
+) -> list[dict[str, Any]] | object:
+    """``list_pull_requests(state=open)`` for one repo, or :data:`_FETCH_FAILED`.
+
+    Prior behaviour returned ``[]`` on failure, which silently blanked
+    the lane for that repo without a notice — a GitHub outage looked
+    identical to "no open PRs", and the operator learned about it only
+    when the eventual merge went by unobserved. The sentinel lets
+    :func:`collect_pr_snapshots` emit a notice on true failure while
+    keeping the "empty repo" case silent.
     """
     from magickit.mcp.github_dispatch import _mcp_call, _resolve_pat  # noqa: PLC0415
 
@@ -254,11 +406,13 @@ async def _fetch_open_prs(owner: str, repo: str) -> list[dict[str, Any]]:
             },
             pat,
         )
-    except Exception as exc:  # noqa: BLE001 — any read failure yields []
+    except Exception as exc:  # noqa: BLE001 — sentinel signals failure
         logger.warning(
-            "pr_watch: list_pull_requests failed", repo=f"{owner}/{repo}", err=str(exc)
+            "pr_watch: list_pull_requests failed",
+            repo=f"{owner}/{repo}",
+            err=str(exc),
         )
-        return []
+        return _FETCH_FAILED
     payload = _first_json_payload(result)
     if isinstance(payload, list):
         return [p for p in payload if isinstance(p, dict)]
@@ -267,6 +421,9 @@ async def _fetch_open_prs(owner: str, repo: str) -> list[dict[str, Any]]:
         items = payload.get("items")
         if isinstance(items, list):
             return [p for p in items if isinstance(p, dict)]
+    # A parseable but shape-wrong response is treated as empty (200 OK
+    # with unexpected body); a networking-level failure went through the
+    # exception path above. Only the exception path is 「outage」.
     return []
 
 
@@ -348,13 +505,24 @@ async def collect_pr_snapshots(
         # Every list call costs one API call regardless of the answer.
         _record_call(state, now=now)
         prs = await fetch_open_prs(owner, repo)
+        if prs is _FETCH_FAILED:
+            # Genuine outage / auth failure. Emit a notice so the board
+            # says "the merge lane is degraded" instead of silently
+            # dropping the repo. The 200-OK-empty case does not come
+            # here — it is a truthy empty list, handled below.
+            notices.append(
+                f"{owner}/{repo}: GitHub API 応答なし — マージ lane は縮退表示中"
+            )
+            continue
         if not prs:
-            # Silence is ambiguous (empty repo vs. auth vs. outage). We
-            # cannot distinguish here without more calls, so we say
-            # nothing and let missing cards be the signal. Real failures
-            # already surface in the log via _fetch_open_prs.
+            # Silence is intentional here: an empty list means "repo has
+            # no open PRs right now", which is exactly the state where
+            # a card would be misleading. Auth failures went to
+            # _FETCH_FAILED above.
             continue
 
+        # Narrow type from list | object → list for the loop below.
+        assert isinstance(prs, list)
         for pr in prs:
             try:
                 snapshot = await _snapshot_for_pr(
@@ -405,6 +573,12 @@ async def _snapshot_for_pr(
     if not isinstance(updated_at, str) or not updated_at:
         return None
 
+    # created_at is optional: the deep-pagination fence tolerates its
+    # absence by falling back to "ambiguous" rather than making up a
+    # value. Malformed / missing → empty string, not a stack trace.
+    created_at_raw = pr.get("created_at")
+    created_at = created_at_raw if isinstance(created_at_raw, str) else ""
+
     title = str(pr.get("title") or f"#{number_raw}")
     html_url = str(
         pr.get("html_url")
@@ -424,6 +598,7 @@ async def _snapshot_for_pr(
             html_url=html_url,
             head_sha=head_sha,
             updated_at=updated_at,
+            created_at=created_at,
             artifact_approved=entry.artifact_approved,
             approving_review_id=entry.approving_review_id,
         )
@@ -441,6 +616,7 @@ async def _snapshot_for_pr(
                 html_url=html_url,
                 head_sha=head_sha,
                 updated_at=updated_at,
+                created_at=created_at,
                 artifact_approved=entry.artifact_approved,
                 approving_review_id=entry.approving_review_id,
                 rate_capped=True,
@@ -453,6 +629,7 @@ async def _snapshot_for_pr(
             html_url=html_url,
             head_sha=head_sha,
             updated_at=updated_at,
+            created_at=created_at,
             artifact_approved=False,
             rate_capped=True,
         )
@@ -472,6 +649,7 @@ async def _snapshot_for_pr(
                 html_url=html_url,
                 head_sha=head_sha,
                 updated_at=updated_at,
+                created_at=created_at,
                 artifact_approved=entry.artifact_approved,
                 approving_review_id=entry.approving_review_id,
                 rate_capped=True,
@@ -484,6 +662,7 @@ async def _snapshot_for_pr(
             html_url=html_url,
             head_sha=head_sha,
             updated_at=updated_at,
+            created_at=created_at,
             artifact_approved=False,
             rate_capped=True,
         )
@@ -504,9 +683,332 @@ async def _snapshot_for_pr(
         html_url=html_url,
         head_sha=head_sha,
         updated_at=updated_at,
+        created_at=created_at,
         artifact_approved=approved,
         approving_review_id=review_id,
     )
+
+
+# --- ledger cache & bounded pagination helpers -----------------------------
+
+
+def pr_key(snapshot: PrSnapshot) -> LedgerKey:
+    """Reduce a snapshot to the tuple both caches key by."""
+    return (snapshot.owner, snapshot.repo, int(snapshot.number))
+
+
+def get_ledger_pointer(
+    state: PrWatchState, key: LedgerKey
+) -> tuple[str, str] | None:
+    """Read the positive ledger cache. ``None`` = "no cached pointer"."""
+    return state.ledger_pointers.get(key)
+
+
+def set_ledger_pointer(
+    state: PrWatchState, key: LedgerKey, project: str, thread_id: str
+) -> None:
+    """Record a ``(project, thread_id)`` pointer for later polls to reuse."""
+    state.ledger_pointers[key] = (project, thread_id)
+
+
+def get_negative_ledger(
+    state: PrWatchState,
+    key: LedgerKey,
+    now: datetime,
+    pr_updated_at: str,
+) -> NegativeLedgerEntry | None:
+    """Return a valid entry, or ``None`` if the cache should be skipped.
+
+    Validity is the conjunction of two invariants: the PR's
+    ``updated_at`` must still match (any GitHub-side event bumped it, and
+    such an event might be what caused a ledger to appear), AND the TTL
+    must not have elapsed. Either failing means the caller must run Pass
+    B and re-cache — the cached entry stays until it is overwritten, but
+    is not honoured on this call.
+    """
+    entry = state.negative_ledger_cache.get(key)
+    if entry is None:
+        return None
+    if entry.pr_updated_at != pr_updated_at:
+        return None
+    if entry.cached_at + _NEGATIVE_LEDGER_TTL <= now:
+        return None
+    return entry
+
+
+def set_negative_ledger(
+    state: PrWatchState,
+    key: LedgerKey,
+    pr_updated_at: str,
+    now: datetime,
+    *,
+    was_truncated: bool,
+) -> None:
+    """Record a "we looked and did not find" cache entry."""
+    state.negative_ledger_cache[key] = NegativeLedgerEntry(
+        pr_updated_at=pr_updated_at,
+        cached_at=now,
+        was_truncated=was_truncated,
+    )
+
+
+def iter_truncated_prs(state: PrWatchState) -> dict[str, list[int]]:
+    """PRs whose 未依頼 verdict is unconfirmed, keyed by ``owner/repo``.
+
+    Feeds the board's notice line. Only entries with ``was_truncated=
+    True`` count — definitive absences are silent. The mapping is fresh
+    per call so a notice disappears the moment the cache entry is
+    superseded.
+    """
+    out: dict[str, list[int]] = {}
+    for (owner, repo, number), entry in state.negative_ledger_cache.items():
+        if entry.was_truncated:
+            slug = f"{owner}/{repo}"
+            out.setdefault(slug, []).append(number)
+    for slug in out:
+        out[slug].sort()
+    return out
+
+
+def _parse_iso_utc(iso_ts: str) -> datetime:
+    """Parse an ISO-8601 UTC string, tolerating the trailing ``Z``."""
+    if iso_ts.endswith("Z"):
+        iso_ts = iso_ts[:-1] + "+00:00"
+    return datetime.fromisoformat(iso_ts)
+
+
+def _format_iso_utc(dt: datetime) -> str:
+    """Format a UTC datetime as the ISO-8601 ``…Z`` form GitHub uses."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def add_minutes(iso_ts: str, delta: timedelta) -> str:
+    """Return ``iso_ts + delta`` as ISO-8601 UTC (Z-suffixed).
+
+    Used only in the definitive-absence threshold below; kept as a named
+    helper so the direction of the margin (see :func:`definitive_absence_
+    threshold`) is a call, not an inlined ``+``.
+    """
+    return _format_iso_utc(_parse_iso_utc(iso_ts) + delta)
+
+
+def definitive_absence_threshold(
+    page_horizon: str,
+    clock_skew_margin: timedelta = _CLOSED_LEDGER_HORIZON_SKEW,
+) -> str:
+    """Return the threshold ``T`` above which ``PR.created_at`` proves absence.
+
+    Safety direction (msg-859 Option xxvii): **add** the margin to the
+    horizon so ``T`` is *later* and the condition ``pr.created_at > T``
+    is *harder* to satisfy. The alternative — subtracting the margin —
+    would make premature absence declarations, silently reclassifying
+    gated PRs as 「未依頼」, which is the exact failure mode this whole
+    lane exists to detect. **Never change to subtract.**
+
+    Delaying a definitive-absence declaration by one page is a bounded
+    inefficiency (Pass B fires again next poll); declaring it prematurely
+    is a fatal correctness breach that we would only notice by watching
+    a card silently ship without a gate.
+    """
+    return add_minutes(page_horizon, clock_skew_margin)
+
+
+def min_last_activity_at(items: list[dict[str, Any]]) -> str | None:
+    """Smallest ``last_activity_at`` in ``items``, or ``None`` if empty.
+
+    ISO-8601 UTC strings sort lexicographically the same way they sort
+    chronologically, so ``min`` on the raw string is safe. Missing
+    ``last_activity_at`` entries are ignored (rather than treated as
+    "earliest", which would silently accept malformed pages).
+    """
+    values = [
+        it["last_activity_at"]
+        for it in items
+        if isinstance(it, dict)
+        and isinstance(it.get("last_activity_at"), str)
+        and it["last_activity_at"]
+    ]
+    return min(values) if values else None
+
+
+def find_ledger_in_page(
+    pr: PrSnapshot, items: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Locate ``pr``'s ledger among ``items`` by parsing the title.
+
+    Match rule mirrors :func:`magickit.web.board._ledger_thread_for_pr`
+    — same owner filter, same tag filter, same
+    :func:`magickit.mcp.pr_gate_ledger.parse_pr_ref` on the title. Kept
+    here so :func:`resolve_old_prs_by_deep_pagination` does not import
+    the board (an inverted dependency).
+    """
+    from magickit.mcp.pr_gate_ledger import parse_pr_ref  # noqa: PLC0415
+
+    for thread in items:
+        if not isinstance(thread, dict):
+            continue
+        tags = thread.get("tags") or []
+        if (
+            thread.get("owner") != _LEDGER_OWNER
+            or not isinstance(tags, list)
+            or _LEDGER_TAG not in tags
+        ):
+            continue
+        ref = parse_pr_ref(str(thread.get("title") or ""))
+        if ref is None:
+            continue
+        if (
+            ref.owner == pr.owner
+            and ref.repo == pr.repo
+            and ref.number == int(pr.number)
+        ):
+            return thread
+    return None
+
+
+def compute_was_truncated_per_pr(
+    unmatched_prs: list[PrSnapshot],
+    list_result: dict[str, Any],
+    *,
+    clock_skew_margin: timedelta = _CLOSED_LEDGER_HORIZON_SKEW,
+) -> dict[LedgerKey, bool]:
+    """Decide ``was_truncated`` for each Pass B page 1 unmatched PR.
+
+    Returns ``{pr_key: was_truncated}`` where ``False`` means "definitive
+    absence proved" (silent 未依頼) and ``True`` means "ambiguity remains
+    — a deep-history ledger could exist" (notice needed OR deep
+    pagination should try to resolve).
+
+    The two positive-verdict paths:
+
+    - ``total <= len(items)``: we saw every closed ledger there is. No
+      ambiguity possible.
+    - ``pr.created_at > threshold(horizon)``: the PR is younger than the
+      oldest thread on this page (plus the skew margin), so if a ledger
+      for it existed, it would have to be on this page. It is not, so
+      it does not exist.
+    """
+    items_raw = list_result.get("items", []) or []
+    items: list[dict[str, Any]] = [i for i in items_raw if isinstance(i, dict)]
+    total_raw = list_result.get("total")
+    total = int(total_raw) if isinstance(total_raw, int) else len(items)
+
+    if total <= len(items):
+        return {pr_key(pr): False for pr in unmatched_prs}
+
+    horizon = min_last_activity_at(items)
+    if horizon is None:
+        # Truncated but no horizon to reason against. Falls through to
+        # deep pagination / notice — treat as ambiguous.
+        return {pr_key(pr): True for pr in unmatched_prs}
+
+    threshold = definitive_absence_threshold(horizon, clock_skew_margin)
+    result: dict[LedgerKey, bool] = {}
+    for pr in unmatched_prs:
+        result[pr_key(pr)] = not (pr.created_at > threshold)
+    return result
+
+
+async def resolve_old_prs_by_deep_pagination(
+    unmatched_old_prs: list[PrSnapshot],
+    project: str,
+    list_threads_fn: Callable[..., Awaitable[dict[str, Any]]],
+    *,
+    max_pages: int | None = None,
+    limit: int = _LIST_THREADS_PAGE_LIMIT,
+    clock_skew_margin: timedelta = _CLOSED_LEDGER_HORIZON_SKEW,
+) -> dict[LedgerKey, DeepPaginationOutcome]:
+    """Walk closed-ledger pages 2..max_pages+1 for horizon-failing PRs.
+
+    Pass B has already fetched page 1 (``offset=0``); this function
+    starts at ``offset=limit`` and continues while there are PRs still
+    unresolved. Two ways it can exit early:
+
+    - **Pool exhausted** (``offset + len(items) >= total``): every closed
+      thread the project has has been read. Remaining PRs' verdict is
+      ``definitive_absence``.
+    - **Chronological fence at this page's horizon**: if the page's
+      oldest thread is older than a PR's ``created_at`` (plus the skew
+      margin), the PR would already be on an earlier page. Absence
+      proven for that PR without reading further.
+
+    If neither exit fires by ``max_pages``, remaining PRs get
+    ``bounded_ambiguity``.
+    """
+    # Resolve default at call time so an env-var override (or a test
+    # monkeypatching :data:`_MAX_CLOSED_LEDGER_PAGES`) takes effect
+    # without reloading the module — Python binds default arg values at
+    # def time, so a module-level default here would be frozen.
+    if max_pages is None:
+        max_pages = _MAX_CLOSED_LEDGER_PAGES
+
+    resolved: dict[LedgerKey, DeepPaginationOutcome] = {}
+    remaining = list(unmatched_old_prs)
+
+    for page_idx in range(1, max_pages + 1):
+        if not remaining:
+            break
+        offset = page_idx * limit
+        try:
+            result = await list_threads_fn(
+                project=project,
+                owner=_LEDGER_OWNER,
+                status_filter=["resolved", "superseded"],
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to ambiguity
+            logger.warning(
+                "pr_watch: deep-pagination list_threads failed",
+                project=project, offset=offset, err=str(exc),
+            )
+            break
+        items_raw = result.get("items", []) or []
+        items: list[dict[str, Any]] = [
+            i for i in items_raw if isinstance(i, dict)
+        ]
+        total_raw = result.get("total")
+        total = int(total_raw) if isinstance(total_raw, int) else 0
+
+        next_remaining: list[PrSnapshot] = []
+        page_horizon = min_last_activity_at(items)
+        for pr in remaining:
+            thread_dict = find_ledger_in_page(pr, items)
+            if thread_dict is not None:
+                resolved[pr_key(pr)] = DeepPaginationOutcome(
+                    found=(project, thread_dict),
+                )
+                continue
+            if page_horizon is not None:
+                threshold = definitive_absence_threshold(
+                    page_horizon, clock_skew_margin,
+                )
+                if pr.created_at > threshold:
+                    resolved[pr_key(pr)] = DeepPaginationOutcome(
+                        definitive_absence=True,
+                    )
+                    continue
+            next_remaining.append(pr)
+
+        remaining = next_remaining
+
+        # Pool exhausted → remaining PRs' absence is definitive.
+        if offset + len(items) >= total:
+            for pr in remaining:
+                resolved[pr_key(pr)] = DeepPaginationOutcome(
+                    definitive_absence=True,
+                )
+            remaining = []
+            break
+
+    for pr in remaining:
+        resolved[pr_key(pr)] = DeepPaginationOutcome(bounded_ambiguity=True)
+
+    return resolved
 
 
 #: Module-level process-lifetime state. The board's :func:`collect` reuses
@@ -527,8 +1029,23 @@ def get_state() -> PrWatchState:
 __all__ = [
     "PrSnapshot",
     "PrWatchState",
+    "NegativeLedgerEntry",
+    "DeepPaginationOutcome",
+    "LedgerKey",
     "NON_APPROVED_REFETCH_SECONDS",
     "SOFT_CAP_CALLS_PER_HOUR",
     "collect_pr_snapshots",
     "get_state",
+    "pr_key",
+    "get_ledger_pointer",
+    "set_ledger_pointer",
+    "get_negative_ledger",
+    "set_negative_ledger",
+    "iter_truncated_prs",
+    "add_minutes",
+    "definitive_absence_threshold",
+    "min_last_activity_at",
+    "find_ledger_in_page",
+    "compute_was_truncated_per_pr",
+    "resolve_old_prs_by_deep_pagination",
 ]

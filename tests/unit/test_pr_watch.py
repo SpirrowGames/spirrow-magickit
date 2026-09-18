@@ -19,6 +19,7 @@ The two properties every test here defends:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -27,9 +28,23 @@ from magickit.core import pr_watch
 from magickit.core.pr_watch import (
     NON_APPROVED_REFETCH_SECONDS,
     SOFT_CAP_CALLS_PER_HOUR,
+    DeepPaginationOutcome,
+    NegativeLedgerEntry,
     PrSnapshot,
     PrWatchState,
+    add_minutes,
     collect_pr_snapshots,
+    compute_was_truncated_per_pr,
+    definitive_absence_threshold,
+    find_ledger_in_page,
+    get_ledger_pointer,
+    get_negative_ledger,
+    iter_truncated_prs,
+    min_last_activity_at,
+    pr_key,
+    resolve_old_prs_by_deep_pagination,
+    set_ledger_pointer,
+    set_negative_ledger,
 )
 
 
@@ -301,3 +316,394 @@ async def test_call_log_prunes_after_an_hour():
     )
     # The 2 stale entries pruned; only the 2 new ones remain (list + reviews).
     assert len(state.call_log) == 2
+
+
+# --- outage sentinel & notice ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_failure_emits_notice_not_silent_dropdown():
+    """A GitHub outage must announce itself, not silently blank the lane.
+
+    Prior behaviour returned [] on exception → indistinguishable from
+    "no open PRs". The sentinel path emits a notice so the operator
+    learns the merge lane is degraded.
+    """
+    state = PrWatchState()
+
+    async def failing_list(owner: str, repo: str):
+        return pr_watch._FETCH_FAILED
+
+    async def _rev(*_a, **_kw):
+        return None
+
+    snapshots, notices = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=failing_list, fetch_reviews=_rev, now=0.0,
+    )
+    assert snapshots == []
+    assert any("縮退" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_empty_list_is_silent():
+    """A truthy-empty list means "no open PRs" and should NOT emit a notice."""
+    state = PrWatchState()
+
+    async def empty_list(owner: str, repo: str):
+        return []
+
+    async def _rev(*_a, **_kw):
+        return None
+
+    snapshots, notices = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=empty_list, fetch_reviews=_rev, now=0.0,
+    )
+    assert snapshots == []
+    assert notices == []
+
+
+# --- helpers: cache keys, positive & negative ledger cache -----------------
+
+
+def _snapshot(
+    *,
+    owner: str = "O",
+    repo: str = "R",
+    number: int = 1,
+    updated_at: str = "2026-09-18T10:00:00Z",
+    created_at: str = "2026-09-01T00:00:00Z",
+) -> PrSnapshot:
+    return PrSnapshot(
+        owner=owner, repo=repo, number=number,
+        title=f"PR {number}",
+        html_url=f"https://github.com/{owner}/{repo}/pull/{number}",
+        head_sha="H", updated_at=updated_at, created_at=created_at,
+        artifact_approved=False,
+    )
+
+
+def test_pr_key_reduces_snapshot_to_tuple():
+    key = pr_key(_snapshot(owner="foo", repo="bar", number=7))
+    assert key == ("foo", "bar", 7)
+
+
+def test_set_and_get_ledger_pointer_roundtrip():
+    state = PrWatchState()
+    key = ("O", "R", 1)
+    assert get_ledger_pointer(state, key) is None
+    set_ledger_pointer(state, key, "proj", "T-1")
+    assert get_ledger_pointer(state, key) == ("proj", "T-1")
+
+
+NOW = datetime(2026, 9, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_negative_cache_returns_entry_when_ttl_and_updated_at_match():
+    state = PrWatchState()
+    set_negative_ledger(state, ("O", "R", 1), "U1", NOW, was_truncated=False)
+    entry = get_negative_ledger(state, ("O", "R", 1), NOW, "U1")
+    assert entry is not None
+    assert entry.was_truncated is False
+
+
+def test_negative_cache_invalidates_on_updated_at_change():
+    state = PrWatchState()
+    set_negative_ledger(state, ("O", "R", 1), "U1", NOW, was_truncated=False)
+    # Same time, but the PR's updated_at bumped — must return None.
+    assert get_negative_ledger(state, ("O", "R", 1), NOW, "U2") is None
+
+
+def test_negative_cache_expires_after_ttl():
+    state = PrWatchState()
+    set_negative_ledger(state, ("O", "R", 1), "U1", NOW, was_truncated=False)
+    later = NOW + timedelta(minutes=16)
+    assert get_negative_ledger(state, ("O", "R", 1), later, "U1") is None
+
+
+def test_iter_truncated_prs_lists_only_truncated_entries_by_slug():
+    state = PrWatchState()
+    set_negative_ledger(state, ("O", "R", 1), "U", NOW, was_truncated=True)
+    set_negative_ledger(state, ("O", "R", 2), "U", NOW, was_truncated=False)
+    set_negative_ledger(state, ("O", "X", 5), "U", NOW, was_truncated=True)
+    out = iter_truncated_prs(state)
+    assert out == {"O/R": [1], "O/X": [5]}
+
+
+# --- helpers: ISO arithmetic & absence threshold ---------------------------
+
+
+def test_add_minutes_produces_iso_utc_with_z_suffix():
+    result = add_minutes("2026-09-18T10:00:00Z", timedelta(minutes=5))
+    assert result == "2026-09-18T10:05:00Z"
+
+
+def test_add_minutes_handles_negative_delta():
+    result = add_minutes("2026-09-18T10:05:00Z", timedelta(minutes=-5))
+    assert result == "2026-09-18T10:00:00Z"
+
+
+def test_definitive_absence_threshold_ADDS_the_margin():
+    """The safety direction (msg-859 Option xxvii): threshold > horizon.
+
+    ADDING the margin makes the fence *harder* to satisfy — safer.
+    SUBTRACTING would produce false-positive absence for genuinely-
+    gated PRs. Regression pin: if this test fails, someone flipped the
+    sign and gated PRs will silently render as 「未依頼」.
+    """
+    horizon = "2026-09-18T10:00:00Z"
+    threshold = definitive_absence_threshold(horizon, timedelta(minutes=5))
+    assert threshold == "2026-09-18T10:05:00Z", (
+        "threshold must ADD the margin; subtracting is the fatal correctness "
+        "breach (silent 未依頼 for gated PRs)."
+    )
+
+
+def test_min_last_activity_at_empty_returns_none():
+    assert min_last_activity_at([]) is None
+
+
+def test_min_last_activity_at_finds_smallest_iso_string():
+    items = [
+        {"last_activity_at": "2026-09-18T10:00:00Z"},
+        {"last_activity_at": "2026-09-18T09:00:00Z"},
+        {"last_activity_at": "2026-09-18T11:00:00Z"},
+    ]
+    assert min_last_activity_at(items) == "2026-09-18T09:00:00Z"
+
+
+def test_min_last_activity_at_ignores_missing_field():
+    items = [
+        {"last_activity_at": "2026-09-18T10:00:00Z"},
+        {},  # no field
+        {"last_activity_at": "2026-09-18T09:00:00Z"},
+    ]
+    assert min_last_activity_at(items) == "2026-09-18T09:00:00Z"
+
+
+# --- helpers: find_ledger_in_page -------------------------------------------
+
+
+def _thread(
+    *, thread_id: str = "T-1", title: str = "O/R#1",
+    owner: str = "orchestrator", tags=("pr-review",),
+    last_activity_at: str = "2026-09-01T00:00:00Z",
+    status: str = "resolved",
+) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id, "title": title, "owner": owner,
+        "tags": list(tags), "last_activity_at": last_activity_at,
+        "status": status,
+    }
+
+
+def test_find_ledger_in_page_matches_by_owner_repo_number():
+    snap = _snapshot(number=1)
+    items = [
+        _thread(title="unrelated"),
+        _thread(title="PR review for O/R#1"),
+    ]
+    match = find_ledger_in_page(snap, items)
+    assert match is not None and match["title"] == "PR review for O/R#1"
+
+
+def test_find_ledger_in_page_ignores_wrong_owner():
+    snap = _snapshot()
+    items = [_thread(owner="someone-else", title="O/R#1")]
+    assert find_ledger_in_page(snap, items) is None
+
+
+def test_find_ledger_in_page_ignores_missing_tag():
+    snap = _snapshot()
+    items = [_thread(tags=(), title="O/R#1")]
+    assert find_ledger_in_page(snap, items) is None
+
+
+def test_find_ledger_in_page_returns_none_when_no_match():
+    snap = _snapshot(number=99)
+    items = [_thread(title="PR review for O/R#1")]
+    assert find_ledger_in_page(snap, items) is None
+
+
+# --- helpers: compute_was_truncated_per_pr ---------------------------------
+
+
+def test_was_truncated_false_when_total_matches_items():
+    prs = [_snapshot(number=1), _snapshot(number=2)]
+    result = compute_was_truncated_per_pr(
+        prs, {"items": [_thread(title="unrelated")], "total": 1}
+    )
+    assert result == {("O", "R", 1): False, ("O", "R", 2): False}
+
+
+def test_was_truncated_false_when_pr_created_after_horizon_plus_margin():
+    prs = [_snapshot(number=1, created_at="2026-09-18T10:15:00Z")]
+    result = compute_was_truncated_per_pr(
+        prs,
+        {
+            "items": [_thread(last_activity_at="2026-09-18T10:00:00Z")],
+            "total": 500,
+        },
+    )
+    # 10:15 > 10:05 (10:00 + 5m margin) → definitive absence.
+    assert result[("O", "R", 1)] is False
+
+
+def test_was_truncated_true_when_pr_older_than_horizon():
+    prs = [_snapshot(number=1, created_at="2026-08-01T00:00:00Z")]
+    result = compute_was_truncated_per_pr(
+        prs,
+        {
+            "items": [_thread(last_activity_at="2026-09-18T10:00:00Z")],
+            "total": 500,
+        },
+    )
+    assert result[("O", "R", 1)] is True
+
+
+def test_was_truncated_margin_boundary_flips_at_five_minutes():
+    """The 5-min margin: PR 1 min newer than horizon must stay ambiguous.
+
+    Regression pin (Option xxvii): if the margin direction is flipped,
+    this PR would be falsely declared definitively-absent.
+    """
+    prs_inside = [_snapshot(number=1, created_at="2026-09-18T10:01:00Z")]
+    prs_outside = [_snapshot(number=2, created_at="2026-09-18T10:10:00Z")]
+    payload = {
+        "items": [_thread(last_activity_at="2026-09-18T10:00:00Z")],
+        "total": 500,
+    }
+    assert compute_was_truncated_per_pr(prs_inside, payload) == {
+        ("O", "R", 1): True,
+    }, "1 min newer than horizon is WITHIN the 5-min margin → ambiguous"
+    assert compute_was_truncated_per_pr(prs_outside, payload) == {
+        ("O", "R", 2): False,
+    }, "10 min newer than horizon is OUTSIDE the margin → definitive"
+
+
+# --- helpers: DeepPaginationOutcome invariants -----------------------------
+
+
+def test_deep_pagination_outcome_rejects_zero_fields():
+    with pytest.raises(ValueError):
+        DeepPaginationOutcome()
+
+
+def test_deep_pagination_outcome_rejects_two_fields():
+    with pytest.raises(ValueError):
+        DeepPaginationOutcome(
+            definitive_absence=True, bounded_ambiguity=True,
+        )
+
+
+def test_deep_pagination_outcome_accepts_exactly_one_field():
+    # Any one of the three is fine.
+    DeepPaginationOutcome(found=("p", {}))
+    DeepPaginationOutcome(definitive_absence=True)
+    DeepPaginationOutcome(bounded_ambiguity=True)
+
+
+# --- helpers: resolve_old_prs_by_deep_pagination ---------------------------
+
+
+class _FakeListThreads:
+    """Programmable list_threads mock keyed by offset.
+
+    Each call returns ``pages[offset]`` (must be seeded); records the
+    (project, offset) tuple so tests can assert on the call sequence.
+    """
+
+    def __init__(self, pages: dict[int, dict[str, Any]]):
+        self.pages = pages
+        self.calls: list[tuple[str, int]] = []
+
+    async def __call__(self, *, project, owner, status_filter, limit, offset):
+        self.calls.append((project, offset))
+        return self.pages.get(offset, {"items": [], "total": 0})
+
+
+@pytest.mark.asyncio
+async def test_deep_pagination_finds_ledger_on_later_page():
+    # Old PR, ledger sits on page 3 (offset=200).
+    old_pr = _snapshot(number=1, created_at="2026-01-01T00:00:00Z")
+    list_fn = _FakeListThreads({
+        100: {
+            "items": [_thread(title="unrelated#5",
+                              last_activity_at="2026-05-01T00:00:00Z")],
+            "total": 500,
+        },
+        200: {
+            "items": [
+                _thread(title="PR review for O/R#1", thread_id="T-1",
+                        last_activity_at="2026-03-01T00:00:00Z"),
+            ],
+            "total": 500,
+        },
+    })
+    outcomes = await resolve_old_prs_by_deep_pagination(
+        [old_pr], "proj", list_fn, max_pages=5,
+    )
+    outcome = outcomes[("O", "R", 1)]
+    assert outcome.found is not None
+    assert outcome.found[1]["thread_id"] == "T-1"
+
+
+@pytest.mark.asyncio
+async def test_deep_pagination_definitive_when_pool_exhausted():
+    """total <= offset+len(items) exhausts the pool → definitive absence."""
+    old_pr = _snapshot(number=1, created_at="2026-01-01T00:00:00Z")
+    list_fn = _FakeListThreads({
+        100: {"items": [], "total": 100},  # offset=100, no items, total=100
+    })
+    outcomes = await resolve_old_prs_by_deep_pagination(
+        [old_pr], "proj", list_fn, max_pages=5,
+    )
+    assert outcomes[("O", "R", 1)].definitive_absence is True
+
+
+@pytest.mark.asyncio
+async def test_deep_pagination_bounded_ambiguity_at_max_pages():
+    """max_pages=1 with an unresolved PR yields bounded_ambiguity.
+
+    The PR is older than the page horizon (so the chronological fence
+    does NOT fire), and the pool is not exhausted. With ``max_pages=1``
+    the scan runs out before proving anything.
+    """
+    old_pr = _snapshot(number=1, created_at="2020-01-01T00:00:00Z")
+    list_fn = _FakeListThreads({
+        100: {
+            "items": [_thread(title="unrelated#9",
+                              last_activity_at="2026-05-01T00:00:00Z")],
+            "total": 10000,
+        },
+    })
+    outcomes = await resolve_old_prs_by_deep_pagination(
+        [old_pr], "proj", list_fn, max_pages=1,
+    )
+    assert outcomes[("O", "R", 1)].bounded_ambiguity is True
+
+
+@pytest.mark.asyncio
+async def test_deep_pagination_stops_early_on_chronological_fence():
+    """A PR newer than a mid-scan page's horizon exits with definitive.
+
+    Once the scan reaches a page whose oldest thread predates the PR
+    (plus margin), the PR would be on this page or an earlier one; not
+    being there proves absence and we do not fetch further pages.
+    """
+    old_pr = _snapshot(number=1, created_at="2026-05-01T00:00:00Z")
+    list_fn = _FakeListThreads({
+        100: {
+            "items": [_thread(title="unrelated#5",
+                              last_activity_at="2026-04-01T00:00:00Z")],
+            "total": 10000,
+        },
+    })
+    outcomes = await resolve_old_prs_by_deep_pagination(
+        [old_pr], "proj", list_fn, max_pages=5,
+    )
+    # 2026-05-01 > 2026-04-01 + 5min → definitive.
+    assert outcomes[("O", "R", 1)].definitive_absence is True
+    # Should have stopped after page 2 without touching page 3.
+    assert list_fn.calls == [("proj", 100)]

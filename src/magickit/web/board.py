@@ -108,10 +108,8 @@ from magickit.deploy import records
 from magickit.mcp.pr_gate_ledger import (
     PR_GATE_THREAD_OWNER,
     PR_GATE_THREAD_TAG,
-    evaluate_settled_verdict,
     parse_pr_ref,
 )
-from magickit.mcp.tools import chatroom as chatroom_tools
 from magickit.utils.logging import get_logger
 from magickit.web import decisions, identity, ops
 from magickit.web.deps import parse_ts, templates
@@ -633,23 +631,25 @@ async def _collect_loops(
 # --- マージ (merge) — the 4-state per-PR lane ------------------------------
 
 
-#: The 4 board states for a live open PR (Bohr msg-829 §2 summary table).
-#: The identifiers are kept in code — 「gate 済 · artifact」等 — so the
-#: subtitle rendering can distinguish them without regexing display strings.
-MERGE_STATE_APPROVED = "approved"          # gate 済 · artifact
-MERGE_STATE_TIER_C_SETTLED = "tier_c"      # Tier-C 決着 (要確認)
-MERGE_STATE_IN_PROGRESS = "in_progress"    # gate 進行中
-MERGE_STATE_UNREQUESTED = "unrequested"    # gate 未依頼
+#: The 3 board states for a live open PR (Bohr msg-843 Option xxi).
+#: The 4-state design collapsed to 3 once the audit found that 「Tier-C
+#: 決着」 was structurally indistinguishable from 「gate 進行中」: both
+#: mean "a ledger exists but the artifact does not", and no metadata
+#: signal reliably tells "the human already decided but did not click
+#: merge" apart from "the naysayer is still running". The unified
+#: ``LEDGER_ATTACHED`` state names that truthfully and primary-links to
+#: the chatroom thread so the human answers in one click.
+MERGE_STATE_APPROVED_ARTIFACT = "gate_approved_artifact"
+MERGE_STATE_LEDGER_ATTACHED = "gate_ledger_attached"
+MERGE_STATE_UNREQUESTED = "gate_unrequested"
 
-#: Human-facing subtitle for each state (Bohr msg-829 §2 副題 column).
-#: These are what the human reads on the card; the code identifier is
-#: distinct so a rename of the display string does not silently retire a
-#: state predicate. Kept in this module because they name a UI concept
-#: that lives nowhere else.
+#: Human-facing subtitle for each state. Kept as a mapping (not
+#: constants beside the identifiers) so the code path that renders a
+#: card cannot forget any of them — a missing key would fall through to
+#: the state identifier itself, which is visibly wrong (not silently OK).
 _MERGE_STATE_SUBTITLE = {
-    MERGE_STATE_APPROVED: "gate 済（次: merge クリック）",
-    MERGE_STATE_TIER_C_SETTLED: "人間が判断済み — 内容は chatroom で確認",
-    MERGE_STATE_IN_PROGRESS: "gate 進行中",
+    MERGE_STATE_APPROVED_ARTIFACT: "gate 済（次: merge クリック）",
+    MERGE_STATE_LEDGER_ATTACHED: "gate スレッドを確認してください",
     MERGE_STATE_UNREQUESTED: "gate 未依頼",
 }
 
@@ -726,8 +726,7 @@ def _ledger_thread_for_pr(
     return match
 
 
-async def _classify_merge_state(
-    adapter: ChatroomAdapter,
+def _classify_merge_state(
     snapshot: PrSnapshot,
     ledger: tuple[str, dict[str, Any]] | None,
     *,
@@ -735,61 +734,44 @@ async def _classify_merge_state(
 ) -> tuple[str, tuple[str, dict[str, Any]] | None]:
     """Return the (state, ledger-match) for one PR snapshot.
 
-    The four-state predicate composes two signals — the GitHub artifact
-    (:attr:`PrSnapshot.artifact_approved`) and the chatroom ledger
-    (:func:`~magickit.mcp.pr_gate_ledger.evaluate_settled_verdict`).
+    Three states, checked in precedence order:
 
-    Precedence: ``artifact`` → ``Tier-C`` → ``in-progress`` → ``un-
-    requested``. ``artifact`` wins even if the ledger is also closed,
-    because the human has two independent proofs of authorization and
-    the artifact path leads directly to merge; ``Tier-C`` runs next
-    because a settled ledger is a stronger statement than an open one.
+    1. **APPROVED artifact @ current head** — the GitHub side has an
+       APPROVE the driver would honour. Renders as 「gate 済」; primary
+       link is the GitHub PR (next click is the merge button). Ledger
+       info is kept so the card can still link to the chatroom thread
+       as a secondary — the human may want to read it.
+    2. **Ledger thread exists** (open OR closed) — the driver ran at
+       least once. Renders as 「gate スレッドを確認してください」;
+       primary link is the chatroom thread. Closed ledgers are treated
+       the same as open ones because *the PR is still open*: any
+       resolution / supersession the naysayer thread underwent needs
+       human confirmation to become an authorization.
+    3. **Neither of the above** — the silent-failure state msg-253 §1
+       measured. Renders as 「gate 未依頼」. Rate-capped snapshots with
+       no ledger stay in this bucket by design: the notice string
+       elsewhere in the board carries the "we could not read reviews"
+       ambiguity, so we do not muddy the classification.
     """
-    if snapshot.artifact_approved:
-        return MERGE_STATE_APPROVED, ledger
+    if _has_approved_review_at_head(snapshot):
+        return MERGE_STATE_APPROVED_ARTIFACT, ledger
 
-    if ledger is None:
-        # No ledger thread found at all. The 「未依頼」 state — the
-        # exact silent-failure this module exists to make visible.
-        # A rate-capped snapshot with no ledger is a special case: we
-        # could not read reviews this cycle, so we do not KNOW there
-        # is no approval. Render 「gate 進行中」 instead of a false
-        # 「未依頼」.
-        if snapshot.rate_capped:
-            return MERGE_STATE_IN_PROGRESS, None
-        return MERGE_STATE_UNREQUESTED, None
+    if ledger is not None:
+        return MERGE_STATE_LEDGER_ATTACHED, ledger
 
-    project, thread = ledger
-    # Fetch messages to evaluate the settled predicate. This is one extra
-    # get_thread per ledger-bearing PR; measured cost negligible (rate cap
-    # covers the tail).
-    try:
-        result = await adapter.get_thread(project=project, thread_id=str(thread.get("thread_id")))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "board: ledger thread unreadable, staying in-progress",
-            pr=snapshot.slug, err=str(exc),
-        )
-        return MERGE_STATE_IN_PROGRESS, ledger
+    return MERGE_STATE_UNREQUESTED, None
 
-    if ops._is_error(result):
-        return MERGE_STATE_IN_PROGRESS, ledger
 
-    messages = result.get("messages") or []
-    verdict = evaluate_settled_verdict(
-        thread,
-        messages,
-        head_sha=snapshot.head_sha,
-        human_identities=frozenset(chatroom_tools.HUMAN_IDENTITY_NAMES),
-        naysayer_identities=naysayer_identities,
-    )
-    if verdict.settled:
-        # Store the settled msg id on the thread dict so the card can
-        # reference it in the subtitle without another lookup.
-        thread["_settled_msg_id"] = verdict.settled_msg_id or ""
-        return MERGE_STATE_TIER_C_SETTLED, ledger
+def _has_approved_review_at_head(snapshot: PrSnapshot) -> bool:
+    """Predicate isolating the "gate approved" check.
 
-    return MERGE_STATE_IN_PROGRESS, ledger
+    Kept as its own function so a rename or a policy tweak (e.g. two
+    approvers) touches only this line — the state classifier above
+    reads a boolean and dispatches. Currently a straight pass-through of
+    :attr:`PrSnapshot.artifact_approved`, which was computed against
+    the current head SHA inside :mod:`magickit.core.pr_watch`.
+    """
+    return snapshot.artifact_approved
 
 
 def _merge_card_from(
@@ -799,16 +781,16 @@ def _merge_card_from(
     *,
     now: datetime,
 ) -> Card:
-    """Build one マージ card. Primary link depends on state (Bohr msg-829 §6).
+    """Build one マージ card. Primary link depends on state.
 
-    - ``approved`` / ``in_progress`` / ``unrequested`` — title -> GitHub PR
-      (the next click is either the merge button or the naysayer's own
-      thread on GitHub).
-    - ``tier_c`` — title -> chatroom ledger thread (the next click is
-      「what did I decide?」, which lives in chatroom prose, not on GitHub).
+    - ``APPROVED_ARTIFACT`` / ``UNREQUESTED`` — title → GitHub PR (next
+      click is either the merge button or an action on GitHub).
+    - ``LEDGER_ATTACHED`` — title → chatroom ledger thread (next click
+      is 「what does this thread say and did I already decide?」, which
+      lives in chatroom prose, not on GitHub).
     """
     subtitle = _MERGE_STATE_SUBTITLE.get(state, state)
-    if snapshot.rate_capped and state != MERGE_STATE_APPROVED:
+    if snapshot.rate_capped and state != MERGE_STATE_APPROVED_ARTIFACT:
         subtitle = f"{subtitle} · rate-cap でこの周期は再取得を見送り"
 
     # Secondary link: the other surface. Both are always useful, but the
@@ -817,13 +799,13 @@ def _merge_card_from(
     if ledger is not None:
         project, thread = ledger
         thread_id = str(thread.get("thread_id") or "")
-        settled_hint = ""
-        settled_msg_id = str(thread.get("_settled_msg_id") or "")
-        if state == MERGE_STATE_TIER_C_SETTLED and settled_msg_id:
-            settled_hint = f" (Tier-C @ {settled_msg_id})"
+        thread_status = str(thread.get("status") or "")
+        status_hint = ""
+        if thread_status in ("resolved", "superseded"):
+            status_hint = f" ({thread_status})"
         chatroom_link = CardLink(
             href=f"/ui/projects/{project}/threads/{thread_id}",
-            label=f"chatroom スレッド{settled_hint}",
+            label=f"chatroom スレッド{status_hint}",
             title=f"{project} / {thread_id}",
         )
 
@@ -834,7 +816,7 @@ def _merge_card_from(
         external=True,
     )
 
-    if state == MERGE_STATE_TIER_C_SETTLED and chatroom_link is not None:
+    if state == MERGE_STATE_LEDGER_ATTACHED and chatroom_link is not None:
         title_href = chatroom_link.href
         secondary_links = [github_link]
     else:
@@ -847,7 +829,7 @@ def _merge_card_from(
         title=snapshot.title,
         href=title_href,
         # マージ カードの 「since」 は PR の updated_at を使う。approved 状態
-        # だと 「gate が通ってから何日放置しているか」に、in-progress だと
+        # だと 「gate が通ってから何日放置しているか」に、ledger 状態だと
         # 「naysayer が最後に喋ってから」に相当する — どちらも 「僕が動か
         # ないと片付かない期間」の目安になる。
         since=parse_ts(snapshot.updated_at),
@@ -863,6 +845,14 @@ def _merge_card_from(
     )
 
 
+#: Thread status values that count as 「open」 for the PR-gate ledger's
+#: Pass A. Kept in step with :data:`magickit.web.decisions.
+#: _THREAD_STATUS_OPEN` — a divergence would make the board scan a
+#: different set of statuses than the judgement page, and a card would
+#: show one state on the board and a different verdict on click.
+_LEDGER_OPEN_STATUSES = ("active", "awaiting_reply", "parked")
+
+
 async def _collect_merges(
     adapter: ChatroomAdapter,
     live: _Live,
@@ -876,11 +866,23 @@ async def _collect_merges(
     whole lane with a notice (rather than blanking the board) and each
     per-PR failure logs and continues.
 
-    This is the entry point Bohr msg-829 §5 (b) — the ``updated_at``
-    cache and 15-minute self-healing loop live in
-    :mod:`magickit.core.pr_watch`; here we only compose signals into
-    cards. Reads the ledger side through the same adapter the decisions
-    collector uses (one Conclair, one round trip per project).
+    The ledger side runs in two passes plus bounded deep pagination:
+
+    - **Pass A** (open ledgers) — one ``list_threads`` per unseen project
+      with ``status_filter=open``. This is the cheap, common-case path;
+      most live ledgers are open.
+    - **Positive cache** — ``ledger_pointers`` remembers where a match
+      was found last cycle; a hit here skips both Pass A and Pass B on
+      subsequent polls.
+    - **Negative cache** — ``negative_ledger_cache`` remembers "we
+      looked and did not find" so a truly-未依頼 PR does not re-run
+      Pass B every 5 minutes. TTL + updated_at both gate the entry.
+    - **Pass B** (closed ledgers, page 1) — for PRs still unresolved,
+      one ``list_threads`` per project with ``status_filter=closed``.
+    - **Deep pagination** — for PRs older than page 1's oldest thread
+      (plus a clock-skew margin), walk pages 2..6 until either match /
+      pool exhausted / max-pages. Non-hits become either
+      ``definitive_absence`` (silent) or ``bounded_ambiguity`` (notice).
     """
     repos = _parse_repo_allowlist(settings.board_pr_repo_allowlist)
     if not repos:
@@ -899,35 +901,45 @@ async def _collect_merges(
     if not snapshots:
         return
 
+    watch_state = pr_watch.get_state()
+
     # Group ledger threads by project once; PR-review threads live under
     # a small set of projects and we look each PR up in the same table.
-    projects_needed = {p for p in live.threads.keys()}
     threads_by_project: dict[str, list[dict[str, Any]]] = {}
     for (project, _thread_id), thread in live.threads.items():
         threads_by_project.setdefault(project, []).append(thread)
 
-    # Some PR-review threads live in projects the decisions collector
-    # never touched (materials-less projects). Fetch those on demand.
     already_scanned = set(threads_by_project)
+
     # PR-review threads are opened per repository — the project name
-    # for the driver-opened thread follows the ledger driver's rule
-    # (`spirrow-<repo>` or the repo itself). We ask Conclair to filter
-    # by owner + tag so we don't have to know the project naming rule.
+    # follows the ledger driver's rule. We ask Conclair to filter by
+    # owner + tag so we don't have to know the exact naming rule.
+    #
+    # Obj 1 (msg-856): the fallback project name is `<repo>` — the
+    # `spirrow-` prefix was doubling up ("spirrow-spirrow-magickit") for
+    # repos whose GitHub owner already begins with `spirrow-`. Match the
+    # repo name as-is; the underlying Conclair project map handles the
+    # canonicalization.
     unseen_projects: set[str] = set()
     for snapshot in snapshots:
-        # Skip a repo we already have any threads for.
         for p in already_scanned:
             if snapshot.repo.lower() in p.lower():
                 break
         else:
-            unseen_projects.add(f"spirrow-{snapshot.repo.lower()}")
-    # We call list_threads per unseen project; a project that does not
-    # exist returns an error envelope which we silently ignore
-    # (we can't distinguish "no project" from "no threads" here).
+            unseen_projects.add(snapshot.repo.lower())
+
+    # Pass A: fetch OPEN ledger threads only for unseen projects. Any
+    # thread the decisions collector already listed is reused — that
+    # code path pulls every open thread for the projects that have
+    # materials. Restricting Pass A to unseen projects avoids a round
+    # trip for those already-covered ones.
     for project in unseen_projects:
         try:
             result = await adapter.list_threads(
-                project=project, owner=PR_GATE_THREAD_OWNER, limit=200
+                project=project,
+                owner=PR_GATE_THREAD_OWNER,
+                status_filter=list(_LEDGER_OPEN_STATUSES),
+                limit=200,
             )
         except Exception:  # noqa: BLE001
             continue
@@ -940,38 +952,174 @@ async def _collect_merges(
             [t for t in items if isinstance(t, dict)]
         )
 
-    # Normalize identity casing on the way in: the predicate lowercases
-    # the message ``author`` (mirrors ``decisions._is_human_decide``), so
-    # the allowlist must be lowercased too or a config-cased 「Einstein」
-    # never matches a payload-cased 「einstein」.
+    matched_ledger: dict[pr_watch.LedgerKey, tuple[str, dict[str, Any]]] = {}
+    unmatched_by_project: dict[str, list[PrSnapshot]] = {}
+
+    for snapshot in snapshots:
+        key = pr_watch.pr_key(snapshot)
+        # (a) Try open-thread match via Pass A / decisions collector.
+        open_match = _ledger_thread_for_pr(threads_by_project, snapshot)
+        if open_match is not None:
+            project, thread = open_match
+            matched_ledger[key] = (project, thread)
+            pr_watch.set_ledger_pointer(
+                watch_state, key, project, str(thread.get("thread_id", ""))
+            )
+            continue
+        # (b) Positive cache: last cycle's pointer.
+        ptr = pr_watch.get_ledger_pointer(watch_state, key)
+        if ptr is not None:
+            proj_cached, thread_id_cached = ptr
+            try:
+                got = await adapter.get_thread(
+                    project=proj_cached, thread_id=thread_id_cached
+                )
+            except Exception:  # noqa: BLE001
+                got = None
+            thread_from_cache: dict[str, Any] | None = None
+            if isinstance(got, dict) and not ops._is_error(got):
+                candidate = got.get("thread")
+                if isinstance(candidate, dict):
+                    thread_from_cache = candidate
+            if thread_from_cache is not None:
+                matched_ledger[key] = (proj_cached, thread_from_cache)
+                continue
+            # Pointer stale (thread deleted / renamed / adapter error).
+            # Fall through to Pass B; the pointer is overwritten if we
+            # find a fresh match, or left as-is if we do not (a future
+            # cycle will retry).
+        # (c) Negative cache: skip Pass B if a fresh entry says "no".
+        neg = pr_watch.get_negative_ledger(
+            watch_state, key, now, snapshot.updated_at
+        )
+        if neg is not None:
+            continue
+        # (d) Needs Pass B: group by guessed project (Obj 1).
+        project_guess = snapshot.repo.lower()
+        unmatched_by_project.setdefault(project_guess, []).append(snapshot)
+
+    # Pass B + deep pagination per-project.
+    for project, prs in unmatched_by_project.items():
+        try:
+            result = await adapter.list_threads(
+                project=project,
+                owner=PR_GATE_THREAD_OWNER,
+                status_filter=["resolved", "superseded"],
+                limit=pr_watch._LIST_THREADS_PAGE_LIMIT,
+                offset=0,
+            )
+        except Exception:  # noqa: BLE001
+            # Cannot tell truncation from absence; leave the PRs for
+            # the next cycle without a negative cache entry.
+            continue
+        if ops._is_error(result):
+            continue
+        items = result.get("items") or []
+        if not isinstance(items, list):
+            items = []
+
+        # Match on page 1.
+        still_unmatched: list[PrSnapshot] = []
+        for pr in prs:
+            key = pr_watch.pr_key(pr)
+            found = pr_watch.find_ledger_in_page(pr, items)
+            if found is not None:
+                matched_ledger[key] = (project, found)
+                pr_watch.set_ledger_pointer(
+                    watch_state, key, project, str(found.get("thread_id", ""))
+                )
+            else:
+                still_unmatched.append(pr)
+
+        # Chronological fence on page 1.
+        classifications = pr_watch.compute_was_truncated_per_pr(
+            still_unmatched, result
+        )
+        needs_deep_scan: list[PrSnapshot] = []
+        for pr in still_unmatched:
+            key = pr_watch.pr_key(pr)
+            was_ambig = classifications.get(key, True)
+            if not was_ambig:
+                # Definitive absence proved on page 1; silent 未依頼.
+                pr_watch.set_negative_ledger(
+                    watch_state,
+                    key,
+                    pr.updated_at,
+                    now,
+                    was_truncated=False,
+                )
+            else:
+                needs_deep_scan.append(pr)
+
+        # Deep pagination for horizon-failing PRs.
+        if needs_deep_scan:
+            outcomes = await pr_watch.resolve_old_prs_by_deep_pagination(
+                needs_deep_scan, project, adapter.list_threads,
+            )
+            for pr in needs_deep_scan:
+                key = pr_watch.pr_key(pr)
+                outcome = outcomes.get(
+                    key,
+                    pr_watch.DeepPaginationOutcome(bounded_ambiguity=True),
+                )
+                if outcome.found is not None:
+                    proj_found, thread_dict = outcome.found
+                    matched_ledger[key] = (proj_found, thread_dict)
+                    pr_watch.set_ledger_pointer(
+                        watch_state,
+                        key,
+                        proj_found,
+                        str(thread_dict.get("thread_id", "")),
+                    )
+                elif outcome.definitive_absence:
+                    pr_watch.set_negative_ledger(
+                        watch_state,
+                        key,
+                        pr.updated_at,
+                        now,
+                        was_truncated=False,
+                    )
+                else:  # bounded_ambiguity
+                    pr_watch.set_negative_ledger(
+                        watch_state,
+                        key,
+                        pr.updated_at,
+                        now,
+                        was_truncated=True,
+                    )
+
+    # Emit truncation notice derived from cache state (not from whether
+    # Pass B ran this cycle) — a bounded_ambiguity cache entry lives
+    # for the TTL, and the notice must persist for the same duration
+    # so the human sees the caveat every render.
+    truncated = pr_watch.iter_truncated_prs(watch_state)
+    for slug, pr_numbers in sorted(truncated.items()):
+        if not pr_numbers:
+            continue
+        pr_list = ", ".join(f"#{n}" for n in pr_numbers)
+        live.notices.append(
+            f"{slug}: closed ledger の pagination 深さが不足 — "
+            f"以下の PR の 未依頼 判定は未確定です: {pr_list}"
+        )
+
+    # Normalize naysayer identity casing (kept for API compatibility with
+    # existing tests, though the collapsed 3-state classifier no longer
+    # consults the naysayer list). Retained on the parameter surface so
+    # future policy tweaks (e.g. "which naysayer's APPROVE counts") can
+    # thread through without a signature change.
     naysayer_identities = frozenset(
         n.strip().lower() for n in settings.naysayer_identities
     )
 
-    # Compose per-PR (ledger match + state).
-    classified = await asyncio.gather(
-        *(
-            _classify_merge_state(
-                adapter,
-                snapshot,
-                _ledger_thread_for_pr(threads_by_project, snapshot),
-                naysayer_identities=naysayer_identities,
-            )
-            for snapshot in snapshots
-        ),
-        return_exceptions=True,
-    )
-
-    for snapshot, verdict in zip(snapshots, classified):
-        if isinstance(verdict, BaseException):
-            logger.warning(
-                "board: merge classification failed",
-                pr=snapshot.slug, err=str(verdict),
-            )
-            state, ledger = MERGE_STATE_IN_PROGRESS, None
-        else:
-            state, ledger = verdict
-        live.cards.append(_merge_card_from(snapshot, state, ledger, now=now))
+    for snapshot in snapshots:
+        key = pr_watch.pr_key(snapshot)
+        ledger = matched_ledger.get(key)
+        state, ledger_info = _classify_merge_state(
+            snapshot, ledger, naysayer_identities=naysayer_identities,
+        )
+        live.cards.append(
+            _merge_card_from(snapshot, state, ledger_info, now=now)
+        )
 
 
 # --- 完了列 ----------------------------------------------------------------
