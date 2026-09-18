@@ -421,6 +421,17 @@ async def _fetch_open_prs(
     when the eventual merge went by unobserved. The sentinel lets
     :func:`collect_pr_snapshots` emit a notice on true failure while
     keeping the "empty repo" case silent.
+
+    Two payload shapes count as success:
+
+    - a bare JSON list of PR dicts (``[{...}, {...}]``), or
+    - a wrapped object with ``{"items": [...]}``.
+
+    Any other shape — a GitHub error envelope such as
+    ``{"message": "API rate limit exceeded"}``, ``None`` from a
+    non-decodable payload, or a scalar — is treated as
+    :data:`_FETCH_FAILED`, not as an empty list. The empty-list case is
+    reserved for a genuine 200-OK response carrying zero open PRs.
     """
     from magickit.mcp.github_dispatch import _mcp_call, _resolve_pat  # noqa: PLC0415
 
@@ -449,10 +460,23 @@ async def _fetch_open_prs(
         items = payload.get("items")
         if isinstance(items, list):
             return [p for p in items if isinstance(p, dict)]
-    # A parseable but shape-wrong response is treated as empty (200 OK
-    # with unexpected body); a networking-level failure went through the
-    # exception path above. Only the exception path is 「outage」.
-    return []
+    # Any other shape is unrecognisable as a PR list: a GitHub error
+    # envelope (``{"message": "API rate limit exceeded"}`` /
+    # ``{"message": "Bad credentials"}``), a scalar, or ``None`` from a
+    # non-decodable payload. Returning ``[]`` here would tell the caller
+    # "0 open PRs", which silently drops the repo's PRs from the board,
+    # evicts every cached ``/reviews`` / ledger pointer for them, and
+    # forces a rate-limit burst the moment the API recovers — the exact
+    # failure the ``failed_repos`` preserve was designed to prevent
+    # (PR-gate BLOCKING at 934f2cd §1). Route this through the same
+    # sentinel path the exception branch uses so ``collect_pr_snapshots``
+    # emits a degradation notice and the pruners spare the cache.
+    logger.warning(
+        "pr_watch: list_pull_requests unrecognized payload shape",
+        repo=f"{owner}/{repo}",
+        payload_type=type(payload).__name__,
+    )
+    return _FETCH_FAILED
 
 
 async def _fetch_reviews(

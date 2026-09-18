@@ -175,9 +175,15 @@ class Settings(BaseSettings):
     # excluded until measured (msg-829 §4). The value is `list[str]` with
     # `owner/repo` grammar because YAML doesn't cleanly express tuples.
     #
-    # Empty list disables the lane entirely (skips all GitHub calls). This
-    # is the correct default outside production: a dev host without the
-    # implementer PAT never calls GitHub at all.
+    # Default is the six-repo production allowlist below; empty list
+    # (via `board.pr_repo_allowlist: []` in YAML) disables the lane
+    # entirely (skips all GitHub calls). Dev hosts without the implementer
+    # PAT should override to the empty list in their YAML to avoid the
+    # 401-driven outage notices the production default would otherwise
+    # produce. The default was set at the six-repo list rather than the
+    # empty list because production is the primary consumer and asking
+    # every deployment YAML to enumerate the same six entries would move
+    # the drift risk (dual-management) into every operator's config.
     board_pr_repo_allowlist: list[str] = Field(
         default_factory=lambda: [
             "SpirrowGames/spirrow-magickit",

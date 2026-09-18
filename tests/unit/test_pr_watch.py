@@ -1165,3 +1165,116 @@ def test_yaml_null_pr_repo_allowlist_disables_the_lane(tmp_path):
     )
     settings = Settings.from_yaml(cfg_path)
     assert settings.board_pr_repo_allowlist == []
+
+
+def test_board_pr_repo_allowlist_default_is_the_documented_six_repos():
+    """PR-gate BLOCKING (934f2cd §2): the prose beside the field and
+    the ``default_factory`` must agree. The prose historically claimed
+    the default was an empty list (so dev hosts would not call
+    GitHub); the actual default was six production repos. This test
+    pins the documented behaviour by asserting the default IS the six
+    production repos and IS NOT empty, so any future edit that lets
+    prose drift again (in either direction) turns red here."""
+    from magickit.config import Settings
+
+    settings = Settings()
+    assert settings.board_pr_repo_allowlist == [
+        "SpirrowGames/spirrow-magickit",
+        "SpirrowGames/spirrow-conclair",
+        "SpirrowGames/spirrow-lexora",
+        "SpirrowGames/spirrow-cognilens",
+        "SpirrowGames/spirrow-prismind",
+        "SpirrowGames/spirrow-mindwire",
+    ]
+
+
+# --- PR-gate BLOCKING at 934f2cd §1: dict payload without items must fail
+# loudly, not silently blank the lane -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_treats_error_envelope_as_fetch_failed(
+    monkeypatch,
+):
+    """A GitHub error envelope (``{"message": "API rate limit exceeded"}``)
+    has no ``items`` key, so the old fallthrough returned ``[]`` — the
+    caller then thought the repo had zero open PRs, silently blanked
+    the lane, and evicted every cached ``/reviews`` entry. The fix
+    routes this shape through :data:`_FETCH_FAILED` so
+    :func:`collect_pr_snapshots` emits a degradation notice and the
+    caller preserves the cache via ``failed_repos``.
+    """
+    from magickit.mcp import github_dispatch
+
+    async def fake_mcp_call(method, params, pat):
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"message": "API rate limit exceeded"}',
+                }
+            ]
+        }
+
+    monkeypatch.setattr(github_dispatch, "_mcp_call", fake_mcp_call)
+    monkeypatch.setattr(
+        github_dispatch, "_resolve_pat", lambda _role: "fake-pat"
+    )
+
+    result = await pr_watch._fetch_open_prs("O", "R")
+    assert result is pr_watch._FETCH_FAILED
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_treats_none_payload_as_fetch_failed(
+    monkeypatch,
+):
+    """When ``_first_json_payload`` cannot decode the body (returns
+    ``None``), the old fallthrough returned ``[]``. Same silent-blank
+    hazard: route through :data:`_FETCH_FAILED` instead."""
+    from magickit.mcp import github_dispatch
+
+    async def fake_mcp_call(method, params, pat):
+        # No content array → _first_json_payload returns None.
+        return {}
+
+    monkeypatch.setattr(github_dispatch, "_mcp_call", fake_mcp_call)
+    monkeypatch.setattr(
+        github_dispatch, "_resolve_pat", lambda _role: "fake-pat"
+    )
+
+    result = await pr_watch._fetch_open_prs("O", "R")
+    assert result is pr_watch._FETCH_FAILED
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_accepts_bare_list_and_items_wrapper(
+    monkeypatch,
+):
+    """Both legitimate success shapes still parse correctly — the
+    tightening of the error path must not close either happy path."""
+    from magickit.mcp import github_dispatch
+
+    call = {"n": 0}
+    payloads = [
+        '[{"number": 1}, {"number": 2}]',       # bare list
+        '{"items": [{"number": 3}]}',             # wrapped
+        '[]',                                     # legit empty
+    ]
+
+    async def fake_mcp_call(method, params, pat):
+        text = payloads[call["n"]]
+        call["n"] += 1
+        return {"content": [{"type": "text", "text": text}]}
+
+    monkeypatch.setattr(github_dispatch, "_mcp_call", fake_mcp_call)
+    monkeypatch.setattr(
+        github_dispatch, "_resolve_pat", lambda _role: "fake-pat"
+    )
+
+    assert await pr_watch._fetch_open_prs("O", "R") == [
+        {"number": 1}, {"number": 2},
+    ]
+    assert await pr_watch._fetch_open_prs("O", "R") == [{"number": 3}]
+    # Legitimate empty-list is still an empty list (NOT _FETCH_FAILED).
+    assert await pr_watch._fetch_open_prs("O", "R") == []
