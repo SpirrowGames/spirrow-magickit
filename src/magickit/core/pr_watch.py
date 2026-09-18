@@ -359,18 +359,71 @@ def _record_call(state: PrWatchState, *, now: float | None = None) -> None:
 def _approved_at_head(
     reviews: list[dict[str, Any]], head_sha: str
 ) -> tuple[bool, int | None]:
-    """Same predicate as ``pr_gate_ledger.evaluate_ledger_verdict``.
+    """Return (approved, approving_review_id) at ``head_sha``.
 
-    APPROVED **and** ``commit_id == head`` — a review on an earlier commit
-    judged a different diff. Kept in sync with the ledger's rule so the
-    board and the carve-out cannot disagree on what "approved" means.
+    Mirrors GitHub's own review-supersede semantic: ``/reviews`` returns
+    events in chronological order (oldest first), and GitHub's branch
+    protection judges each reviewer by their LATEST review on the
+    commit. A reviewer's later ``CHANGES_REQUESTED`` or ``DISMISSED``
+    on the same ``head_sha`` supersedes their earlier ``APPROVED``.
+
+    Aggregate rule:
+    - Any active ``CHANGES_REQUESTED`` (from any reviewer) → False.
+    - Otherwise, any active ``APPROVED`` → True with that review's id.
+    - Else → False.
+
+    ``commit_id`` must equal ``head_sha`` — a review on an earlier
+    commit judged a different diff (msg-978 §4-2).
+
+    Reviews without a resolvable ``user.login`` are treated as coming
+    from a single synthetic reviewer keyed by ``id`` (test payloads
+    often omit ``user``; the real GitHub API always populates it).
+
+    Divergence note: this used to be a strict copy of the simpler
+    predicate in ``pr_gate_ledger.evaluate_ledger_verdict`` ("any
+    APPROVED at head"), and its docstring claimed the two are always
+    in sync. PR-gate objection at 5fa6480 §1 showed the simple form
+    silently keeps a stale APPROVED after the same reviewer switches
+    to CHANGES_REQUESTED on the same commit, so we upgrade the
+    open-PR side here. The ledger predicate has the identical shape
+    and needs the same treatment; that fix is out of scope for PR #87
+    Part A (``pr_gate_ledger.py`` is not in its declared paths) and
+    is tracked as a follow-up (this PR's body §Follow-ups).
     """
+    # per_reviewer[key] = (state, review_id) — latest verdict per
+    # reviewer at head_sha. COMMENTED/PENDING are non-verdicts and
+    # skipped so they cannot displace a real verdict.
+    per_reviewer: dict[Any, tuple[str, int | None]] = {}
     for r in reviews:
         if not isinstance(r, dict):
             continue
-        if r.get("state") == _APPROVED and r.get("commit_id") == head_sha:
-            review_id = r.get("id")
-            return True, review_id if isinstance(review_id, int) else None
+        if r.get("commit_id") != head_sha:
+            continue
+        state = r.get("state")
+        if state not in {_APPROVED, "CHANGES_REQUESTED", "DISMISSED"}:
+            continue
+        review_id_raw = r.get("id")
+        review_id = review_id_raw if isinstance(review_id_raw, int) else None
+        user = r.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        # Synthetic key when the payload lacks a resolvable login: each
+        # such review counts as its own reviewer (fail-safe — this only
+        # makes the supersede semantic weaker, never falsely stricter).
+        key: Any = login if isinstance(login, str) else ("__no_login__", review_id_raw)
+        # Chronological order → later entry wins.
+        per_reviewer[key] = (state, review_id)
+
+    # Any active CHANGES_REQUESTED blocks approval.
+    for state, _ in per_reviewer.values():
+        if state == "CHANGES_REQUESTED":
+            return False, None
+
+    # Otherwise, the first active APPROVED (iteration order matches the
+    # chronological /reviews stream via dict insertion order) wins.
+    for state, review_id in per_reviewer.values():
+        if state == _APPROVED:
+            return True, review_id
+
     return False, None
 
 

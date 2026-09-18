@@ -68,8 +68,27 @@ def _pr(
     }
 
 
-def _review(state: str, commit_id: str, review_id: int = 100) -> dict[str, Any]:
-    return {"state": state, "commit_id": commit_id, "id": review_id}
+def _review(
+    state: str,
+    commit_id: str,
+    review_id: int = 100,
+    *,
+    login: str = "spirrowgames-ops",
+) -> dict[str, Any]:
+    """A synthetic review payload.
+
+    ``login`` defaults to the naysayer bot's login because
+    ``_approved_at_head`` (post-5fa6480 fix) tracks per-reviewer
+    latest verdict — tests that pass multiple reviews without setting
+    ``login`` should still model a single reviewer, matching the
+    pre-fix behaviour where each APPROVED was treated as sufficient.
+    """
+    return {
+        "state": state,
+        "commit_id": commit_id,
+        "id": review_id,
+        "user": {"login": login},
+    }
 
 
 def _make_fetchers(
@@ -117,6 +136,140 @@ async def test_approved_at_head_is_reflected_in_snapshot():
     assert snapshots[0].artifact_approved is True
     assert snapshots[0].approving_review_id == 42
     assert counts["reviews"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_reviewer_changes_requested_supersedes_earlier_approved_at_head():
+    """PR-gate objection at 5fa6480 §1 — supersede on same head SHA.
+
+    GitHub's ``/reviews`` returns events in chronological order. If a
+    reviewer approves and then later requests changes on the SAME
+    commit, the earlier approval is superseded (this is how GitHub's
+    own branch protection reads the stream). The pre-fix code
+    returned True on the first APPROVED and ignored the supersession,
+    masking the blocking review on the board.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("CHANGES_REQUESTED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+    assert snapshots[0].approving_review_id is None
+
+
+@pytest.mark.asyncio
+async def test_same_reviewer_dismissed_supersedes_earlier_approved_at_head():
+    """A DISMISSED review on head_sha invalidates the same reviewer's earlier APPROVED.
+
+    GitHub's dismissal endpoint (``PUT
+    /repos/.../pulls/.../reviews/{id}/dismissals``) updates the
+    review's ``state`` field to ``DISMISSED``. That review payload
+    thereafter shows ``state="DISMISSED"`` and must not be treated as
+    still-valid approval.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("DISMISSED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_second_reviewer_changes_requested_blocks_first_reviewers_approval():
+    """Cross-reviewer supersede: any active CHANGES_REQUESTED blocks approval.
+
+    Reviewer X approves at head H, then reviewer Y requests changes at
+    the same head H. GitHub branch protection would block this merge;
+    the board must reflect the same verdict.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("CHANGES_REQUESTED", "H", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_reviewer_reapproves_after_earlier_changes_requested_at_same_head():
+    """The freshest verdict wins: CHANGES_REQUESTED then APPROVED on same head → True.
+
+    This is the recovery path: reviewer requests changes, implementer
+    pushes a fix (which normally moves head_sha, but for defensiveness
+    we pin the same-head recovery too), reviewer re-approves. The
+    latest APPROVED must supersede the earlier CHANGES_REQUESTED.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "H", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
+async def test_commented_review_does_not_displace_prior_approval():
+    """COMMENTED is a non-verdict and must not overwrite the reviewer's APPROVED.
+
+    GitHub's ``COMMENTED`` state means the reviewer left inline
+    comments without taking a stance. It does not reset an earlier
+    APPROVED (or an earlier CHANGES_REQUESTED, for that matter).
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("COMMENTED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 1
 
 
 @pytest.mark.asyncio
