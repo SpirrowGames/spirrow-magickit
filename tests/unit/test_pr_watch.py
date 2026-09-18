@@ -397,7 +397,7 @@ def test_set_and_get_ledger_pointer_roundtrip():
     state = PrWatchState()
     key = ("O", "R", 1)
     assert get_ledger_pointer(state, key) is None
-    set_ledger_pointer(state, key, "proj", "T-1")
+    set_ledger_pointer(state, key, "proj", "T-1", "U")
     assert get_ledger_pointer(state, key) == ("proj", "T-1")
 
 
@@ -894,8 +894,8 @@ def test_prune_review_cache_drops_non_live_entries():
 def test_prune_ledger_pointers_drops_non_live_entries():
     """Symmetric with review cache: closed PRs cannot reuse pointers."""
     state = PrWatchState()
-    set_ledger_pointer(state, ("O", "R", 1), "proj", "T-1")
-    set_ledger_pointer(state, ("O", "R", 2), "proj", "T-2")
+    set_ledger_pointer(state, ("O", "R", 1), "proj", "T-1", "U")
+    set_ledger_pointer(state, ("O", "R", 2), "proj", "T-2", "U")
     prune_ledger_pointers(state, live_keys={("O", "R", 1)})
     assert set(state.ledger_pointers) == {("O", "R", 1)}
 
@@ -990,6 +990,35 @@ async def test_deep_pagination_missing_total_does_not_declare_exhaustion():
     assert outcomes[("O", "R", 1)].bounded_ambiguity is True
     # And the loop actually iterated through max_pages (2 calls).
     assert len(calls) == 2
+
+
+def test_ledger_pointer_invalidated_on_pr_updated_at_bump():
+    """PR-gate BLOCKING (fa7a7d3 §1): stale pointer must be ignored when
+    the PR's updated_at bumps — a new commit may have created a
+    replacement ledger the pointer no longer names."""
+    state = PrWatchState()
+    set_ledger_pointer(state, ("O", "R", 1), "proj", "T-old", "U1")
+    # Same updated_at → hit.
+    assert get_ledger_pointer(
+        state, ("O", "R", 1), pr_updated_at="U1",
+    ) == ("proj", "T-old")
+    # Bumped updated_at → miss (pointer ignored, caller falls to Pass B).
+    assert get_ledger_pointer(
+        state, ("O", "R", 1), pr_updated_at="U2",
+    ) is None
+    # No updated_at gate → raw lookup still returns it.
+    assert get_ledger_pointer(state, ("O", "R", 1)) == ("proj", "T-old")
+
+
+def test_ledger_owner_and_tag_constants_come_from_pr_gate_ledger():
+    """PR-gate ADVISORY (fa7a7d3 §2): the module must not maintain its
+    own copies of the driver-side owner / tag constants."""
+    from magickit.core.pr_watch import _LEDGER_OWNER, _LEDGER_TAG
+    from magickit.mcp.pr_gate_ledger import (
+        PR_GATE_THREAD_OWNER, PR_GATE_THREAD_TAG,
+    )
+    assert _LEDGER_OWNER is PR_GATE_THREAD_OWNER
+    assert _LEDGER_TAG is PR_GATE_THREAD_TAG
 
 
 def test_prune_functions_are_idempotent_on_empty_state():

@@ -148,12 +148,15 @@ _MAX_CLOSED_LEDGER_PAGES = int(os.environ.get("MAGICKIT_CLOSED_LEDGER_PAGES", "5
 #: it through every call site.
 _LIST_THREADS_PAGE_LIMIT = 100
 
-#: Thread-owner filter for PR-gate ledger reads. Mirrors the driver's
-#: ``owner="orchestrator"`` (see :mod:`magickit.mcp.pr_gate_ledger`).
-_LEDGER_OWNER = "orchestrator"
-
-#: Tag the PR-review driver stamps on the threads it opens.
-_LEDGER_TAG = "pr-review"
+# Ledger owner/tag constants live in :mod:`magickit.mcp.pr_gate_ledger`
+# as the single source of truth (:data:`PR_GATE_THREAD_OWNER` / :data:
+# `PR_GATE_THREAD_TAG`). Imported at module level here so any driver-
+# side rename fails loudly at import rather than diverging silently
+# (PR-gate ADVISORY at fa7a7d3 §2).
+from magickit.mcp.pr_gate_ledger import (  # noqa: E402 - post-const import ok
+    PR_GATE_THREAD_OWNER as _LEDGER_OWNER,
+    PR_GATE_THREAD_TAG as _LEDGER_TAG,
+)
 
 
 @dataclass(frozen=True)
@@ -299,11 +302,15 @@ class PrWatchState:
     cache: dict[LedgerKey, _CacheEntry] = field(default_factory=dict)
     #: Rolling window of API call timestamps (monotonic seconds).
     call_log: list[float] = field(default_factory=list)
-    #: Positive ledger cache: ``LedgerKey → (project, thread_id)``. Skips
-    #: the list_threads round trip on a subsequent poll when we already
-    #: know which thread the PR's ledger lives on. Invalidated implicitly
-    #: on ``get_thread`` failure (fall through to Pass B).
-    ledger_pointers: dict[LedgerKey, tuple[str, str]] = field(
+    #: Positive ledger cache: ``LedgerKey → (project, thread_id,
+    #: pr_updated_at)``. Skips the list_threads round trip on a
+    #: subsequent poll when we already know which thread the PR's
+    #: ledger lives on. Invalidated on (a) ``get_thread`` failure and
+    #: (b) ``pr_updated_at`` mismatch — a new commit closes the old
+    #: ledger and opens a new one, and a stale pointer would keep
+    #: linking the operator to the superseded thread (PR-gate BLOCKING
+    #: at fa7a7d3 §1).
+    ledger_pointers: dict[LedgerKey, tuple[str, str, str]] = field(
         default_factory=dict
     )
     #: Negative ledger cache: ``LedgerKey → NegativeLedgerEntry``. Answers
@@ -738,17 +745,37 @@ def pr_key(snapshot: PrSnapshot) -> LedgerKey:
 
 
 def get_ledger_pointer(
-    state: PrWatchState, key: LedgerKey
+    state: PrWatchState,
+    key: LedgerKey,
+    *,
+    pr_updated_at: str | None = None,
 ) -> tuple[str, str] | None:
-    """Read the positive ledger cache. ``None`` = "no cached pointer"."""
-    return state.ledger_pointers.get(key)
+    """Read the positive ledger cache. ``None`` = miss or stale.
+
+    When ``pr_updated_at`` is passed and does not match the value the
+    pointer was written under, the entry is treated as a miss (the PR
+    has had a GitHub-side event since; a new commit may have created
+    a fresh ledger thread that Pass A/B must now discover). Callers
+    that only want raw lookup can omit ``pr_updated_at``.
+    """
+    entry = state.ledger_pointers.get(key)
+    if entry is None:
+        return None
+    project, thread_id, cached_updated_at = entry
+    if pr_updated_at is not None and cached_updated_at != pr_updated_at:
+        return None
+    return (project, thread_id)
 
 
 def set_ledger_pointer(
-    state: PrWatchState, key: LedgerKey, project: str, thread_id: str
+    state: PrWatchState,
+    key: LedgerKey,
+    project: str,
+    thread_id: str,
+    pr_updated_at: str,
 ) -> None:
-    """Record a ``(project, thread_id)`` pointer for later polls to reuse."""
-    state.ledger_pointers[key] = (project, thread_id)
+    """Record a ``(project, thread_id, pr_updated_at)`` pointer."""
+    state.ledger_pointers[key] = (project, thread_id, pr_updated_at)
 
 
 def get_negative_ledger(

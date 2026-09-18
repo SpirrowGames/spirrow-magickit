@@ -977,7 +977,8 @@ async def _collect_merges(
             project, thread = open_match
             matched_ledger[key] = (project, thread)
             pr_watch.set_ledger_pointer(
-                watch_state, key, project, str(thread.get("thread_id", ""))
+                watch_state, key, project,
+                str(thread.get("thread_id", "")), snapshot.updated_at,
             )
             # An older negative entry (from a truncated Pass B on a prior
             # cycle) would otherwise emit a phantom notice on this
@@ -985,8 +986,13 @@ async def _collect_merges(
             # PR carries no truncation warning".
             pr_watch.clear_negative_ledger(watch_state, key)
             continue
-        # (b) Positive cache: last cycle's pointer.
-        ptr = pr_watch.get_ledger_pointer(watch_state, key)
+        # (b) Positive cache: last cycle's pointer. Gated by
+        # ``pr_updated_at`` — a bump (e.g. new commit that opens a
+        # replacement ledger) invalidates the pointer so Pass A/B
+        # re-runs (PR-gate BLOCKING at fa7a7d3 §1).
+        ptr = pr_watch.get_ledger_pointer(
+            watch_state, key, pr_updated_at=snapshot.updated_at,
+        )
         if ptr is not None:
             proj_cached, thread_id_cached = ptr
             try:
@@ -1054,7 +1060,8 @@ async def _collect_merges(
             if found is not None:
                 matched_ledger[key] = (project, found)
                 pr_watch.set_ledger_pointer(
-                    watch_state, key, project, str(found.get("thread_id", ""))
+                    watch_state, key, project,
+                    str(found.get("thread_id", "")), pr.updated_at,
                 )
                 pr_watch.clear_negative_ledger(watch_state, key)
             else:
@@ -1099,6 +1106,7 @@ async def _collect_merges(
                         key,
                         proj_found,
                         str(thread_dict.get("thread_id", "")),
+                        pr.updated_at,
                     )
                     pr_watch.clear_negative_ledger(watch_state, key)
                 elif outcome.definitive_absence:

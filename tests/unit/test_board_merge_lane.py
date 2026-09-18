@@ -317,9 +317,13 @@ async def test_positive_cache_skips_list_threads_on_next_poll(
         "tags": ["pr-review"],
     }
 
-    # Pre-populate positive cache.
+    # Pre-populate positive cache with the same updated_at the
+    # snapshot carries (else the pointer is invalidated on read).
     state = pr_watch.get_state()
-    pr_watch.set_ledger_pointer(state, ("O", "R", 1), "r", "T-cached")
+    pr_watch.set_ledger_pointer(
+        state, ("O", "R", 1), "r", "T-cached",
+        "2026-09-18T09:00:00Z",
+    )
 
     adapter = _Adapter(
         get_thread_by_id={
@@ -730,6 +734,61 @@ async def test_substring_project_name_does_not_shadow_unrelated_repo(
 
 
 @pytest.mark.asyncio
+async def test_positive_cache_invalidated_by_updated_at_bump_rediscovers_ledger(
+    temp_db_path, monkeypatch
+):
+    """PR-gate BLOCKING (fa7a7d3 §1): after a new commit, the stale
+    positive-cache pointer must NOT hide the newly-created ledger.
+
+    Scenario: prior cycle cached (proj, T-old) at updated_at=U1. New
+    commit bumps updated_at to U2, and the driver replaces the ledger
+    with a fresh closed thread T-new. Because U2 != U1, the pointer
+    is skipped; Pass B fires and discovers T-new.
+    """
+    state = pr_watch.get_state()
+    # Seed pointer to the OLD closed thread. Key uses owner/repo as
+    # the snapshot carries them (PrSnapshot.repo="R" preserves case).
+    pr_watch.set_ledger_pointer(
+        state, ("O", "R", 1), "r", "T-old", "U1",
+    )
+    _patch_pr_watch(
+        monkeypatch,
+        [_snapshot(number=1, updated_at="U2")],  # updated_at bumped
+    )
+    # Adapter: no open ledger (Pass A empty), Pass B finds NEW thread.
+    new_closed = {
+        "thread_id": "T-new",
+        "title": "PR review for O/R#1",
+        "status": "resolved",
+        "owner": "orchestrator",
+        "tags": ["pr-review"],
+        "last_activity_at": "2026-09-18T09:00:00Z",
+    }
+    adapter = _Adapter(
+        threads_by_call={
+            ("r", ("resolved", "superseded")): {
+                "items": [new_closed], "total": 1,
+            },
+        },
+        # get_thread on the OLD pointer would return the stale thread —
+        # a bug would use this. With the fix, the pointer is skipped
+        # so get_thread is never called for T-old.
+        get_thread_by_id={"T-old": {"thread": {
+            "thread_id": "T-old", "title": "PR review for O/R#1",
+            "status": "resolved", "owner": "orchestrator",
+            "tags": ["pr-review"],
+        }, "messages": []}},
+    )
+    context = await _collect(adapter, _settings(temp_db_path))
+    cards = _merge_cards(context)
+    assert len(cards) == 1
+    # Must have discovered the NEW thread, not linked to the stale one.
+    assert "T-new" in cards[0].href, f"card links stale ledger: {cards[0].href}"
+    # Positive cache was refreshed with the new (project, thread_id, U2).
+    assert state.ledger_pointers[("O", "R", 1)] == ("r", "T-new", "U2")
+
+
+@pytest.mark.asyncio
 async def test_transient_repo_failure_preserves_that_repos_caches(
     temp_db_path, monkeypatch
 ):
@@ -745,7 +804,7 @@ async def test_transient_repo_failure_preserves_that_repos_caches(
         approving_review_id=1, fetched_at=0.0,
     )
     pr_watch.set_ledger_pointer(
-        state, ("O", "FAILING", 42), "proj", "T-42",
+        state, ("O", "FAILING", 42), "proj", "T-42", "U",
     )
     # Snapshot: only the healthy repo returned data; FAILING is absent.
     # failed_repos names the outage so the pruner spares its entries.
@@ -774,7 +833,7 @@ async def test_review_cache_and_pointers_are_pruned_for_non_live_prs(
         updated_at="U", reviews=[], artifact_approved=False,
         approving_review_id=None, fetched_at=0.0,
     )
-    pr_watch.set_ledger_pointer(state, ("O", "R", 99), "proj", "T-99")
+    pr_watch.set_ledger_pointer(state, ("O", "R", 99), "proj", "T-99", "U")
 
     _patch_pr_watch(monkeypatch, [_snapshot(number=1)])
     await _collect(_Adapter(), _settings(temp_db_path))
