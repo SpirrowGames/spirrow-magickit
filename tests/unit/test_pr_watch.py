@@ -290,6 +290,138 @@ async def test_approve_at_earlier_head_does_not_count():
 
 
 @pytest.mark.asyncio
+async def test_changes_requested_on_earlier_commit_still_blocks_approval_at_head():
+    """PR-gate objection at 5cec07c §1 — CR is not scoped to a single commit.
+
+    GitHub branch protection keeps a CHANGES_REQUESTED review active across
+    new commits until it is explicitly dismissed. The exact naysayer
+    scenario: reviewer X requests changes on an older commit, reviewer Y
+    approves on the new head. GitHub still blocks the merge; the board
+    must reflect that block, not falsely advertise the PR as approved.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+    assert snapshots[0].approving_review_id is None
+
+
+@pytest.mark.asyncio
+async def test_changes_requested_on_earlier_commit_blocks_even_without_any_approval():
+    """Standalone: a lone CR on an old commit still blocks (no approvals seen).
+
+    A dangling CHANGES_REQUESTED that was never dismissed keeps the PR
+    blocked regardless of how many commits have landed since. This pins
+    the branch-protection semantic independent of the multi-reviewer
+    approval path.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "head-old", review_id=1, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_reviewer_can_withdraw_earlier_cr_by_reapproving_at_new_head():
+    """Recovery path: same reviewer's newer APPROVED @ head supersedes their earlier CR @ old.
+
+    Reviewer X requested changes on the old commit, then re-approved on
+    the new head. Per-reviewer latest wins → X is no longer blocking,
+    and the APPROVED @ head_sha counts as approval.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
+async def test_dismissed_earlier_changes_requested_stops_blocking():
+    """A dismissed CR (state field flipped to DISMISSED) no longer blocks.
+
+    GitHub's dismissal endpoint updates the review's state field in place,
+    so what was a CHANGES_REQUESTED review returns as state=DISMISSED on
+    subsequent /reviews calls. That review must not keep blocking the PR.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                # The old CR was dismissed; its state field is now DISMISSED.
+                _review("DISMISSED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_approve_plus_head_approve_uses_head_approve_id():
+    """Multiple reviewers: only the reviewer whose APPROVED is @ head counts.
+
+    Reviewer X approved an older commit (stale — does not count). Reviewer
+    Y approved the current head. The board must return True with Y's
+    review id, not X's.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
 async def test_approved_snapshot_is_sticky_across_polls_without_bump():
     """No ``updated_at`` bump → cache hit → no ``/reviews`` refetch."""
     state = PrWatchState()
