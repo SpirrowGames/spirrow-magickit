@@ -100,10 +100,16 @@ from fastapi.responses import HTMLResponse
 
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.config import Settings, get_settings
+from magickit.core import pr_watch
 from magickit.core.board_lanes import DEFAULT_LANE, LANES, BoardLaneStore, SeenItem
 from magickit.core.decision_materials import DecisionMaterialStore
+from magickit.core.pr_watch import PrSnapshot
 from magickit.deploy import records
-from magickit.mcp.pr_gate_ledger import parse_pr_ref
+from magickit.mcp.pr_gate_ledger import (
+    PR_GATE_THREAD_OWNER,
+    PR_GATE_THREAD_TAG,
+    parse_pr_ref,
+)
 from magickit.utils.logging import get_logger
 from magickit.web import decisions, identity, ops
 from magickit.web.deps import parse_ts, templates
@@ -130,11 +136,14 @@ KIND_LABELS = {
     "decision": "判断",
     "deploy": "承認",
     "loop": "ループ",
+    "merge": "マージ",
 }
 
 #: 列の中の並び。deploy を先頭に固定するのは、承認待ちだけが「本番が
 #: 止まって待っている」種類だから。同種の中は待たせている順 (古い順)。
-_KIND_ORDER = {"deploy": 0, "decision": 1, "loop": 2}
+#: マージ は判断より下: 判断は「今の 1 手」で、マージは「あと 1 手で
+#: 終わる状態が溜まっているかどうか」という別の質量。
+_KIND_ORDER = {"deploy": 0, "decision": 1, "merge": 2, "loop": 3}
 
 #: 判断カードに載せる問いの長さ。稼働状況ページの digest と同じ考え方で、
 #: 全文は ``title`` 属性に入れる。
@@ -619,6 +628,570 @@ async def _collect_loops(
         )
 
 
+# --- マージ (merge) — the 4-state per-PR lane ------------------------------
+
+
+#: The 3 board states for a live open PR (Bohr msg-843 Option xxi).
+#: The 4-state design collapsed to 3 once the audit found that 「Tier-C
+#: 決着」 was structurally indistinguishable from 「gate 進行中」: both
+#: mean "a ledger exists but the artifact does not", and no metadata
+#: signal reliably tells "the human already decided but did not click
+#: merge" apart from "the naysayer is still running". The unified
+#: ``LEDGER_ATTACHED`` state names that truthfully and primary-links to
+#: the chatroom thread so the human answers in one click.
+MERGE_STATE_APPROVED_ARTIFACT = "gate_approved_artifact"
+MERGE_STATE_LEDGER_ATTACHED = "gate_ledger_attached"
+MERGE_STATE_UNREQUESTED = "gate_unrequested"
+
+#: Human-facing subtitle for each state. Kept as a mapping (not
+#: constants beside the identifiers) so the code path that renders a
+#: card cannot forget any of them — a missing key would fall through to
+#: the state identifier itself, which is visibly wrong (not silently OK).
+_MERGE_STATE_SUBTITLE = {
+    MERGE_STATE_APPROVED_ARTIFACT: "gate 済（次: merge クリック）",
+    MERGE_STATE_LEDGER_ATTACHED: "gate スレッドを確認してください",
+    MERGE_STATE_UNREQUESTED: "gate 未依頼",
+}
+
+
+def _parse_repo_allowlist(entries: list[str]) -> list[tuple[str, str]]:
+    """Parse ``["owner/repo", ...]`` into ``[(owner, repo), ...]``.
+
+    Malformed entries are dropped with a warning rather than raising —
+    the board renders whatever repos it *can* parse, so a typo in one
+    line does not blank every other repo's lane.
+    """
+    parsed: list[tuple[str, str]] = []
+    for raw in entries:
+        text = str(raw or "").strip()
+        if not text or "/" not in text:
+            logger.warning("board: skipping malformed repo allowlist entry", entry=raw)
+            continue
+        owner, _, repo = text.partition("/")
+        if not owner or not repo:
+            logger.warning("board: skipping malformed repo allowlist entry", entry=raw)
+            continue
+        parsed.append((owner, repo))
+    return parsed
+
+
+def _pr_snapshot_key(snapshot: PrSnapshot) -> str:
+    return f"merge:{snapshot.owner}/{snapshot.repo}#{snapshot.number}"
+
+
+def _ledger_thread_for_pr(
+    threads_by_project: dict[str, list[dict[str, Any]]],
+    snapshot: PrSnapshot,
+) -> tuple[str, dict[str, Any]] | None:
+    """Find the PR-gate ledger thread whose title names ``snapshot``.
+
+    The driver opens PR-review threads under ``owner=orchestrator`` and
+    tags them ``pr-review`` (:mod:`magickit.mcp.pr_gate_ledger`). Titles
+    carry the PR reference (``owner/repo#N`` or the URL form), which
+    :func:`~magickit.mcp.pr_gate_ledger.parse_pr_ref` can extract.
+
+    Returns ``(project, thread)`` for the newest matching thread. None
+    means "no such ledger thread exists" — the ``未依頼`` state.
+    """
+    match: tuple[str, dict[str, Any]] | None = None
+    for project, threads in threads_by_project.items():
+        for thread in threads:
+            if not isinstance(thread, dict):
+                continue
+            tags = thread.get("tags") or []
+            if (
+                thread.get("owner") != PR_GATE_THREAD_OWNER
+                or not isinstance(tags, list)
+                or PR_GATE_THREAD_TAG not in tags
+            ):
+                continue
+            ref = parse_pr_ref(str(thread.get("title") or ""))
+            if ref is None:
+                continue
+            if (
+                ref.owner == snapshot.owner
+                and ref.repo == snapshot.repo
+                and ref.number == snapshot.number
+            ):
+                # Newest wins: threads are typically listed by activity
+                # descending, but do not rely on that ordering — take the
+                # one with the newest last_msg_id we can parse.
+                if match is None:
+                    match = (project, thread)
+                else:
+                    if str(thread.get("last_msg_id") or "") > str(
+                        match[1].get("last_msg_id") or ""
+                    ):
+                        match = (project, thread)
+    return match
+
+
+def _classify_merge_state(
+    snapshot: PrSnapshot,
+    ledger: tuple[str, dict[str, Any]] | None,
+) -> tuple[str, tuple[str, dict[str, Any]] | None]:
+    """Return the (state, ledger-match) for one PR snapshot.
+
+    Three states, checked in precedence order:
+
+    1. **APPROVED artifact @ current head** — the GitHub side has an
+       APPROVE the driver would honour. Renders as 「gate 済」; primary
+       link is the GitHub PR (next click is the merge button). Ledger
+       info is kept so the card can still link to the chatroom thread
+       as a secondary — the human may want to read it.
+    2. **Ledger thread exists** (open OR closed) — the driver ran at
+       least once. Renders as 「gate スレッドを確認してください」;
+       primary link is the chatroom thread. Closed ledgers are treated
+       the same as open ones because *the PR is still open*: any
+       resolution / supersession the naysayer thread underwent needs
+       human confirmation to become an authorization.
+    3. **Neither of the above** — the silent-failure state msg-253 §1
+       measured. Renders as 「gate 未依頼」. Rate-capped snapshots with
+       no ledger stay in this bucket by design: the notice string
+       elsewhere in the board carries the "we could not read reviews"
+       ambiguity, so we do not muddy the classification.
+    """
+    if _has_approved_review_at_head(snapshot):
+        return MERGE_STATE_APPROVED_ARTIFACT, ledger
+
+    if ledger is not None:
+        return MERGE_STATE_LEDGER_ATTACHED, ledger
+
+    return MERGE_STATE_UNREQUESTED, None
+
+
+def _has_approved_review_at_head(snapshot: PrSnapshot) -> bool:
+    """Predicate isolating the "gate approved" check.
+
+    Kept as its own function so a rename or a policy tweak (e.g. two
+    approvers) touches only this line — the state classifier above
+    reads a boolean and dispatches. Currently a straight pass-through of
+    :attr:`PrSnapshot.artifact_approved`, which was computed against
+    the current head SHA inside :mod:`magickit.core.pr_watch`.
+    """
+    return snapshot.artifact_approved
+
+
+def _merge_card_from(
+    snapshot: PrSnapshot,
+    state: str,
+    ledger: tuple[str, dict[str, Any]] | None,
+    *,
+    now: datetime,
+) -> Card:
+    """Build one マージ card. Primary link depends on state.
+
+    - ``APPROVED_ARTIFACT`` / ``UNREQUESTED`` — title → GitHub PR (next
+      click is either the merge button or an action on GitHub).
+    - ``LEDGER_ATTACHED`` — title → chatroom ledger thread (next click
+      is 「what does this thread say and did I already decide?」, which
+      lives in chatroom prose, not on GitHub).
+    """
+    subtitle = _MERGE_STATE_SUBTITLE.get(state, state)
+    if snapshot.rate_capped and state != MERGE_STATE_APPROVED_ARTIFACT:
+        subtitle = f"{subtitle} · rate-cap でこの周期は再取得を見送り"
+
+    # Secondary link: the other surface. Both are always useful, but the
+    # primary is the one the human should click first for that state.
+    chatroom_link: CardLink | None = None
+    if ledger is not None:
+        project, thread = ledger
+        thread_id = str(thread.get("thread_id") or "")
+        thread_status = str(thread.get("status") or "")
+        status_hint = ""
+        if thread_status in ("resolved", "superseded"):
+            status_hint = f" ({thread_status})"
+        chatroom_link = CardLink(
+            href=f"/ui/projects/{project}/threads/{thread_id}",
+            label=f"chatroom スレッド{status_hint}",
+            title=f"{project} / {thread_id}",
+        )
+
+    github_link = CardLink(
+        href=snapshot.html_url,
+        label=f"GitHub PR #{snapshot.number}",
+        title=snapshot.slug,
+        external=True,
+    )
+
+    if state == MERGE_STATE_LEDGER_ATTACHED and chatroom_link is not None:
+        title_href = chatroom_link.href
+        secondary_links = [github_link]
+    else:
+        title_href = snapshot.html_url
+        secondary_links = [link for link in [chatroom_link] if link is not None]
+
+    return Card(
+        key=_pr_snapshot_key(snapshot),
+        kind="merge",
+        title=snapshot.title,
+        href=title_href,
+        # マージ カードの 「since」 は PR の updated_at を使う。approved 状態
+        # だと 「gate が通ってから何日放置しているか」に、ledger 状態だと
+        # 「naysayer が最後に喋ってから」に相当する — どちらも 「僕が動か
+        # ないと片付かない期間」の目安になる。
+        since=parse_ts(snapshot.updated_at),
+        note=snapshot.title,
+        note_full=snapshot.title,
+        project=snapshot.owner + "/" + snapshot.repo,
+        detail=subtitle,
+        links=secondary_links,
+        # fingerprint に state を混ぜる: approved のカードを 「対応中」 に
+        # 置いたあと、誰かが RC を submit したら state が変わる ∴ 「更新
+        # あり」を出したい。
+        fingerprint=f"{state}:{snapshot.head_sha}:{snapshot.updated_at}",
+    )
+
+
+#: Thread status values that count as 「open」 for the PR-gate ledger's
+#: Pass A. Kept in step with :data:`magickit.web.decisions.
+#: _THREAD_STATUS_OPEN` — a divergence would make the board scan a
+#: different set of statuses than the judgement page, and a card would
+#: show one state on the board and a different verdict on click.
+_LEDGER_OPEN_STATUSES = ("active", "awaiting_reply", "parked")
+
+
+async def _collect_merges(
+    adapter: ChatroomAdapter,
+    live: _Live,
+    *,
+    settings: Settings,
+    now: datetime,
+) -> None:
+    """Fetch open PRs from the allowlist and add one マージ card per PR.
+
+    Silence on any single failure: an unreachable GitHub PAT drops the
+    whole lane with a notice (rather than blanking the board) and each
+    per-PR failure logs and continues.
+
+    The ledger side runs in two passes plus bounded deep pagination:
+
+    - **Pass A** (open ledgers) — one ``list_threads`` per unseen project
+      with ``status_filter=open``. This is the cheap, common-case path;
+      most live ledgers are open.
+    - **Positive cache** — ``ledger_pointers`` remembers where a match
+      was found last cycle; a hit here skips both Pass A and Pass B on
+      subsequent polls.
+    - **Negative cache** — ``negative_ledger_cache`` remembers "we
+      looked and did not find" so a truly-未依頼 PR does not re-run
+      Pass B every 5 minutes. TTL + updated_at both gate the entry.
+    - **Pass B** (closed ledgers, page 1) — for PRs still unresolved,
+      one ``list_threads`` per project with ``status_filter=closed``.
+    - **Deep pagination** — for PRs older than page 1's oldest thread
+      (plus a clock-skew margin), walk pages 2..6 until either match /
+      pool exhausted / max-pages. Non-hits become either
+      ``definitive_absence`` (silent) or ``bounded_ambiguity`` (notice).
+    """
+    repos = _parse_repo_allowlist(settings.board_pr_repo_allowlist)
+    if not repos:
+        return
+
+    try:
+        snapshots, watch_notices, failed_repos = await pr_watch.collect_pr_snapshots(
+            repos, pr_watch.get_state()
+        )
+    except Exception as exc:  # noqa: BLE001 - 板全体を殺さない
+        logger.warning("board: pr_watch failed", err=str(exc))
+        live.notices.append(f"マージ待ち PR が読めません ({exc})")
+        return
+
+    live.notices.extend(watch_notices)
+    if not snapshots:
+        return
+
+    watch_state = pr_watch.get_state()
+
+    # Group ledger threads by project once; PR-review threads live under
+    # a small set of projects and we look each PR up in the same table.
+    threads_by_project: dict[str, list[dict[str, Any]]] = {}
+    for (project, _thread_id), thread in live.threads.items():
+        threads_by_project.setdefault(project, []).append(thread)
+
+    already_scanned = set(threads_by_project)
+
+    # PR-review threads are opened per repository — the project name
+    # follows the ledger driver's rule. We ask Conclair to filter by
+    # owner + tag so we don't have to know the exact naming rule.
+    #
+    # Obj 1 (msg-856): the fallback project name is `<repo>` — the
+    # `spirrow-` prefix was doubling up ("spirrow-spirrow-magickit") for
+    # repos whose GitHub owner already begins with `spirrow-`. Match the
+    # repo name as-is; the underlying Conclair project map handles the
+    # canonicalization.
+    # Match by exact project name — the fallback rule is
+    # "project name == repo.lower()", so the compare must be equality,
+    # not substring. Substring matched "core" against "hardcore" and
+    # skipped Pass A entirely, letting an open ledger fall through to
+    # 「gate 未依頼」 (PR-gate objection at 26d0634 §1).
+    scanned_lower = {p.lower() for p in already_scanned}
+    unseen_projects: set[str] = set()
+    for snapshot in snapshots:
+        if snapshot.repo.lower() not in scanned_lower:
+            unseen_projects.add(snapshot.repo.lower())
+
+    # Projects whose ledger side we could not read this cycle. Every
+    # PR grouped under one of these must render a degradation notice
+    # rather than silently becoming 「gate 未依頼」 — the PR-gate
+    # objection at 2c92dd9 was: without this, a Conclair outage looks
+    # indistinguishable from "the human forgot to request a gate".
+    ledger_unread_projects: set[str] = set()
+
+    # Pass A: fetch OPEN ledger threads only for unseen projects. Any
+    # thread the decisions collector already listed is reused — that
+    # code path pulls every open thread for the projects that have
+    # materials. Restricting Pass A to unseen projects avoids a round
+    # trip for those already-covered ones.
+    for project in unseen_projects:
+        try:
+            result = await adapter.list_threads(
+                project=project,
+                owner=PR_GATE_THREAD_OWNER,
+                status_filter=list(_LEDGER_OPEN_STATUSES),
+                limit=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "board: Pass A list_threads failed",
+                project=project, err=str(exc),
+            )
+            ledger_unread_projects.add(project)
+            continue
+        if ops._is_error(result):
+            ledger_unread_projects.add(project)
+            continue
+        items = result.get("items") or []
+        if not isinstance(items, list):
+            continue
+        threads_by_project.setdefault(project, []).extend(
+            [t for t in items if isinstance(t, dict)]
+        )
+
+    matched_ledger: dict[pr_watch.LedgerKey, tuple[str, dict[str, Any]]] = {}
+    unmatched_by_project: dict[str, list[PrSnapshot]] = {}
+
+    for snapshot in snapshots:
+        key = pr_watch.pr_key(snapshot)
+        # (a) Try open-thread match via Pass A / decisions collector.
+        open_match = _ledger_thread_for_pr(threads_by_project, snapshot)
+        if open_match is not None:
+            project, thread = open_match
+            matched_ledger[key] = (project, thread)
+            pr_watch.set_ledger_pointer(
+                watch_state, key, project,
+                str(thread.get("thread_id", "")), snapshot.updated_at,
+            )
+            # An older negative entry (from a truncated Pass B on a prior
+            # cycle) would otherwise emit a phantom notice on this
+            # rendered card. Clearing here is the invariant "a matched
+            # PR carries no truncation warning".
+            pr_watch.clear_negative_ledger(watch_state, key)
+            continue
+        # (b) Positive cache: last cycle's pointer. Gated by
+        # ``pr_updated_at`` — a bump (e.g. new commit that opens a
+        # replacement ledger) invalidates the pointer so Pass A/B
+        # re-runs (PR-gate BLOCKING at fa7a7d3 §1).
+        ptr = pr_watch.get_ledger_pointer(
+            watch_state, key, pr_updated_at=snapshot.updated_at,
+        )
+        if ptr is not None:
+            proj_cached, thread_id_cached = ptr
+            try:
+                got = await adapter.get_thread(
+                    project=proj_cached, thread_id=thread_id_cached
+                )
+            except Exception:  # noqa: BLE001
+                got = None
+            thread_from_cache: dict[str, Any] | None = None
+            if isinstance(got, dict) and not ops._is_error(got):
+                candidate = got.get("thread")
+                if isinstance(candidate, dict):
+                    thread_from_cache = candidate
+            if thread_from_cache is not None:
+                matched_ledger[key] = (proj_cached, thread_from_cache)
+                pr_watch.clear_negative_ledger(watch_state, key)
+                continue
+            # Pointer stale (thread deleted / renamed / adapter error).
+            # Fall through to Pass B; the pointer is overwritten if we
+            # find a fresh match, or left as-is if we do not (a future
+            # cycle will retry).
+        # (c) Negative cache: skip Pass B if a fresh entry says "no".
+        neg = pr_watch.get_negative_ledger(
+            watch_state, key, now, snapshot.updated_at
+        )
+        if neg is not None:
+            continue
+        # (d) Needs Pass B: group by guessed project (Obj 1).
+        project_guess = snapshot.repo.lower()
+        unmatched_by_project.setdefault(project_guess, []).append(snapshot)
+
+    # Pass B + deep pagination per-project.
+    for project, prs in unmatched_by_project.items():
+        try:
+            result = await adapter.list_threads(
+                project=project,
+                owner=PR_GATE_THREAD_OWNER,
+                status_filter=["resolved", "superseded"],
+                limit=pr_watch._LIST_THREADS_PAGE_LIMIT,
+                offset=0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Cannot tell truncation from absence; skipping without a
+            # notice would falsely classify these PRs as 「未依頼」.
+            # Register the project as unreadable and let the notice
+            # loop below tell the operator the lane is degraded.
+            logger.warning(
+                "board: Pass B list_threads failed",
+                project=project, err=str(exc),
+            )
+            ledger_unread_projects.add(project)
+            continue
+        if ops._is_error(result):
+            ledger_unread_projects.add(project)
+            continue
+        items = result.get("items") or []
+        if not isinstance(items, list):
+            items = []
+
+        # Match on page 1.
+        still_unmatched: list[PrSnapshot] = []
+        for pr in prs:
+            key = pr_watch.pr_key(pr)
+            found = pr_watch.find_ledger_in_page(pr, items)
+            if found is not None:
+                matched_ledger[key] = (project, found)
+                pr_watch.set_ledger_pointer(
+                    watch_state, key, project,
+                    str(found.get("thread_id", "")), pr.updated_at,
+                )
+                pr_watch.clear_negative_ledger(watch_state, key)
+            else:
+                still_unmatched.append(pr)
+
+        # Chronological fence on page 1.
+        classifications = pr_watch.compute_was_truncated_per_pr(
+            still_unmatched, result
+        )
+        needs_deep_scan: list[PrSnapshot] = []
+        for pr in still_unmatched:
+            key = pr_watch.pr_key(pr)
+            was_ambig = classifications.get(key, True)
+            if not was_ambig:
+                # Definitive absence proved on page 1; silent 未依頼.
+                pr_watch.set_negative_ledger(
+                    watch_state,
+                    key,
+                    pr.updated_at,
+                    now,
+                    was_truncated=False,
+                )
+            else:
+                needs_deep_scan.append(pr)
+
+        # Deep pagination for horizon-failing PRs.
+        if needs_deep_scan:
+            outcomes = await pr_watch.resolve_old_prs_by_deep_pagination(
+                needs_deep_scan, project, adapter.list_threads,
+            )
+            for pr in needs_deep_scan:
+                key = pr_watch.pr_key(pr)
+                outcome = outcomes.get(
+                    key,
+                    pr_watch.DeepPaginationOutcome(bounded_ambiguity=True),
+                )
+                if outcome.found is not None:
+                    proj_found, thread_dict = outcome.found
+                    matched_ledger[key] = (proj_found, thread_dict)
+                    pr_watch.set_ledger_pointer(
+                        watch_state,
+                        key,
+                        proj_found,
+                        str(thread_dict.get("thread_id", "")),
+                        pr.updated_at,
+                    )
+                    pr_watch.clear_negative_ledger(watch_state, key)
+                elif outcome.definitive_absence:
+                    pr_watch.set_negative_ledger(
+                        watch_state,
+                        key,
+                        pr.updated_at,
+                        now,
+                        was_truncated=False,
+                    )
+                else:  # bounded_ambiguity
+                    pr_watch.set_negative_ledger(
+                        watch_state,
+                        key,
+                        pr.updated_at,
+                        now,
+                        was_truncated=True,
+                    )
+
+    # Emit a Conclair-degradation notice per unreadable project. Same
+    # shape as the GitHub-side degradation notice (「API 応答なし —
+    # マージ lane は縮退表示中」) so the operator sees a symmetric
+    # signal on both sides. Without this, Pass A/B failures silently
+    # let PRs fall through to 「gate 未依頼」 — the exact silent
+    # misclassification the lane exists to prevent (PR-gate objection
+    # at 2c92dd9).
+    for project in sorted(ledger_unread_projects):
+        live.notices.append(
+            f"{project}: Conclair 応答なし — "
+            f"gate スレッド判定が縮退中（該当 PR は 未依頼 と表示されるが確定ではない）"
+        )
+
+    # Emit truncation notice derived from cache state, filtered to
+    # entries that are (a) still within TTL and (b) name a PR that is
+    # still in the current cycle's snapshots. Prune first so a
+    # long-running process does not accumulate zombie entries for PRs
+    # that merged or closed while a bounded_ambiguity was cached
+    # (PR-gate objection at 916df27: without this the notice never
+    # retires).
+    live_keys: set[pr_watch.LedgerKey] = {
+        pr_watch.pr_key(s) for s in snapshots
+    }
+    # Preserve cache entries for repos whose GitHub read failed this
+    # cycle — those PRs are absent from `snapshots` not because they
+    # are merged/closed but because we could not ask (PR-gate objection
+    # at 7d5aa57 §1). Pruning them would burst-refetch every PR the
+    # moment the API recovers, defeating the whole cache design.
+    if failed_repos:
+        for cache_dict in (watch_state.cache, watch_state.ledger_pointers,
+                           watch_state.negative_ledger_cache):
+            for key in cache_dict:
+                if (key[0], key[1]) in failed_repos:
+                    live_keys.add(key)
+    # Prune all three long-lived caches: the negative ledger cache
+    # (TTL + live-set filter) and the review + positive-pointer caches
+    # (live-set filter only, since neither carries a TTL). Without the
+    # latter, merged / closed PRs would permanently retain their full
+    # /reviews payload and their (project, thread_id) pointer over the
+    # lifetime of the process (PR-gate objection at 2c92dd9 §3).
+    pr_watch.prune_negative_ledger(
+        watch_state, now=now, live_keys=live_keys,
+    )
+    pr_watch.prune_review_cache(watch_state, live_keys=live_keys)
+    pr_watch.prune_ledger_pointers(watch_state, live_keys=live_keys)
+    truncated = pr_watch.iter_truncated_prs(
+        watch_state, now=now, live_keys=live_keys,
+    )
+    for slug, pr_numbers in sorted(truncated.items()):
+        if not pr_numbers:
+            continue
+        pr_list = ", ".join(f"#{n}" for n in pr_numbers)
+        live.notices.append(
+            f"{slug}: closed ledger の pagination 深さが不足 — "
+            f"以下の PR の 未依頼 判定は未確定です: {pr_list}"
+        )
+
+    for snapshot in snapshots:
+        key = pr_watch.pr_key(snapshot)
+        ledger = matched_ledger.get(key)
+        state, ledger_info = _classify_merge_state(snapshot, ledger)
+        live.cards.append(
+            _merge_card_from(snapshot, state, ledger_info, now=now)
+        )
+
+
 # --- 完了列 ----------------------------------------------------------------
 
 
@@ -659,6 +1232,12 @@ def _gone_reason(row: dict[str, Any], live: _Live) -> str:
 
     if kind == "loop":
         return "ループが HOLD / 停止疑いでなくなりました"
+
+    if kind == "merge":
+        # マージ カードは PR が MERGED / CLOSED になれば live 集合から
+        # 落ちる。理由は GitHub に残るので board 側で断定しない ——— 「PR
+        # を触ったんでしょう？」を勝手に書くのはこの module の禁じ手。
+        return "PR が open でなくなりました（MERGED / CLOSED / 一覧から外れました）"
 
     return "板から外れました（理由は確認できていません）"
 
@@ -734,6 +1313,15 @@ async def collect(
                     adapter, summaries["items"], live, settings=settings, now=now
                 ),
             )
+        # マージ lane runs after decisions so it can reuse the ledger
+        # threads decisions already listed (avoids re-fetching per project).
+        # A separate try/except so a GitHub outage does not blank the
+        # decision / loop lanes that had already succeeded.
+        try:
+            await _collect_merges(adapter, live, settings=settings, now=now)
+        except Exception as e:  # noqa: BLE001 - lane を落とすだけ
+            logger.warning("board: merge lane failed", error=str(e))
+            live.notices.append(f"マージ待ち PR が読めません ({e})")
     finally:
         await adapter.close()
 
