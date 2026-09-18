@@ -514,10 +514,15 @@ async def collect_pr_snapshots(
     Returns:
         ``(snapshots, notices, failed_repos)``. ``failed_repos`` is the
         set of ``(owner, repo)`` whose ``list_pull_requests`` returned
-        :data:`_FETCH_FAILED`; the caller must NOT prune cache entries
-        for those repos this cycle (PR-gate objection at 7d5aa57 §1 —
-        pruning on transient failure would force a rate-burst re-fetch
-        of every PR the moment the API recovers).
+        :data:`_FETCH_FAILED`; pass it as the ``failed_repos=`` kwarg to
+        :func:`prune_review_cache`, :func:`prune_ledger_pointers`, and
+        :func:`prune_negative_ledger` so those repos' cache entries are
+        preserved across the failing cycle (PR-gate objection at
+        7d5aa57 §1 — pruning on transient failure would force a
+        rate-burst re-fetch of every PR the moment the API recovers).
+        The prune functions own the exclusion; the caller does not need
+        to know the shape of the internal cache dicts to uphold the
+        invariant.
 
     The steady-state cost:
     - Always: one ``list_pull_requests`` per repo (per 5-minute cycle in
@@ -832,8 +837,31 @@ def clear_negative_ledger(state: PrWatchState, key: LedgerKey) -> None:
     state.negative_ledger_cache.pop(key, None)
 
 
+def _is_from_failed_repo(
+    key: LedgerKey, failed_repos: set[tuple[str, str]] | None,
+) -> bool:
+    """True if ``key`` belongs to a repo whose fetch failed this cycle.
+
+    Encapsulates the ``failed_repos`` skip that
+    :func:`prune_review_cache`, :func:`prune_ledger_pointers`, and
+    :func:`prune_negative_ledger` all apply identically. The three
+    prune functions own this exclusion because :func:`collect_pr_snapshots`
+    yields no snapshots for failed repos, so their PRs are missing from
+    the caller's ``live_keys`` set — pruning against ``live_keys`` alone
+    would evict every cache entry for the failing repo and force a
+    rate-burst re-fetch the moment the API recovered (PR-gate objection
+    at e7d20da §1).
+    """
+    if failed_repos is None:
+        return False
+    return (key[0], key[1]) in failed_repos
+
+
 def prune_review_cache(
-    state: PrWatchState, *, live_keys: set[LedgerKey]
+    state: PrWatchState,
+    *,
+    live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
 ) -> None:
     """Drop review-cache entries for PRs no longer in the open set.
 
@@ -845,14 +873,27 @@ def prune_review_cache(
 
     Kept separate from :func:`prune_negative_ledger` because this
     cache has no TTL: staleness is measured only against the live set.
+
+    ``failed_repos`` (optional): the ``(owner, repo)`` set that
+    :func:`collect_pr_snapshots` returns for cycles where a repo's
+    ``list_pull_requests`` failed. Entries belonging to those repos are
+    kept regardless of ``live_keys`` — the caller does not need to know
+    the shape of ``state.cache`` to preserve them.
     """
-    stale = [k for k in state.cache if k not in live_keys]
+    stale = [
+        k
+        for k in state.cache
+        if k not in live_keys and not _is_from_failed_repo(k, failed_repos)
+    ]
     for key in stale:
         state.cache.pop(key, None)
 
 
 def prune_ledger_pointers(
-    state: PrWatchState, *, live_keys: set[LedgerKey]
+    state: PrWatchState,
+    *,
+    live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
 ) -> None:
     """Drop positive-cache pointers for PRs no longer in the open set.
 
@@ -860,8 +901,17 @@ def prune_ledger_pointers(
     thread_id)`` pointer is useful only while the PR it names is still
     being polled. Retaining pointers for closed PRs would grow the
     ``ledger_pointers`` dict indefinitely with no upside.
+
+    ``failed_repos`` (optional): same semantics as
+    :func:`prune_review_cache` — entries belonging to those repos are
+    preserved across the failing cycle so the API recovery does not
+    trigger a rate-burst re-scan of every PR's ledger.
     """
-    stale = [k for k in state.ledger_pointers if k not in live_keys]
+    stale = [
+        k
+        for k in state.ledger_pointers
+        if k not in live_keys and not _is_from_failed_repo(k, failed_repos)
+    ]
     for key in stale:
         state.ledger_pointers.pop(key, None)
 
@@ -871,6 +921,7 @@ def prune_negative_ledger(
     *,
     now: datetime,
     live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
 ) -> None:
     """Drop stale / superseded entries from the negative cache.
 
@@ -887,11 +938,20 @@ def prune_negative_ledger(
       Pass B would need to re-fire regardless. Dropping it here means
       :func:`iter_truncated_prs` can rely on "still-live entries" as
       the whole set to emit.
+
+    ``failed_repos`` (optional): entries whose repo is in this set are
+    preserved even when ``key not in live_keys`` (they only fall out of
+    the live set because ``list_pull_requests`` failed transiently). The
+    TTL check still applies — a genuinely stale entry drops on its own
+    schedule.
     """
     stale_keys = [
         key
         for key, entry in state.negative_ledger_cache.items()
-        if key not in live_keys
+        if (
+            key not in live_keys
+            and not _is_from_failed_repo(key, failed_repos)
+        )
         or entry.cached_at + _NEGATIVE_LEDGER_TTL <= now
     ]
     for key in stale_keys:

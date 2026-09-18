@@ -1032,3 +1032,136 @@ def test_prune_functions_are_idempotent_on_empty_state():
     assert state.cache == {}
     assert state.ledger_pointers == {}
     assert state.negative_ledger_cache == {}
+
+
+def test_prune_functions_preserve_failed_repos_entries():
+    """PR-gate BLOCKING (e7d20da §1): the three prune functions must
+    honour ``failed_repos`` internally so the caller does not have to
+    reverse-engineer keys from ``state.cache`` / ``ledger_pointers``
+    / ``negative_ledger_cache`` to uphold the "don't evict cache for
+    repos whose GitHub read failed this cycle" invariant.
+
+    Setup covers all three caches for one healthy repo (present in
+    ``live_keys``) and one failing repo (present in ``failed_repos``).
+    After pruning against an empty ``live_keys``, the failing repo's
+    entries must survive and the healthy repo's entry must survive
+    (it is live). If the caller had to filter manually, this test
+    would need to reach into ``state.*`` internals to build the key
+    set — the whole point of ``failed_repos=`` is that it does not.
+    """
+    from magickit.core.pr_watch import _CacheEntry
+    state = PrWatchState()
+    healthy = ("O", "HEALTHY", 1)
+    failing = ("O", "FAILING", 42)
+    entry = _CacheEntry(
+        updated_at="U", reviews=[], artifact_approved=False,
+        approving_review_id=None, fetched_at=0.0,
+    )
+    state.cache[healthy] = entry
+    state.cache[failing] = entry
+    set_ledger_pointer(state, healthy, "proj", "T-1", "U")
+    set_ledger_pointer(state, failing, "proj", "T-42", "U")
+    set_negative_ledger(state, healthy, "U", NOW, was_truncated=True)
+    set_negative_ledger(state, failing, "U", NOW, was_truncated=True)
+
+    live_keys = {healthy}
+    failed_repos = {("O", "FAILING")}
+    prune_review_cache(
+        state, live_keys=live_keys, failed_repos=failed_repos,
+    )
+    prune_ledger_pointers(
+        state, live_keys=live_keys, failed_repos=failed_repos,
+    )
+    prune_negative_ledger(
+        state, now=NOW, live_keys=live_keys, failed_repos=failed_repos,
+    )
+
+    # Healthy repo entry: kept (live). Failing repo entry: kept (failed).
+    assert set(state.cache) == {healthy, failing}
+    assert set(state.ledger_pointers) == {healthy, failing}
+    assert set(state.negative_ledger_cache) == {healthy, failing}
+
+
+def test_prune_negative_ledger_ttl_still_drops_expired_failed_repo_entries():
+    """The ``failed_repos`` skip is scoped to the not-live condition
+    only. A TTL-expired entry is stale on its own schedule and must
+    drop regardless of the repo's fetch outcome — otherwise a repo
+    stuck in a long API outage would grow a monotonic pile of stale
+    negative-cache entries."""
+    state = PrWatchState()
+    failing_stale = ("O", "FAILING", 1)
+    set_negative_ledger(
+        state, failing_stale, "U",
+        NOW - timedelta(minutes=20),  # TTL past
+        was_truncated=True,
+    )
+    prune_negative_ledger(
+        state, now=NOW, live_keys=set(),
+        failed_repos={("O", "FAILING")},
+    )
+    # TTL wins over the failed-repos preserve.
+    assert failing_stale not in state.negative_ledger_cache
+
+
+# --- PR-gate objection at e7d20da §2: YAML string bypassing coercion ---
+
+
+def test_yaml_string_pr_repo_allowlist_does_not_silently_split_into_chars(
+    tmp_path,
+):
+    """PR-gate ADVISORY (e7d20da §2): a user who writes
+    ``pr_repo_allowlist: "SpirrowGames/spirrow-magickit"`` (bare string,
+    not list) must NOT get their value silently corrupted into
+    ``['S', 'p', 'i', 'r', ...]`` by a defensive ``list(...)`` wrapper.
+
+    The old shape wrapped the value in ``list()``, which happily
+    iterated the string one character at a time and satisfied
+    Pydantic's ``list[str]`` validator with the resulting per-char
+    list. Downstream code that expects ``"owner/repo"`` entries would
+    then blow up far from the actual mistake. The fix forwards the raw
+    value to Pydantic, letting the validator reject a non-list up
+    front — a loud, close-to-source failure instead of the silent,
+    downstream one.
+    """
+    import yaml as yaml_mod
+    from pydantic import ValidationError
+    from magickit.config import Settings
+
+    cfg_path = tmp_path / "magickit_config.yaml"
+    cfg_path.write_text(
+        yaml_mod.safe_dump(
+            {"board": {"pr_repo_allowlist": "SpirrowGames/spirrow-magickit"}}
+        ),
+        encoding="utf-8",
+    )
+    # Either Pydantic rejects the string OR the coercion produces a
+    # list that is NOT a per-character split. The forbidden outcome is
+    # the silent per-char corruption the wrapper used to hand back.
+    try:
+        settings = Settings.from_yaml(cfg_path)
+    except ValidationError:
+        return  # loud rejection — the desired behaviour
+    assert settings.board_pr_repo_allowlist != list(
+        "SpirrowGames/spirrow-magickit"
+    ), (
+        "list() wrapper regression: bare string was silently split into "
+        "per-character entries"
+    )
+
+
+def test_yaml_null_pr_repo_allowlist_disables_the_lane(tmp_path):
+    """The explicit empty-list case (``pr_repo_allowlist:`` with no
+    rhs, which YAML parses as ``None``) must still be honoured — it
+    is the documented way to disable the merge lane. The fix keeps
+    the ``None → []`` substitution while removing the ``list(...)``
+    wrapper that corrupted strings."""
+    import yaml as yaml_mod
+    from magickit.config import Settings
+
+    cfg_path = tmp_path / "magickit_config.yaml"
+    cfg_path.write_text(
+        yaml_mod.safe_dump({"board": {"pr_repo_allowlist": None}}),
+        encoding="utf-8",
+    )
+    settings = Settings.from_yaml(cfg_path)
+    assert settings.board_pr_repo_allowlist == []

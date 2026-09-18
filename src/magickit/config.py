@@ -492,8 +492,17 @@ class Settings(BaseSettings):
             # 全 repo で無効にする」) is honoured rather than silently
             # falling back to the six-repo default.
             if "pr_repo_allowlist" in board:
-                flat_config["board_pr_repo_allowlist"] = list(
-                    board.get("pr_repo_allowlist") or []
+                raw = board.get("pr_repo_allowlist")
+                # ``pr_repo_allowlist:`` with no rhs (None) is the
+                # explicit empty-list case; substitute [] to preserve
+                # the "disable the lane" semantics. Anything else is
+                # forwarded verbatim so Pydantic's ``list[str]``
+                # validator can reject a mistaken string input
+                # (``list("owner/repo")`` would silently split it into
+                # single-character entries — PR-gate objection at
+                # e7d20da §2).
+                flat_config["board_pr_repo_allowlist"] = (
+                    [] if raw is None else raw
                 )
             if "ui_poll_seconds" in board:
                 flat_config["board_ui_poll_seconds"] = board.get("ui_poll_seconds")
