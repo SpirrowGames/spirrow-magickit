@@ -928,6 +928,13 @@ async def _collect_merges(
         else:
             unseen_projects.add(snapshot.repo.lower())
 
+    # Projects whose ledger side we could not read this cycle. Every
+    # PR grouped under one of these must render a degradation notice
+    # rather than silently becoming 「gate 未依頼」 — the PR-gate
+    # objection at 2c92dd9 was: without this, a Conclair outage looks
+    # indistinguishable from "the human forgot to request a gate".
+    ledger_unread_projects: set[str] = set()
+
     # Pass A: fetch OPEN ledger threads only for unseen projects. Any
     # thread the decisions collector already listed is reused — that
     # code path pulls every open thread for the projects that have
@@ -941,9 +948,15 @@ async def _collect_merges(
                 status_filter=list(_LEDGER_OPEN_STATUSES),
                 limit=200,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "board: Pass A list_threads failed",
+                project=project, err=str(exc),
+            )
+            ledger_unread_projects.add(project)
             continue
         if ops._is_error(result):
+            ledger_unread_projects.add(project)
             continue
         items = result.get("items") or []
         if not isinstance(items, list):
@@ -1014,11 +1027,19 @@ async def _collect_merges(
                 limit=pr_watch._LIST_THREADS_PAGE_LIMIT,
                 offset=0,
             )
-        except Exception:  # noqa: BLE001
-            # Cannot tell truncation from absence; leave the PRs for
-            # the next cycle without a negative cache entry.
+        except Exception as exc:  # noqa: BLE001
+            # Cannot tell truncation from absence; skipping without a
+            # notice would falsely classify these PRs as 「未依頼」.
+            # Register the project as unreadable and let the notice
+            # loop below tell the operator the lane is degraded.
+            logger.warning(
+                "board: Pass B list_threads failed",
+                project=project, err=str(exc),
+            )
+            ledger_unread_projects.add(project)
             continue
         if ops._is_error(result):
+            ledger_unread_projects.add(project)
             continue
         items = result.get("items") or []
         if not isinstance(items, list):
@@ -1096,6 +1117,19 @@ async def _collect_merges(
                         was_truncated=True,
                     )
 
+    # Emit a Conclair-degradation notice per unreadable project. Same
+    # shape as the GitHub-side degradation notice (「API 応答なし —
+    # マージ lane は縮退表示中」) so the operator sees a symmetric
+    # signal on both sides. Without this, Pass A/B failures silently
+    # let PRs fall through to 「gate 未依頼」 — the exact silent
+    # misclassification the lane exists to prevent (PR-gate objection
+    # at 2c92dd9).
+    for project in sorted(ledger_unread_projects):
+        live.notices.append(
+            f"{project}: Conclair 応答なし — "
+            f"gate スレッド判定が縮退中（該当 PR は 未依頼 と表示されるが確定ではない）"
+        )
+
     # Emit truncation notice derived from cache state, filtered to
     # entries that are (a) still within TTL and (b) name a PR that is
     # still in the current cycle's snapshots. Prune first so a
@@ -1106,9 +1140,17 @@ async def _collect_merges(
     live_keys: set[pr_watch.LedgerKey] = {
         pr_watch.pr_key(s) for s in snapshots
     }
+    # Prune all three long-lived caches: the negative ledger cache
+    # (TTL + live-set filter) and the review + positive-pointer caches
+    # (live-set filter only, since neither carries a TTL). Without the
+    # latter, merged / closed PRs would permanently retain their full
+    # /reviews payload and their (project, thread_id) pointer over the
+    # lifetime of the process (PR-gate objection at 2c92dd9 §3).
     pr_watch.prune_negative_ledger(
         watch_state, now=now, live_keys=live_keys,
     )
+    pr_watch.prune_review_cache(watch_state, live_keys=live_keys)
+    pr_watch.prune_ledger_pointers(watch_state, live_keys=live_keys)
     truncated = pr_watch.iter_truncated_prs(
         watch_state, now=now, live_keys=live_keys,
     )

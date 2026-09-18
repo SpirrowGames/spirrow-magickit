@@ -629,6 +629,77 @@ async def test_pr_watch_exception_degrades_only_the_merge_lane(
     assert any("マージ待ち PR" in n for n in context["notices"])
 
 
+@pytest.mark.asyncio
+async def test_conclair_list_threads_failure_emits_degradation_notice(
+    temp_db_path, monkeypatch
+):
+    """PR-gate BLOCKING (2c92dd9): a Conclair outage must NOT silently
+    mislabel PRs as 「gate 未依頼」.
+
+    Before this fix, Pass A / Pass B swallowed the exception and let
+    the PR fall through to UNREQUESTED — indistinguishable to the
+    operator from "the human forgot to request a gate". The lane now
+    emits a per-project degradation notice so the ambiguity is visible.
+    """
+    _patch_pr_watch(monkeypatch, [_snapshot()])
+
+    class _FailingAdapter(_Adapter):
+        async def list_threads(self, **_kw):
+            raise RuntimeError("conclair down")
+
+    context = await _collect(_FailingAdapter(), _settings(temp_db_path))
+    notices = context["notices"]
+    assert any(
+        "Conclair 応答なし" in n and "縮退" in n for n in notices
+    ), f"Conclair failure must emit a degradation notice; got: {notices}"
+
+
+@pytest.mark.asyncio
+async def test_conclair_error_envelope_emits_degradation_notice(
+    temp_db_path, monkeypatch
+):
+    """Same as above but for the ops._is_error(result) branch.
+
+    Conclair sometimes returns a structured error envelope
+    (``{"error_type": ..., "error": ...}``) instead of raising. That
+    path must also emit the degradation notice.
+    """
+    _patch_pr_watch(monkeypatch, [_snapshot()])
+
+    class _ErroringAdapter(_Adapter):
+        async def list_threads(self, **_kw):
+            return {"error_type": "Unavailable", "error": "conclair 5xx"}
+
+    context = await _collect(_ErroringAdapter(), _settings(temp_db_path))
+    notices = context["notices"]
+    assert any(
+        "Conclair 応答なし" in n for n in notices
+    ), f"error envelope must emit a degradation notice; got: {notices}"
+
+
+@pytest.mark.asyncio
+async def test_review_cache_and_pointers_are_pruned_for_non_live_prs(
+    temp_db_path, monkeypatch
+):
+    """PR-gate ADVISORY #3: closed / merged PRs must not linger in
+    long-lived caches over the lifetime of the process."""
+    state = pr_watch.get_state()
+    # Seed both caches for a PR that is NOT in this cycle's snapshots.
+    from magickit.core.pr_watch import _CacheEntry
+    state.cache[("O", "R", 99)] = _CacheEntry(
+        updated_at="U", reviews=[], artifact_approved=False,
+        approving_review_id=None, fetched_at=0.0,
+    )
+    pr_watch.set_ledger_pointer(state, ("O", "R", 99), "proj", "T-99")
+
+    _patch_pr_watch(monkeypatch, [_snapshot(number=1)])
+    await _collect(_Adapter(), _settings(temp_db_path))
+
+    # The non-live PR #99 must have been pruned from both caches.
+    assert ("O", "R", 99) not in state.cache
+    assert ("O", "R", 99) not in state.ledger_pointers
+
+
 # --- gone reason -----------------------------------------------------------
 
 

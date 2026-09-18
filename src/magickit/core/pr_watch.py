@@ -176,12 +176,15 @@ class PrSnapshot:
     updated_at: str
     artifact_approved: bool
     #: PR creation time (ISO-8601 UTC). Used by the closed-ledger deep
-    #: pagination's chronological fence — a PR older than a page's oldest
-    #: thread must be on that page or earlier, which lets the fence
-    #: prove definitive ledger absence without reading further pages.
-    #: Optional / defaults to empty for backward compat with mocked
-    #: snapshots that predate this feature; empty ``created_at`` skips
-    #: the chronological fence but is otherwise harmless.
+    #: pagination's chronological fence — a PR **newer** than a page's
+    #: oldest thread must be on that page or an earlier one, so failing
+    #: to find it on the fetched pages proves definitive ledger absence
+    #: without reading further pages. (The condition in
+    #: :func:`compute_was_truncated_per_pr` reads ``pr.created_at >
+    #: threshold``, i.e. the PR is more recent than the horizon plus
+    #: margin.) Optional / defaults to empty for backward compat with
+    #: mocked snapshots that predate this feature; empty ``created_at``
+    #: skips the chronological fence but is otherwise harmless.
     created_at: str = ""
     approving_review_id: int | None = None
     #: True when the ``/reviews`` fetch was skipped due to the soft cap.
@@ -786,6 +789,40 @@ def clear_negative_ledger(state: PrWatchState, key: LedgerKey) -> None:
     state.negative_ledger_cache.pop(key, None)
 
 
+def prune_review_cache(
+    state: PrWatchState, *, live_keys: set[LedgerKey]
+) -> None:
+    """Drop review-cache entries for PRs no longer in the open set.
+
+    Without this, every PR ever polled retains its full ``/reviews``
+    JSON payload for the lifetime of the process — a per-PR memory
+    leak (PR-gate objection at 2c92dd9 §3). Merged / closed PRs will
+    never be polled again, so their cached reviews cannot help the
+    rate-cap fallback and only cost memory.
+
+    Kept separate from :func:`prune_negative_ledger` because this
+    cache has no TTL: staleness is measured only against the live set.
+    """
+    stale = [k for k in state.cache if k not in live_keys]
+    for key in stale:
+        state.cache.pop(key, None)
+
+
+def prune_ledger_pointers(
+    state: PrWatchState, *, live_keys: set[LedgerKey]
+) -> None:
+    """Drop positive-cache pointers for PRs no longer in the open set.
+
+    Symmetric with :func:`prune_review_cache`: the ``(project,
+    thread_id)`` pointer is useful only while the PR it names is still
+    being polled. Retaining pointers for closed PRs would grow the
+    ``ledger_pointers`` dict indefinitely with no upside.
+    """
+    stale = [k for k in state.ledger_pointers if k not in live_keys]
+    for key in stale:
+        state.ledger_pointers.pop(key, None)
+
+
 def prune_negative_ledger(
     state: PrWatchState,
     *,
@@ -1131,6 +1168,8 @@ __all__ = [
     "set_negative_ledger",
     "clear_negative_ledger",
     "prune_negative_ledger",
+    "prune_review_cache",
+    "prune_ledger_pointers",
     "iter_truncated_prs",
     "add_minutes",
     "definitive_absence_threshold",

@@ -43,7 +43,9 @@ from magickit.core.pr_watch import (
     iter_truncated_prs,
     min_last_activity_at,
     pr_key,
+    prune_ledger_pointers,
     prune_negative_ledger,
+    prune_review_cache,
     resolve_old_prs_by_deep_pagination,
     set_ledger_pointer,
     set_negative_ledger,
@@ -867,3 +869,58 @@ async def test_rate_cap_serves_stale_entry_after_updated_at_bump():
     # this False (unreachable cache).
     assert snapshots[0].artifact_approved is True
     assert snapshots[0].rate_capped is True
+
+
+# --- PR-gate objection at 2c92dd9: per-PR memory leak in cache & pointers --
+
+
+def test_prune_review_cache_drops_non_live_entries():
+    """PR-gate ADVISORY #3: merged/closed PRs must be evicted from the
+    review cache to bound long-term memory."""
+    from magickit.core.pr_watch import _CacheEntry
+    state = PrWatchState()
+    state.cache[("O", "R", 1)] = _CacheEntry(
+        updated_at="U", reviews=[], artifact_approved=False,
+        approving_review_id=None, fetched_at=0.0,
+    )
+    state.cache[("O", "R", 2)] = _CacheEntry(
+        updated_at="U", reviews=[], artifact_approved=False,
+        approving_review_id=None, fetched_at=0.0,
+    )
+    prune_review_cache(state, live_keys={("O", "R", 1)})
+    assert set(state.cache) == {("O", "R", 1)}
+
+
+def test_prune_ledger_pointers_drops_non_live_entries():
+    """Symmetric with review cache: closed PRs cannot reuse pointers."""
+    state = PrWatchState()
+    set_ledger_pointer(state, ("O", "R", 1), "proj", "T-1")
+    set_ledger_pointer(state, ("O", "R", 2), "proj", "T-2")
+    prune_ledger_pointers(state, live_keys={("O", "R", 1)})
+    assert set(state.ledger_pointers) == {("O", "R", 1)}
+
+
+def test_prune_review_cache_empty_live_keys_drops_everything():
+    """If no PRs are live, the entire cache empties (bounded upper limit)."""
+    from magickit.core.pr_watch import _CacheEntry
+    state = PrWatchState()
+    for n in range(5):
+        state.cache[("O", "R", n)] = _CacheEntry(
+            updated_at="U", reviews=[], artifact_approved=False,
+            approving_review_id=None, fetched_at=0.0,
+        )
+    prune_review_cache(state, live_keys=set())
+    assert state.cache == {}
+
+
+def test_prune_functions_are_idempotent_on_empty_state():
+    """Empty state → no-op (no exceptions)."""
+    state = PrWatchState()
+    prune_review_cache(state, live_keys={("O", "R", 1)})
+    prune_ledger_pointers(state, live_keys={("O", "R", 1)})
+    prune_negative_ledger(
+        state, now=NOW, live_keys={("O", "R", 1)},
+    )
+    assert state.cache == {}
+    assert state.ledger_pointers == {}
+    assert state.negative_ledger_cache == {}
