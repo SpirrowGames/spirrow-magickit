@@ -629,8 +629,16 @@ async def _snapshot_for_pr(
     if _rate_capped(state, now=now):
         # Serve the stale-but-honest entry if we have one; else mark
         # rate_capped so the board can render `gate 進行中` rather than
-        # falsely claim `未依頼`.
+        # falsely claim `未依頼`. Critically: re-verify the approval
+        # against the CURRENT head. If a new commit landed since the
+        # cache write, the old ``commit_id`` no longer matches
+        # ``head_sha`` and ``_approved_at_head`` will return False —
+        # so the stale approval is never paired with the new head
+        # (PR-gate objection at 26d0634 §2).
         if entry is not None:
+            approved_now, review_id_now = _approved_at_head(
+                entry.reviews, head_sha,
+            )
             return PrSnapshot(
                 owner=owner,
                 repo=repo,
@@ -640,8 +648,8 @@ async def _snapshot_for_pr(
                 head_sha=head_sha,
                 updated_at=updated_at,
                 created_at=created_at,
-                artifact_approved=entry.artifact_approved,
-                approving_review_id=entry.approving_review_id,
+                artifact_approved=approved_now,
+                approving_review_id=review_id_now,
                 rate_capped=True,
             )
         return PrSnapshot(
@@ -661,9 +669,13 @@ async def _snapshot_for_pr(
     reviews = await fetch_reviews(owner, repo, number_raw)
     if reviews is None:
         # Couldn't read reviews. Reuse a stale entry rather than lying;
-        # if there is none, mark rate_capped so the board renders it as
-        # in-progress and not as un-requested.
+        # same rule as the rate-cap path: re-verify against the current
+        # head so an approve on an earlier commit is not silently
+        # paired with a new head.
         if entry is not None:
+            approved_now, review_id_now = _approved_at_head(
+                entry.reviews, head_sha,
+            )
             return PrSnapshot(
                 owner=owner,
                 repo=repo,
@@ -673,8 +685,8 @@ async def _snapshot_for_pr(
                 head_sha=head_sha,
                 updated_at=updated_at,
                 created_at=created_at,
-                artifact_approved=entry.artifact_approved,
-                approving_review_id=entry.approving_review_id,
+                artifact_approved=approved_now,
+                approving_review_id=review_id_now,
                 rate_capped=True,
             )
         return PrSnapshot(

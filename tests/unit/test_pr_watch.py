@@ -913,6 +913,48 @@ def test_prune_review_cache_empty_live_keys_drops_everything():
     assert state.cache == {}
 
 
+@pytest.mark.asyncio
+async def test_rate_cap_drops_stale_approval_when_head_moved():
+    """PR-gate BLOCKING (26d0634 §2): rate-cap must NOT pair a new
+    head_sha with the old cached approval. Re-verify against current
+    head; if the approve was on an earlier commit, drop it."""
+    state = PrWatchState()
+    from magickit.core.pr_watch import _CacheEntry
+    # Cached approve on OLD head.
+    state.cache[("O", "R", 1)] = _CacheEntry(
+        updated_at="U1",
+        reviews=[{"state": "APPROVED", "commit_id": "H-OLD"}],
+        artifact_approved=True,
+        approving_review_id=42,
+        fetched_at=0.0,
+    )
+    for i in range(SOFT_CAP_CALLS_PER_HOUR):
+        state.call_log.append(float(i))
+
+    async def _list(owner, repo):
+        # New commit pushed → head_sha = H-NEW, updated_at = U2.
+        return [{
+            "number": 1, "title": "t",
+            "html_url": "https://github.com/O/R/pull/1",
+            "head": {"sha": "H-NEW"}, "updated_at": "U2",
+            "created_at": "2026-09-01T00:00:00Z",
+        }]
+
+    async def _reviews(*_a, **_kw):
+        raise AssertionError("must not fetch under rate cap")
+
+    snapshots, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=_list, fetch_reviews=_reviews,
+        now=float(SOFT_CAP_CALLS_PER_HOUR) - 1.0,
+    )
+    assert len(snapshots) == 1
+    # The new head has no APPROVE on it → must NOT be approved.
+    assert snapshots[0].artifact_approved is False
+    assert snapshots[0].rate_capped is True
+    assert snapshots[0].head_sha == "H-NEW"
+
+
 def test_prune_functions_are_idempotent_on_empty_state():
     """Empty state → no-op (no exceptions)."""
     state = PrWatchState()

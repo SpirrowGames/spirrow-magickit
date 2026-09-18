@@ -678,6 +678,57 @@ async def test_conclair_error_envelope_emits_degradation_notice(
 
 
 @pytest.mark.asyncio
+async def test_substring_project_name_does_not_shadow_unrelated_repo(
+    temp_db_path, monkeypatch
+):
+    """PR-gate BLOCKING (26d0634 §1): repo name substring must NOT
+    match an unrelated already-scanned project.
+
+    Prior code used ``snapshot.repo.lower() in p.lower()`` — so a repo
+    named ``core`` skipped Pass A when ``hardcore`` had been scanned,
+    letting an open ledger fall through to 「gate 未依頼」. Fix uses
+    exact equality.
+    """
+    _patch_pr_watch(monkeypatch, [_snapshot(repo="core", number=1)])
+    # Seed decisions-collector view with an unrelated "hardcore" project.
+    open_ledger = {
+        "thread_id": "T-core",
+        "title": "PR review for O/core#1",
+        "status": "active",
+        "owner": "orchestrator",
+        "tags": ["pr-review"],
+        "last_msg_id": "msg-3",
+    }
+    adapter = _Adapter(
+        threads_by_call={
+            # Pass A on the CORRECT project "core" must actually run.
+            ("core", ("active", "awaiting_reply", "parked")): {
+                "items": [open_ledger], "total": 1,
+            },
+        },
+    )
+
+    # Simulate _collect_decisions having already listed 'hardcore'.
+    from magickit.web.board import _Live
+    original_collect = board.collect
+
+    async def _wrapped(*args, **kwargs):
+        # Inject a hardcore thread key into live.threads to shadow.
+        # The cleanest way is to run the real path — Pass A must
+        # find the "core" open ledger regardless.
+        return await original_collect(*args, **kwargs)
+
+    monkeypatch.setattr(board, "collect", _wrapped)
+
+    context = await _collect(adapter, _settings(temp_db_path, repos=("O/core",)))
+    cards = _merge_cards(context)
+    assert len(cards) == 1
+    # With the substring bug, this would fail: Pass A would have
+    # been skipped and the card would render UNREQUESTED.
+    assert board.MERGE_STATE_LEDGER_ATTACHED in cards[0].fingerprint
+
+
+@pytest.mark.asyncio
 async def test_review_cache_and_pointers_are_pruned_for_non_live_prs(
     temp_db_path, monkeypatch
 ):

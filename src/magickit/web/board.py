@@ -920,12 +920,15 @@ async def _collect_merges(
     # repos whose GitHub owner already begins with `spirrow-`. Match the
     # repo name as-is; the underlying Conclair project map handles the
     # canonicalization.
+    # Match by exact project name — the fallback rule is
+    # "project name == repo.lower()", so the compare must be equality,
+    # not substring. Substring matched "core" against "hardcore" and
+    # skipped Pass A entirely, letting an open ledger fall through to
+    # 「gate 未依頼」 (PR-gate objection at 26d0634 §1).
+    scanned_lower = {p.lower() for p in already_scanned}
     unseen_projects: set[str] = set()
     for snapshot in snapshots:
-        for p in already_scanned:
-            if snapshot.repo.lower() in p.lower():
-                break
-        else:
+        if snapshot.repo.lower() not in scanned_lower:
             unseen_projects.add(snapshot.repo.lower())
 
     # Projects whose ledger side we could not read this cycle. Every
