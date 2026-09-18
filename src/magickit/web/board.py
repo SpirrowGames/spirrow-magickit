@@ -729,8 +729,6 @@ def _ledger_thread_for_pr(
 def _classify_merge_state(
     snapshot: PrSnapshot,
     ledger: tuple[str, dict[str, Any]] | None,
-    *,
-    naysayer_identities: frozenset[str],
 ) -> tuple[str, tuple[str, dict[str, Any]] | None]:
     """Return the (state, ledger-match) for one PR snapshot.
 
@@ -889,7 +887,7 @@ async def _collect_merges(
         return
 
     try:
-        snapshots, watch_notices = await pr_watch.collect_pr_snapshots(
+        snapshots, watch_notices, failed_repos = await pr_watch.collect_pr_snapshots(
             repos, pr_watch.get_state()
         )
     except Exception as exc:  # noqa: BLE001 - 板全体を殺さない
@@ -1143,6 +1141,17 @@ async def _collect_merges(
     live_keys: set[pr_watch.LedgerKey] = {
         pr_watch.pr_key(s) for s in snapshots
     }
+    # Preserve cache entries for repos whose GitHub read failed this
+    # cycle — those PRs are absent from `snapshots` not because they
+    # are merged/closed but because we could not ask (PR-gate objection
+    # at 7d5aa57 §1). Pruning them would burst-refetch every PR the
+    # moment the API recovers, defeating the whole cache design.
+    if failed_repos:
+        for cache_dict in (watch_state.cache, watch_state.ledger_pointers,
+                           watch_state.negative_ledger_cache):
+            for key in cache_dict:
+                if (key[0], key[1]) in failed_repos:
+                    live_keys.add(key)
     # Prune all three long-lived caches: the negative ledger cache
     # (TTL + live-set filter) and the review + positive-pointer caches
     # (live-set filter only, since neither carries a TTL). Without the
@@ -1166,21 +1175,10 @@ async def _collect_merges(
             f"以下の PR の 未依頼 判定は未確定です: {pr_list}"
         )
 
-    # Normalize naysayer identity casing (kept for API compatibility with
-    # existing tests, though the collapsed 3-state classifier no longer
-    # consults the naysayer list). Retained on the parameter surface so
-    # future policy tweaks (e.g. "which naysayer's APPROVE counts") can
-    # thread through without a signature change.
-    naysayer_identities = frozenset(
-        n.strip().lower() for n in settings.naysayer_identities
-    )
-
     for snapshot in snapshots:
         key = pr_watch.pr_key(snapshot)
         ledger = matched_ledger.get(key)
-        state, ledger_info = _classify_merge_state(
-            snapshot, ledger, naysayer_identities=naysayer_identities,
-        )
+        state, ledger_info = _classify_merge_state(snapshot, ledger)
         live.cards.append(
             _merge_card_from(snapshot, state, ledger_info, now=now)
         )

@@ -146,9 +146,10 @@ class _Adapter:
         pass
 
 
-def _patch_pr_watch(monkeypatch, snapshots, notices=()):
+def _patch_pr_watch(monkeypatch, snapshots, notices=(), failed_repos=None):
+    fr = set(failed_repos) if failed_repos else set()
     async def fake(*_a, **_kw):
-        return list(snapshots), list(notices)
+        return list(snapshots), list(notices), set(fr)
     monkeypatch.setattr(pr_watch, "collect_pr_snapshots", fake)
 
 
@@ -605,7 +606,7 @@ async def test_empty_allowlist_disables_the_lane(temp_db_path, monkeypatch):
     called = []
     async def fake(*a, **_kw):
         called.append(1)
-        return [], []
+        return [], [], set()
     monkeypatch.setattr(pr_watch, "collect_pr_snapshots", fake)
 
     context = await _collect(_Adapter(), _settings(temp_db_path, repos=()))
@@ -726,6 +727,38 @@ async def test_substring_project_name_does_not_shadow_unrelated_repo(
     # With the substring bug, this would fail: Pass A would have
     # been skipped and the card would render UNREQUESTED.
     assert board.MERGE_STATE_LEDGER_ATTACHED in cards[0].fingerprint
+
+
+@pytest.mark.asyncio
+async def test_transient_repo_failure_preserves_that_repos_caches(
+    temp_db_path, monkeypatch
+):
+    """PR-gate BLOCKING (7d5aa57 §1): when a repo's GitHub read fails,
+    its cached PRs must NOT be evicted. On recovery, the cache must
+    still cover them — otherwise the API recovery triggers a burst
+    re-fetch of every /reviews payload."""
+    state = pr_watch.get_state()
+    from magickit.core.pr_watch import _CacheEntry
+    # Seed cache for a PR in the FAILING repo.
+    state.cache[("O", "FAILING", 42)] = _CacheEntry(
+        updated_at="U", reviews=[], artifact_approved=True,
+        approving_review_id=1, fetched_at=0.0,
+    )
+    pr_watch.set_ledger_pointer(
+        state, ("O", "FAILING", 42), "proj", "T-42",
+    )
+    # Snapshot: only the healthy repo returned data; FAILING is absent.
+    # failed_repos names the outage so the pruner spares its entries.
+    _patch_pr_watch(
+        monkeypatch,
+        [_snapshot(owner="O", repo="HEALTHY", number=1)],
+        failed_repos={("O", "FAILING")},
+    )
+    await _collect(_Adapter(), _settings(temp_db_path))
+    assert ("O", "FAILING", 42) in state.cache, (
+        "cache entry for failing repo must be preserved across the outage"
+    )
+    assert ("O", "FAILING", 42) in state.ledger_pointers
 
 
 @pytest.mark.asyncio

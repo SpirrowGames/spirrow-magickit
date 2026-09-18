@@ -108,7 +108,7 @@ async def test_approved_at_head_is_reflected_in_snapshot():
         reviews_by_pr={1: [_review("APPROVED", "head-1", review_id=42)]},
     )
 
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
     )
@@ -128,7 +128,7 @@ async def test_approve_at_earlier_head_does_not_count():
         reviews_by_pr={1: [_review("APPROVED", "head-old")]},
     )
 
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
     )
@@ -185,7 +185,7 @@ async def test_updated_at_bump_invalidates_cache_and_refetches():
         prs=[_pr(updated_at="U2", head="H")],
         reviews_by_pr={1: [_review("APPROVED", "H")]},
     )
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_fn_v2, fetch_reviews=reviews_fn_v2,
         now=60.0,
@@ -225,7 +225,7 @@ async def test_replication_lag_self_heals_within_fifteen_minutes():
         prs=[_pr(updated_at="U2", head="H")],
         reviews_by_pr={1: []},  # still stale
     )
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_v2, fetch_reviews=reviews_v2, now=60.0,
     )
@@ -236,7 +236,7 @@ async def test_replication_lag_self_heals_within_fifteen_minutes():
         prs=[_pr(updated_at="U2", head="H")],
         reviews_by_pr={1: [_review("APPROVED", "H")]},  # replica caught up
     )
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_v3, fetch_reviews=reviews_v3,
         now=60.0 + NON_APPROVED_REFETCH_SECONDS - 1,
@@ -249,7 +249,7 @@ async def test_replication_lag_self_heals_within_fifteen_minutes():
         prs=[_pr(updated_at="U2", head="H")],
         reviews_by_pr={1: [_review("APPROVED", "H")]},
     )
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_v4, fetch_reviews=reviews_v4,
         now=60.0 + NON_APPROVED_REFETCH_SECONDS + 1,
@@ -271,7 +271,7 @@ async def test_rate_cap_marks_snapshot_and_serves_stale_when_available():
         reviews_by_pr={1: [_review("APPROVED", "sha-a")]},
     )
     # Bump now so pruning does not clear the cap.
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
         now=float(SOFT_CAP_CALLS_PER_HOUR) - 1.0,
@@ -295,7 +295,7 @@ async def test_missing_head_sha_or_updated_at_skips_the_pr():
         ],
         reviews_by_pr={3: [_review("APPROVED", "H3")]},
     )
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
     )
@@ -341,7 +341,7 @@ async def test_fetch_failure_emits_notice_not_silent_dropdown():
     async def _rev(*_a, **_kw):
         return None
 
-    snapshots, notices = await collect_pr_snapshots(
+    snapshots, notices, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=failing_list, fetch_reviews=_rev, now=0.0,
     )
@@ -360,7 +360,7 @@ async def test_empty_list_is_silent():
     async def _rev(*_a, **_kw):
         return None
 
-    snapshots, notices = await collect_pr_snapshots(
+    snapshots, notices, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=empty_list, fetch_reviews=_rev, now=0.0,
     )
@@ -858,7 +858,7 @@ async def test_rate_cap_serves_stale_entry_after_updated_at_bump():
         # Never called (rate cap suppresses).
         raise AssertionError("must not fetch reviews under rate cap")
 
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=_list, fetch_reviews=_reviews,
         now=float(SOFT_CAP_CALLS_PER_HOUR) - 1.0,
@@ -943,7 +943,7 @@ async def test_rate_cap_drops_stale_approval_when_head_moved():
     async def _reviews(*_a, **_kw):
         raise AssertionError("must not fetch under rate cap")
 
-    snapshots, _ = await collect_pr_snapshots(
+    snapshots, _, _ = await collect_pr_snapshots(
         [("O", "R")], state,
         fetch_open_prs=_list, fetch_reviews=_reviews,
         now=float(SOFT_CAP_CALLS_PER_HOUR) - 1.0,
@@ -953,6 +953,43 @@ async def test_rate_cap_drops_stale_approval_when_head_moved():
     assert snapshots[0].artifact_approved is False
     assert snapshots[0].rate_capped is True
     assert snapshots[0].head_sha == "H-NEW"
+
+
+def test_compute_was_truncated_treats_missing_total_as_ambiguous():
+    """PR-gate BLOCKING (7d5aa57 §2): a missing/non-int `total` must NOT
+    silently declare definitive absence — it means "cannot determine",
+    which is ambiguous by definition."""
+    prs = [_snapshot(number=1, created_at="2026-09-18T11:00:00Z")]
+    # No `total` key at all → all PRs ambiguous.
+    assert compute_was_truncated_per_pr(prs, {"items": []}) == {
+        ("O", "R", 1): True,
+    }
+    # `total` as a string → same (not a trusted int).
+    assert compute_was_truncated_per_pr(
+        prs, {"items": [], "total": "500"},
+    ) == {("O", "R", 1): True}
+
+
+@pytest.mark.asyncio
+async def test_deep_pagination_missing_total_does_not_declare_exhaustion():
+    """PR-gate BLOCKING (7d5aa57 §2): when `total` is missing on a page,
+    the pool-exhausted check must be skipped — not fire with `total=0`."""
+    old_pr = _snapshot(number=1, created_at="2020-01-01T00:00:00Z")
+    calls: list[int] = []
+    async def _list(**kwargs):
+        calls.append(kwargs["offset"])
+        # Non-empty page, no `total` key. Under the old fallback
+        # `total=0`, `offset+len(items) >= 0` would fire on page 2 and
+        # incorrectly declare definitive_absence.
+        return {"items": [_thread(title="other",
+                                  last_activity_at="2026-09-01T00:00:00Z")]}
+    outcomes = await resolve_old_prs_by_deep_pagination(
+        [old_pr], "proj", _list, max_pages=2,
+    )
+    # PR must remain bounded_ambiguity, not definitive_absence.
+    assert outcomes[("O", "R", 1)].bounded_ambiguity is True
+    # And the loop actually iterated through max_pages (2 calls).
+    assert len(calls) == 2
 
 
 def test_prune_functions_are_idempotent_on_empty_state():

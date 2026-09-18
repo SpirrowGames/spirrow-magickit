@@ -494,7 +494,7 @@ async def collect_pr_snapshots(
     fetch_open_prs: Any = None,
     fetch_reviews: Any = None,
     now: float | None = None,
-) -> tuple[list[PrSnapshot], list[str]]:
+) -> tuple[list[PrSnapshot], list[str], set[tuple[str, str]]]:
     """Fetch open PRs across ``repos`` and return one snapshot per live PR.
 
     Args:
@@ -505,10 +505,12 @@ async def collect_pr_snapshots(
         now: monotonic-clock override (tests only).
 
     Returns:
-        ``(snapshots, notices)``. Notices name repos whose ``list_pull_
-        requests`` came back empty *and* raised (distinguishable in the
-        log; here they degrade to zero cards for that repo with a user-
-        visible warning).
+        ``(snapshots, notices, failed_repos)``. ``failed_repos`` is the
+        set of ``(owner, repo)`` whose ``list_pull_requests`` returned
+        :data:`_FETCH_FAILED`; the caller must NOT prune cache entries
+        for those repos this cycle (PR-gate objection at 7d5aa57 §1 —
+        pruning on transient failure would force a rate-burst re-fetch
+        of every PR the moment the API recovers).
 
     The steady-state cost:
     - Always: one ``list_pull_requests`` per repo (per 5-minute cycle in
@@ -521,6 +523,7 @@ async def collect_pr_snapshots(
 
     snapshots: list[PrSnapshot] = []
     notices: list[str] = []
+    failed_repos: set[tuple[str, str]] = set()
 
     for owner, repo in repos:
         # Every list call costs one API call regardless of the answer.
@@ -534,6 +537,7 @@ async def collect_pr_snapshots(
             notices.append(
                 f"{owner}/{repo}: GitHub API 応答なし — マージ lane は縮退表示中"
             )
+            failed_repos.add((owner, repo))
             continue
         if not prs:
             # Silence is intentional here: an empty list means "repo has
@@ -565,7 +569,7 @@ async def collect_pr_snapshots(
             if snapshot is not None:
                 snapshots.append(snapshot)
 
-    return snapshots, notices
+    return snapshots, notices, failed_repos
 
 
 async def _snapshot_for_pr(
@@ -1032,7 +1036,13 @@ def compute_was_truncated_per_pr(
     items_raw = list_result.get("items", []) or []
     items: list[dict[str, Any]] = [i for i in items_raw if isinstance(i, dict)]
     total_raw = list_result.get("total")
-    total = int(total_raw) if isinstance(total_raw, int) else len(items)
+    # If `total` is missing or not an int (e.g. error envelope, string
+    # value), we cannot prove exhaustion — treat every unmatched PR as
+    # ambiguous rather than silently declaring definitive absence
+    # (PR-gate objection at 7d5aa57 §2).
+    if not isinstance(total_raw, int):
+        return {pr_key(pr): True for pr in unmatched_prs}
+    total = total_raw
 
     if total <= len(items):
         return {pr_key(pr): False for pr in unmatched_prs}
@@ -1109,7 +1119,11 @@ async def resolve_old_prs_by_deep_pagination(
             i for i in items_raw if isinstance(i, dict)
         ]
         total_raw = result.get("total")
-        total = int(total_raw) if isinstance(total_raw, int) else 0
+        # None = "total unknown", suppresses the pool-exhausted check.
+        # Defaulting a missing int to 0 (previous behaviour) would fire
+        # `offset + len(items) >= 0` on every page and prematurely
+        # declare definitive absence (PR-gate objection at 7d5aa57 §2).
+        total = total_raw if isinstance(total_raw, int) else None
 
         next_remaining: list[PrSnapshot] = []
         page_horizon = min_last_activity_at(items)
@@ -1134,7 +1148,8 @@ async def resolve_old_prs_by_deep_pagination(
         remaining = next_remaining
 
         # Pool exhausted → remaining PRs' absence is definitive.
-        if offset + len(items) >= total:
+        # Skip when total is unknown (see comment above).
+        if total is not None and offset + len(items) >= total:
             for pr in remaining:
                 resolved[pr_key(pr)] = DeepPaginationOutcome(
                     definitive_absence=True,
