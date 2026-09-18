@@ -1496,6 +1496,41 @@ def test_yaml_null_pr_repo_allowlist_disables_the_lane(tmp_path):
     assert settings.board_pr_repo_allowlist == []
 
 
+def test_yaml_malformed_board_list_does_not_crash_the_loader(tmp_path):
+    """PR-gate BLOCKING (c659102 §1): ``board: []`` in YAML must not crash.
+
+    The earlier revision used ``if (board := ...) is not None:`` in the
+    board-section loader on the theory that this was needed to honour
+    an "explicit empty list to disable the lane". That reasoning was
+    wrong: the disable-the-lane semantic lives at the inner
+    ``pr_repo_allowlist`` key, not at the outer ``board`` key, and the
+    ``is not None`` check let a malformed ``board: []`` slip past the
+    guard and crash on ``board.get("done_days")`` (``list`` has no
+    ``.get``). The fix reverts to ``if board:`` so any falsy shape
+    (empty list, empty dict, missing, ``~``) is silently skipped and
+    the six-repo default is used.
+    """
+    import yaml as yaml_mod
+    from magickit.config import Settings
+
+    for malformed in ([], {}, None):
+        cfg_path = tmp_path / f"malformed_{type(malformed).__name__}.yaml"
+        cfg_path.write_text(
+            yaml_mod.safe_dump({"board": malformed}), encoding="utf-8",
+        )
+        # No exception, and the six-repo default is preserved (skipped
+        # the whole board section without corrupting the default).
+        settings = Settings.from_yaml(cfg_path)
+        assert settings.board_pr_repo_allowlist == [
+            "SpirrowGames/spirrow-magickit",
+            "SpirrowGames/spirrow-conclair",
+            "SpirrowGames/spirrow-lexora",
+            "SpirrowGames/spirrow-cognilens",
+            "SpirrowGames/spirrow-prismind",
+            "SpirrowGames/spirrow-mindwire",
+        ]
+
+
 def test_board_pr_repo_allowlist_default_is_the_documented_six_repos():
     """PR-gate BLOCKING (934f2cd §2): the prose beside the field and
     the ``default_factory`` must agree. The prose historically claimed

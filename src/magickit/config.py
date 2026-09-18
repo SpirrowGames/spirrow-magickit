@@ -492,11 +492,18 @@ class Settings(BaseSettings):
             flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
 
         # Board view settings
-        if (board := yaml_config.get("board")) is not None:
+        #
+        # ``if board:`` (not ``is not None``) guards this block so that
+        # malformed YAML like ``board: []`` or ``board: ~`` is silently
+        # skipped rather than crashing on ``board.get(...)``. The
+        # "disable the merge lane" semantic lives at the inner
+        # ``pr_repo_allowlist`` key (``pr_repo_allowlist: []`` inside a
+        # non-empty ``board`` dict is truthy at this level and enters
+        # the block), so this outer check does not need to distinguish
+        # None from an empty list (PR-gate objection at c659102 §1 —
+        # earlier ``is not None`` change conflated the two levels).
+        if board := yaml_config.get("board"):
             flat_config["board_done_days"] = board.get("done_days")
-            # `is not None` so an explicit empty list (「マージ lane を
-            # 全 repo で無効にする」) is honoured rather than silently
-            # falling back to the six-repo default.
             if "pr_repo_allowlist" in board:
                 raw = board.get("pr_repo_allowlist")
                 # ``pr_repo_allowlist:`` with no rhs (None) is the
