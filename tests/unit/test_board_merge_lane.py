@@ -508,6 +508,80 @@ async def test_bounded_ambiguity_emits_notice_naming_prs(
     ), notices
 
 
+# --- PR-gate objection 916df27: no zombie notices --------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_zombie_notice_for_pr_that_left_the_open_set(
+    temp_db_path, monkeypatch
+):
+    """PR-gate BLOCKING #1: a PR closed / merged / de-listed must NOT
+    keep emitting a truncation notice forever.
+
+    Scenario:
+    1. Prior poll cached a bounded_ambiguity entry for PR #99.
+    2. Current poll: PR #99 is no longer in ``list_pull_requests``
+       (merged / closed).
+    3. Board must render no notice for #99.
+    """
+    state = pr_watch.get_state()
+    # Seed a "was_truncated" entry from a hypothetical prior cycle.
+    pr_watch.set_negative_ledger(
+        state, ("O", "R", 99), "U-old", NOW, was_truncated=True,
+    )
+    # Current cycle: PR #99 no longer live; only #1 is.
+    _patch_pr_watch(monkeypatch, [_snapshot(number=1)])
+    context = await _collect(_Adapter(), _settings(temp_db_path))
+    notices = context["notices"]
+    assert not any(
+        "#99" in n for n in notices
+    ), f"stale PR #99 should not emit a notice: {notices}"
+    # The pruning also should have removed the entry from the cache.
+    assert ("O", "R", 99) not in state.negative_ledger_cache
+
+
+@pytest.mark.asyncio
+async def test_finding_ledger_clears_prior_bounded_ambiguity(
+    temp_db_path, monkeypatch
+):
+    """A subsequent poll that finds the ledger via Pass A must not
+    leave a stale bounded_ambiguity entry emitting a phantom notice
+    alongside the newly-attached ledger card.
+    """
+    state = pr_watch.get_state()
+    # Seed a bounded_ambiguity entry from a prior deep pagination miss.
+    pr_watch.set_negative_ledger(
+        state, ("O", "R", 1), "U", NOW, was_truncated=True,
+    )
+    _patch_pr_watch(monkeypatch, [_snapshot(number=1)])
+    # Ledger now exists (open thread).
+    open_ledger = {
+        "thread_id": "T-recovered",
+        "title": "PR review for O/R#1",
+        "status": "active",
+        "owner": "orchestrator",
+        "tags": ["pr-review"],
+        "last_msg_id": "msg-3",
+    }
+    adapter = _Adapter(
+        threads_by_call={
+            ("r", ("active", "awaiting_reply", "parked")): {
+                "items": [open_ledger], "total": 1,
+            },
+        },
+    )
+    context = await _collect(adapter, _settings(temp_db_path))
+    cards = _merge_cards(context)
+    assert len(cards) == 1
+    assert board.MERGE_STATE_LEDGER_ATTACHED in cards[0].fingerprint
+    # No zombie notice.
+    assert not any(
+        "pagination 深さ" in n for n in context["notices"]
+    ), context["notices"]
+    # Negative cache entry cleared.
+    assert ("O", "R", 1) not in state.negative_ledger_cache
+
+
 # --- degradation & rate cap ------------------------------------------------
 
 

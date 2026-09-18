@@ -196,12 +196,23 @@ class PrSnapshot:
 
 @dataclass
 class _CacheEntry:
-    """One ``(pr_number, updated_at)`` cache line.
+    """One review-fetch cache line, keyed by PR identity (not identity+updated_at).
+
+    ``updated_at`` used to live in the *key* — one dict entry per PR event
+    — which leaked memory (every comment / review / push forever) and
+    broke the rate-cap fallback: a stale entry becomes unreachable the
+    moment ``updated_at`` bumps, so a live-approved PR could flicker
+    non-approved on the board during a rate cap because the "stale but
+    honest" entry could not be found under the new key. Storing
+    ``updated_at`` inside the entry fixes both: the key stays stable at
+    ``(owner, repo, number)`` and the field is compared per read to
+    decide whether the entry is fresh.
 
     ``fetched_at`` is the wall-clock time of the ``/reviews`` fetch, used
     by the 15-minute mandatory refetch (see module docstring).
     """
 
+    updated_at: str
     reviews: list[dict[str, Any]]
     artifact_approved: bool
     approving_review_id: int | None
@@ -280,10 +291,9 @@ class PrWatchState:
     ``_STATE`` sentinel used by :func:`collect_pr_snapshots`.
     """
 
-    #: ``(owner, repo, number, updated_at)`` → cache entry.
-    cache: dict[tuple[str, str, int, str], _CacheEntry] = field(
-        default_factory=dict
-    )
+    #: ``(owner, repo, number)`` → cache entry. ``updated_at`` is
+    #: **inside** the entry, not in the key — see :class:`_CacheEntry`.
+    cache: dict[LedgerKey, _CacheEntry] = field(default_factory=dict)
     #: Rolling window of API call timestamps (monotonic seconds).
     call_log: list[float] = field(default_factory=list)
     #: Positive ledger cache: ``LedgerKey → (project, thread_id)``. Skips
@@ -355,19 +365,27 @@ def _approved_at_head(
 
 
 def _needs_review_refetch(
-    entry: _CacheEntry | None, *, now: float | None = None
+    entry: _CacheEntry | None,
+    *,
+    live_updated_at: str,
+    now: float | None = None,
 ) -> bool:
-    """Should we refetch reviews for a PR whose ``updated_at`` matched cache?
+    """Should we refetch reviews for this PR?
 
-    Two conditions:
+    Three conditions to fetch:
 
     - **No cache entry.** Trivially: fetch.
+    - **``updated_at`` bump.** Any GitHub-side event bumps ``updated_at``;
+      if the entry's stored value no longer matches the live one, the
+      cached review list is definitionally stale — an APPROVED entry
+      whose PR just got a new commit must not stay sticky.
     - **Non-approved & 15 minutes stale.** The mandatory self-healing
-      window (see module docstring). Approved entries are sticky —
-      transitions away from APPROVED bump ``updated_at`` and invalidate
-      the cache line before this check runs.
+      window (see module docstring). Approved entries whose ``updated_
+      at`` still matches are sticky.
     """
     if entry is None:
+        return True
+    if entry.updated_at != live_updated_at:
         return True
     if entry.artifact_approved:
         return False
@@ -585,9 +603,11 @@ async def _snapshot_for_pr(
         or f"https://github.com/{owner}/{repo}/pull/{number_raw}"
     )
 
-    cache_key = (owner, repo, number_raw, updated_at)
+    cache_key: LedgerKey = (owner, repo, number_raw)
     entry = state.cache.get(cache_key)
-    should_refetch = _needs_review_refetch(entry, now=now)
+    should_refetch = _needs_review_refetch(
+        entry, live_updated_at=updated_at, now=now,
+    )
 
     if not should_refetch and entry is not None:
         return PrSnapshot(
@@ -669,6 +689,7 @@ async def _snapshot_for_pr(
 
     approved, review_id = _approved_at_head(reviews, head_sha)
     state.cache[cache_key] = _CacheEntry(
+        updated_at=updated_at,
         reviews=reviews,
         artifact_approved=approved,
         approving_review_id=review_id,
@@ -752,19 +773,86 @@ def set_negative_ledger(
     )
 
 
-def iter_truncated_prs(state: PrWatchState) -> dict[str, list[int]]:
+def clear_negative_ledger(state: PrWatchState, key: LedgerKey) -> None:
+    """Drop the negative-cache entry for ``key`` if it exists.
+
+    Called when a subsequent poll finds a ledger (via Pass A / positive
+    cache / Pass B / deep pagination) — the older "we did not find"
+    entry is now known to be wrong, and leaving it would produce two
+    contradictory board states at once: a ledger link on the card AND
+    a truncation notice claiming the classification is unconfirmed.
+    Idempotent: safe to call even if no entry exists.
+    """
+    state.negative_ledger_cache.pop(key, None)
+
+
+def prune_negative_ledger(
+    state: PrWatchState,
+    *,
+    now: datetime,
+    live_keys: set[LedgerKey],
+) -> None:
+    """Drop stale / superseded entries from the negative cache.
+
+    Two dropping conditions:
+
+    - **Not live** (``key not in live_keys``): the PR has fallen out of
+      the ``list_pull_requests`` cycle — merged, closed, or moved out
+      of the allowlist. Its ledger status no longer needs a notice, and
+      leaving the entry would produce a permanent zombie notice about
+      a PR nobody is tracking. Filtering at emit time would work too,
+      but pruning also keeps the dict from growing without bound over
+      a long-running process.
+    - **TTL expired**: the entry no longer represents a bounded lookup;
+      Pass B would need to re-fire regardless. Dropping it here means
+      :func:`iter_truncated_prs` can rely on "still-live entries" as
+      the whole set to emit.
+    """
+    stale_keys = [
+        key
+        for key, entry in state.negative_ledger_cache.items()
+        if key not in live_keys
+        or entry.cached_at + _NEGATIVE_LEDGER_TTL <= now
+    ]
+    for key in stale_keys:
+        state.negative_ledger_cache.pop(key, None)
+
+
+def iter_truncated_prs(
+    state: PrWatchState,
+    *,
+    now: datetime,
+    live_keys: set[LedgerKey] | None = None,
+) -> dict[str, list[int]]:
     """PRs whose 未依頼 verdict is unconfirmed, keyed by ``owner/repo``.
 
     Feeds the board's notice line. Only entries with ``was_truncated=
-    True`` count — definitive absences are silent. The mapping is fresh
-    per call so a notice disappears the moment the cache entry is
-    superseded.
+    True`` count — definitive absences are silent. Two filters guard
+    against zombie notices (PR-gate objection at 916df27):
+
+    - **TTL**: an entry past its TTL no longer describes a bounded
+      lookup; the notice must retire with it. TTL is the same 15-min
+      window the negative cache honours on read.
+    - **Live keys** (optional): when caller supplies the set of PRs
+      still in the current ``list_pull_requests`` cycle, we filter to
+      those. This eliminates notices for merged / closed PRs whose
+      cache entries have not yet been pruned by
+      :func:`prune_negative_ledger`.
+
+    Callers that maintain their own pruning invariant can pass
+    ``live_keys=None`` to skip the extra filter; the TTL check alone
+    still bounds the notice's lifetime.
     """
     out: dict[str, list[int]] = {}
     for (owner, repo, number), entry in state.negative_ledger_cache.items():
-        if entry.was_truncated:
-            slug = f"{owner}/{repo}"
-            out.setdefault(slug, []).append(number)
+        if not entry.was_truncated:
+            continue
+        if entry.cached_at + _NEGATIVE_LEDGER_TTL <= now:
+            continue
+        if live_keys is not None and (owner, repo, number) not in live_keys:
+            continue
+        slug = f"{owner}/{repo}"
+        out.setdefault(slug, []).append(number)
     for slug in out:
         out[slug].sort()
     return out
@@ -1041,6 +1129,8 @@ __all__ = [
     "set_ledger_pointer",
     "get_negative_ledger",
     "set_negative_ledger",
+    "clear_negative_ledger",
+    "prune_negative_ledger",
     "iter_truncated_prs",
     "add_minutes",
     "definitive_absence_threshold",

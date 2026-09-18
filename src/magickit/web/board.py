@@ -965,6 +965,11 @@ async def _collect_merges(
             pr_watch.set_ledger_pointer(
                 watch_state, key, project, str(thread.get("thread_id", ""))
             )
+            # An older negative entry (from a truncated Pass B on a prior
+            # cycle) would otherwise emit a phantom notice on this
+            # rendered card. Clearing here is the invariant "a matched
+            # PR carries no truncation warning".
+            pr_watch.clear_negative_ledger(watch_state, key)
             continue
         # (b) Positive cache: last cycle's pointer.
         ptr = pr_watch.get_ledger_pointer(watch_state, key)
@@ -983,6 +988,7 @@ async def _collect_merges(
                     thread_from_cache = candidate
             if thread_from_cache is not None:
                 matched_ledger[key] = (proj_cached, thread_from_cache)
+                pr_watch.clear_negative_ledger(watch_state, key)
                 continue
             # Pointer stale (thread deleted / renamed / adapter error).
             # Fall through to Pass B; the pointer is overwritten if we
@@ -1028,6 +1034,7 @@ async def _collect_merges(
                 pr_watch.set_ledger_pointer(
                     watch_state, key, project, str(found.get("thread_id", ""))
                 )
+                pr_watch.clear_negative_ledger(watch_state, key)
             else:
                 still_unmatched.append(pr)
 
@@ -1071,6 +1078,7 @@ async def _collect_merges(
                         proj_found,
                         str(thread_dict.get("thread_id", "")),
                     )
+                    pr_watch.clear_negative_ledger(watch_state, key)
                 elif outcome.definitive_absence:
                     pr_watch.set_negative_ledger(
                         watch_state,
@@ -1088,11 +1096,22 @@ async def _collect_merges(
                         was_truncated=True,
                     )
 
-    # Emit truncation notice derived from cache state (not from whether
-    # Pass B ran this cycle) — a bounded_ambiguity cache entry lives
-    # for the TTL, and the notice must persist for the same duration
-    # so the human sees the caveat every render.
-    truncated = pr_watch.iter_truncated_prs(watch_state)
+    # Emit truncation notice derived from cache state, filtered to
+    # entries that are (a) still within TTL and (b) name a PR that is
+    # still in the current cycle's snapshots. Prune first so a
+    # long-running process does not accumulate zombie entries for PRs
+    # that merged or closed while a bounded_ambiguity was cached
+    # (PR-gate objection at 916df27: without this the notice never
+    # retires).
+    live_keys: set[pr_watch.LedgerKey] = {
+        pr_watch.pr_key(s) for s in snapshots
+    }
+    pr_watch.prune_negative_ledger(
+        watch_state, now=now, live_keys=live_keys,
+    )
+    truncated = pr_watch.iter_truncated_prs(
+        watch_state, now=now, live_keys=live_keys,
+    )
     for slug, pr_numbers in sorted(truncated.items()):
         if not pr_numbers:
             continue

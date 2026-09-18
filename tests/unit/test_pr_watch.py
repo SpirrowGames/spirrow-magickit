@@ -33,6 +33,7 @@ from magickit.core.pr_watch import (
     PrSnapshot,
     PrWatchState,
     add_minutes,
+    clear_negative_ledger,
     collect_pr_snapshots,
     compute_was_truncated_per_pr,
     definitive_absence_threshold,
@@ -42,6 +43,7 @@ from magickit.core.pr_watch import (
     iter_truncated_prs,
     min_last_activity_at,
     pr_key,
+    prune_negative_ledger,
     resolve_old_prs_by_deep_pagination,
     set_ledger_pointer,
     set_negative_ledger,
@@ -427,7 +429,7 @@ def test_iter_truncated_prs_lists_only_truncated_entries_by_slug():
     set_negative_ledger(state, ("O", "R", 1), "U", NOW, was_truncated=True)
     set_negative_ledger(state, ("O", "R", 2), "U", NOW, was_truncated=False)
     set_negative_ledger(state, ("O", "X", 5), "U", NOW, was_truncated=True)
-    out = iter_truncated_prs(state)
+    out = iter_truncated_prs(state, now=NOW)
     assert out == {"O/R": [1], "O/X": [5]}
 
 
@@ -707,3 +709,161 @@ async def test_deep_pagination_stops_early_on_chronological_fence():
     assert outcomes[("O", "R", 1)].definitive_absence is True
     # Should have stopped after page 2 without touching page 3.
     assert list_fn.calls == [("proj", 100)]
+
+
+# --- PR-gate objection at 916df27: zombie notices & cache-key restructure --
+
+
+def test_clear_negative_ledger_is_idempotent():
+    """Calling clear on a key with no entry must not raise."""
+    state = PrWatchState()
+    clear_negative_ledger(state, ("O", "R", 1))  # no-op
+    set_negative_ledger(state, ("O", "R", 1), "U", NOW, was_truncated=True)
+    clear_negative_ledger(state, ("O", "R", 1))
+    assert ("O", "R", 1) not in state.negative_ledger_cache
+    # Idempotent second call.
+    clear_negative_ledger(state, ("O", "R", 1))
+
+
+def test_iter_truncated_prs_hides_ttl_expired_entries():
+    """PR-gate BLOCKING #1: an entry past its TTL must NOT emit a notice.
+
+    Without this, a PR that briefly caused bounded_ambiguity would keep
+    its notice on the board long after the underlying condition resolved
+    (or the PR closed).
+    """
+    state = PrWatchState()
+    set_negative_ledger(
+        state, ("O", "R", 1), "U", NOW, was_truncated=True,
+    )
+    # 16 minutes later — past the 15-minute TTL.
+    later = NOW + timedelta(minutes=16)
+    assert iter_truncated_prs(state, now=later) == {}
+
+
+def test_iter_truncated_prs_filters_by_live_keys_when_provided():
+    """PR-gate BLOCKING #1 (b): a PR no longer live must not emit a notice.
+
+    If ``list_pull_requests`` no longer includes a PR (merged / closed /
+    de-listed), its lingering negative cache entry must not produce a
+    board notice on the next render.
+    """
+    state = PrWatchState()
+    set_negative_ledger(
+        state, ("O", "R", 1), "U", NOW, was_truncated=True,
+    )
+    set_negative_ledger(
+        state, ("O", "R", 2), "U", NOW, was_truncated=True,
+    )
+    # Only PR #1 is live this cycle.
+    out = iter_truncated_prs(
+        state, now=NOW, live_keys={("O", "R", 1)},
+    )
+    assert out == {"O/R": [1]}
+
+
+def test_iter_truncated_prs_live_keys_none_disables_liveness_filter():
+    """``live_keys=None`` keeps TTL only (backward compatibility)."""
+    state = PrWatchState()
+    set_negative_ledger(
+        state, ("O", "R", 1), "U", NOW, was_truncated=True,
+    )
+    assert iter_truncated_prs(state, now=NOW, live_keys=None) == {"O/R": [1]}
+
+
+def test_prune_negative_ledger_drops_expired_and_offline_entries():
+    """The pruning invariant: after prune, cache holds only live & fresh."""
+    state = PrWatchState()
+    set_negative_ledger(
+        state, ("O", "R", 1), "U", NOW, was_truncated=True,
+    )
+    set_negative_ledger(
+        state, ("O", "R", 2), "U", NOW, was_truncated=True,
+    )
+    # Entry for an already-expired PR (TTL past).
+    set_negative_ledger(
+        state, ("O", "R", 3), "U",
+        NOW - timedelta(minutes=20),
+        was_truncated=True,
+    )
+    prune_negative_ledger(
+        state, now=NOW, live_keys={("O", "R", 1)},
+    )
+    # #2 pruned (not live), #3 pruned (expired), #1 kept.
+    assert set(state.negative_ledger_cache) == {("O", "R", 1)}
+
+
+def test_cache_entry_updated_at_is_inside_entry_not_in_key():
+    """PR-gate ADVISORY: cache key stays stable at (owner, repo, number).
+
+    The regression: keying by ``(owner, repo, number, updated_at)`` used
+    to (a) leak memory (one new entry per PR event) and (b) break the
+    stale-fallback under rate cap (the lookup missed the moment
+    ``updated_at`` bumped). Pin: the state's cache is keyed by the
+    3-tuple, and the stored entry carries its own ``updated_at``.
+    """
+    state = PrWatchState()
+    # Simulate two polls of the same PR at different updated_at values.
+    from magickit.core.pr_watch import _CacheEntry
+    key: pr_watch.LedgerKey = ("O", "R", 1)
+    state.cache[key] = _CacheEntry(
+        updated_at="U1", reviews=[], artifact_approved=False,
+        approving_review_id=None, fetched_at=0.0,
+    )
+    state.cache[key] = _CacheEntry(
+        updated_at="U2", reviews=[], artifact_approved=True,
+        approving_review_id=42, fetched_at=1.0,
+    )
+    # Only one entry per PR, regardless of updated_at churn.
+    assert len(state.cache) == 1
+    entry = state.cache[key]
+    assert entry.updated_at == "U2"
+    assert entry.artifact_approved is True
+
+
+@pytest.mark.asyncio
+async def test_rate_cap_serves_stale_entry_after_updated_at_bump():
+    """PR-gate ADVISORY: rate-cap fallback must be reachable across bumps.
+
+    Under the old key format, once ``updated_at`` bumped the cached
+    entry (keyed by the OLD value) became unreachable, so a rate-capped
+    poll for an APPROVED PR would falsely show it as un-approved.
+    """
+    state = PrWatchState()
+    # Pre-populate cache with an APPROVED entry under U1.
+    from magickit.core.pr_watch import _CacheEntry
+    state.cache[("O", "R", 1)] = _CacheEntry(
+        updated_at="U1",
+        reviews=[{"state": "APPROVED", "commit_id": "H"}],
+        artifact_approved=True,
+        approving_review_id=42,
+        fetched_at=0.0,
+    )
+    # Fill call log to trigger rate cap.
+    for i in range(SOFT_CAP_CALLS_PER_HOUR):
+        state.call_log.append(float(i))
+
+    async def _list(owner: str, repo: str):
+        # Same PR, but updated_at bumped to U2.
+        return [{
+            "number": 1, "title": "t",
+            "html_url": "https://github.com/O/R/pull/1",
+            "head": {"sha": "H"}, "updated_at": "U2",
+            "created_at": "2026-09-01T00:00:00Z",
+        }]
+
+    async def _reviews(*_a, **_kw):
+        # Never called (rate cap suppresses).
+        raise AssertionError("must not fetch reviews under rate cap")
+
+    snapshots, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=_list, fetch_reviews=_reviews,
+        now=float(SOFT_CAP_CALLS_PER_HOUR) - 1.0,
+    )
+    assert len(snapshots) == 1
+    # The card correctly falls back to the cached APPROVED verdict even
+    # though updated_at changed — the old-format bug would have made
+    # this False (unreachable cache).
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].rate_capped is True
