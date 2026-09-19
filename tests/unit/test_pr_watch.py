@@ -68,8 +68,27 @@ def _pr(
     }
 
 
-def _review(state: str, commit_id: str, review_id: int = 100) -> dict[str, Any]:
-    return {"state": state, "commit_id": commit_id, "id": review_id}
+def _review(
+    state: str,
+    commit_id: str,
+    review_id: int = 100,
+    *,
+    login: str = "spirrowgames-ops",
+) -> dict[str, Any]:
+    """A synthetic review payload.
+
+    ``login`` defaults to the naysayer bot's login because
+    ``_approved_at_head`` (post-5fa6480 fix) tracks per-reviewer
+    latest verdict — tests that pass multiple reviews without setting
+    ``login`` should still model a single reviewer, matching the
+    pre-fix behaviour where each APPROVED was treated as sufficient.
+    """
+    return {
+        "state": state,
+        "commit_id": commit_id,
+        "id": review_id,
+        "user": {"login": login},
+    }
 
 
 def _make_fetchers(
@@ -120,6 +139,140 @@ async def test_approved_at_head_is_reflected_in_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_same_reviewer_changes_requested_supersedes_earlier_approved_at_head():
+    """PR-gate objection at 5fa6480 §1 — supersede on same head SHA.
+
+    GitHub's ``/reviews`` returns events in chronological order. If a
+    reviewer approves and then later requests changes on the SAME
+    commit, the earlier approval is superseded (this is how GitHub's
+    own branch protection reads the stream). The pre-fix code
+    returned True on the first APPROVED and ignored the supersession,
+    masking the blocking review on the board.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("CHANGES_REQUESTED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+    assert snapshots[0].approving_review_id is None
+
+
+@pytest.mark.asyncio
+async def test_same_reviewer_dismissed_supersedes_earlier_approved_at_head():
+    """A DISMISSED review on head_sha invalidates the same reviewer's earlier APPROVED.
+
+    GitHub's dismissal endpoint (``PUT
+    /repos/.../pulls/.../reviews/{id}/dismissals``) updates the
+    review's ``state`` field to ``DISMISSED``. That review payload
+    thereafter shows ``state="DISMISSED"`` and must not be treated as
+    still-valid approval.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("DISMISSED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_second_reviewer_changes_requested_blocks_first_reviewers_approval():
+    """Cross-reviewer supersede: any active CHANGES_REQUESTED blocks approval.
+
+    Reviewer X approves at head H, then reviewer Y requests changes at
+    the same head H. GitHub branch protection would block this merge;
+    the board must reflect the same verdict.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("CHANGES_REQUESTED", "H", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_reviewer_reapproves_after_earlier_changes_requested_at_same_head():
+    """The freshest verdict wins: CHANGES_REQUESTED then APPROVED on same head → True.
+
+    This is the recovery path: reviewer requests changes, implementer
+    pushes a fix (which normally moves head_sha, but for defensiveness
+    we pin the same-head recovery too), reviewer re-approves. The
+    latest APPROVED must supersede the earlier CHANGES_REQUESTED.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "H", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
+async def test_commented_review_does_not_displace_prior_approval():
+    """COMMENTED is a non-verdict and must not overwrite the reviewer's APPROVED.
+
+    GitHub's ``COMMENTED`` state means the reviewer left inline
+    comments without taking a stance. It does not reset an earlier
+    APPROVED (or an earlier CHANGES_REQUESTED, for that matter).
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="H")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "H", review_id=1, login="reviewer-x"),
+                _review("COMMENTED", "H", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 1
+
+
+@pytest.mark.asyncio
 async def test_approve_at_earlier_head_does_not_count():
     """A review on an earlier commit judged a different diff."""
     state = PrWatchState()
@@ -134,6 +287,138 @@ async def test_approve_at_earlier_head_does_not_count():
     )
 
     assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_changes_requested_on_earlier_commit_still_blocks_approval_at_head():
+    """PR-gate objection at 5cec07c §1 — CR is not scoped to a single commit.
+
+    GitHub branch protection keeps a CHANGES_REQUESTED review active across
+    new commits until it is explicitly dismissed. The exact naysayer
+    scenario: reviewer X requests changes on an older commit, reviewer Y
+    approves on the new head. GitHub still blocks the merge; the board
+    must reflect that block, not falsely advertise the PR as approved.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+    assert snapshots[0].approving_review_id is None
+
+
+@pytest.mark.asyncio
+async def test_changes_requested_on_earlier_commit_blocks_even_without_any_approval():
+    """Standalone: a lone CR on an old commit still blocks (no approvals seen).
+
+    A dangling CHANGES_REQUESTED that was never dismissed keeps the PR
+    blocked regardless of how many commits have landed since. This pins
+    the branch-protection semantic independent of the multi-reviewer
+    approval path.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "head-old", review_id=1, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is False
+
+
+@pytest.mark.asyncio
+async def test_reviewer_can_withdraw_earlier_cr_by_reapproving_at_new_head():
+    """Recovery path: same reviewer's newer APPROVED @ head supersedes their earlier CR @ old.
+
+    Reviewer X requested changes on the old commit, then re-approved on
+    the new head. Per-reviewer latest wins → X is no longer blocking,
+    and the APPROVED @ head_sha counts as approval.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("CHANGES_REQUESTED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-x"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
+async def test_dismissed_earlier_changes_requested_stops_blocking():
+    """A dismissed CR (state field flipped to DISMISSED) no longer blocks.
+
+    GitHub's dismissal endpoint updates the review's state field in place,
+    so what was a CHANGES_REQUESTED review returns as state=DISMISSED on
+    subsequent /reviews calls. That review must not keep blocking the PR.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                # The old CR was dismissed; its state field is now DISMISSED.
+                _review("DISMISSED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_approve_plus_head_approve_uses_head_approve_id():
+    """Multiple reviewers: only the reviewer whose APPROVED is @ head counts.
+
+    Reviewer X approved an older commit (stale — does not count). Reviewer
+    Y approved the current head. The board must return True with Y's
+    review id, not X's.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(head="head-new")],
+        reviews_by_pr={
+            1: [
+                _review("APPROVED", "head-old", review_id=1, login="reviewer-x"),
+                _review("APPROVED", "head-new", review_id=2, login="reviewer-y"),
+            ],
+        },
+    )
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn, now=0.0,
+    )
+    assert snapshots[0].artifact_approved is True
+    assert snapshots[0].approving_review_id == 2
 
 
 @pytest.mark.asyncio
@@ -320,6 +605,50 @@ async def test_call_log_prunes_after_an_hour():
     )
     # The 2 stale entries pruned; only the 2 new ones remain (list + reviews).
     assert len(state.call_log) == 2
+
+
+@pytest.mark.asyncio
+async def test_call_log_pruned_at_cycle_end_even_when_all_repos_have_zero_prs():
+    """Dormant repos must not leak: pruning is decoupled from PR activity.
+
+    Regression pin for PR-gate advisory at d8bc61a. Before the fix, the
+    call log was only pruned inside `_rate_capped`, which is only reached
+    from `_snapshot_for_pr`. If every polled repo returns an empty PR
+    list for a prolonged period, that path is skipped and the log grows
+    one float per repo per cycle indefinitely. The fix invokes
+    `_prune_call_log` at the end of every `collect_pr_snapshots` cycle
+    so quiet periods self-bound to the last rolling hour.
+    """
+    state = PrWatchState()
+    # Seed the log with entries older than the 1-hour cutoff (strict:
+    # `_prune_call_log` keeps `t >= now - 3600.0`; with `now=3602.0` the
+    # cutoff is 2.0, so seeds must be < 2.0 to be dropped).
+    state.call_log.extend([0.0, 0.5, 1.0])
+
+    async def _empty_list(owner: str, repo: str):
+        # Zero open PRs → _snapshot_for_pr path is never taken, so
+        # `_rate_capped` (the old prune site) is never invoked.
+        return []
+
+    async def _unused_reviews(*args, **kwargs):
+        raise AssertionError("reviews should not be fetched when PRs are empty")
+
+    snapshots, notices, failed = await collect_pr_snapshots(
+        [("O", "R1"), ("O", "R2")],
+        state,
+        fetch_open_prs=_empty_list,
+        fetch_reviews=_unused_reviews,
+        now=3602.0,  # > 1 hour past the seeded entries
+    )
+    assert snapshots == []
+    assert notices == []
+    assert failed == set()
+
+    # The 3 seeded entries are pruned; only the 2 fresh `list_pull_requests`
+    # calls made during this cycle survive.
+    assert len(state.call_log) == 2
+    # And they all sit inside the rolling hour.
+    assert all(t >= 3602.0 - 3600.0 for t in state.call_log)
 
 
 # --- outage sentinel & notice ----------------------------------------------
@@ -1032,3 +1361,284 @@ def test_prune_functions_are_idempotent_on_empty_state():
     assert state.cache == {}
     assert state.ledger_pointers == {}
     assert state.negative_ledger_cache == {}
+
+
+def test_prune_functions_preserve_failed_repos_entries():
+    """PR-gate BLOCKING (e7d20da §1): the three prune functions must
+    honour ``failed_repos`` internally so the caller does not have to
+    reverse-engineer keys from ``state.cache`` / ``ledger_pointers``
+    / ``negative_ledger_cache`` to uphold the "don't evict cache for
+    repos whose GitHub read failed this cycle" invariant.
+
+    Setup covers all three caches for one healthy repo (present in
+    ``live_keys``) and one failing repo (present in ``failed_repos``).
+    After pruning against an empty ``live_keys``, the failing repo's
+    entries must survive and the healthy repo's entry must survive
+    (it is live). If the caller had to filter manually, this test
+    would need to reach into ``state.*`` internals to build the key
+    set — the whole point of ``failed_repos=`` is that it does not.
+    """
+    from magickit.core.pr_watch import _CacheEntry
+    state = PrWatchState()
+    healthy = ("O", "HEALTHY", 1)
+    failing = ("O", "FAILING", 42)
+    entry = _CacheEntry(
+        updated_at="U", reviews=[], artifact_approved=False,
+        approving_review_id=None, fetched_at=0.0,
+    )
+    state.cache[healthy] = entry
+    state.cache[failing] = entry
+    set_ledger_pointer(state, healthy, "proj", "T-1", "U")
+    set_ledger_pointer(state, failing, "proj", "T-42", "U")
+    set_negative_ledger(state, healthy, "U", NOW, was_truncated=True)
+    set_negative_ledger(state, failing, "U", NOW, was_truncated=True)
+
+    live_keys = {healthy}
+    failed_repos = {("O", "FAILING")}
+    prune_review_cache(
+        state, live_keys=live_keys, failed_repos=failed_repos,
+    )
+    prune_ledger_pointers(
+        state, live_keys=live_keys, failed_repos=failed_repos,
+    )
+    prune_negative_ledger(
+        state, now=NOW, live_keys=live_keys, failed_repos=failed_repos,
+    )
+
+    # Healthy repo entry: kept (live). Failing repo entry: kept (failed).
+    assert set(state.cache) == {healthy, failing}
+    assert set(state.ledger_pointers) == {healthy, failing}
+    assert set(state.negative_ledger_cache) == {healthy, failing}
+
+
+def test_prune_negative_ledger_ttl_still_drops_expired_failed_repo_entries():
+    """The ``failed_repos`` skip is scoped to the not-live condition
+    only. A TTL-expired entry is stale on its own schedule and must
+    drop regardless of the repo's fetch outcome — otherwise a repo
+    stuck in a long API outage would grow a monotonic pile of stale
+    negative-cache entries."""
+    state = PrWatchState()
+    failing_stale = ("O", "FAILING", 1)
+    set_negative_ledger(
+        state, failing_stale, "U",
+        NOW - timedelta(minutes=20),  # TTL past
+        was_truncated=True,
+    )
+    prune_negative_ledger(
+        state, now=NOW, live_keys=set(),
+        failed_repos={("O", "FAILING")},
+    )
+    # TTL wins over the failed-repos preserve.
+    assert failing_stale not in state.negative_ledger_cache
+
+
+# --- PR-gate objection at e7d20da §2: YAML string bypassing coercion ---
+
+
+def test_yaml_string_pr_repo_allowlist_does_not_silently_split_into_chars(
+    tmp_path,
+):
+    """PR-gate ADVISORY (e7d20da §2): a user who writes
+    ``pr_repo_allowlist: "SpirrowGames/spirrow-magickit"`` (bare string,
+    not list) must NOT get their value silently corrupted into
+    ``['S', 'p', 'i', 'r', ...]`` by a defensive ``list(...)`` wrapper.
+
+    The old shape wrapped the value in ``list()``, which happily
+    iterated the string one character at a time and satisfied
+    Pydantic's ``list[str]`` validator with the resulting per-char
+    list. Downstream code that expects ``"owner/repo"`` entries would
+    then blow up far from the actual mistake. The fix forwards the raw
+    value to Pydantic, letting the validator reject a non-list up
+    front — a loud, close-to-source failure instead of the silent,
+    downstream one.
+    """
+    import yaml as yaml_mod
+    from pydantic import ValidationError
+    from magickit.config import Settings
+
+    cfg_path = tmp_path / "magickit_config.yaml"
+    cfg_path.write_text(
+        yaml_mod.safe_dump(
+            {"board": {"pr_repo_allowlist": "SpirrowGames/spirrow-magickit"}}
+        ),
+        encoding="utf-8",
+    )
+    # Either Pydantic rejects the string OR the coercion produces a
+    # list that is NOT a per-character split. The forbidden outcome is
+    # the silent per-char corruption the wrapper used to hand back.
+    try:
+        settings = Settings.from_yaml(cfg_path)
+    except ValidationError:
+        return  # loud rejection — the desired behaviour
+    assert settings.board_pr_repo_allowlist != list(
+        "SpirrowGames/spirrow-magickit"
+    ), (
+        "list() wrapper regression: bare string was silently split into "
+        "per-character entries"
+    )
+
+
+def test_yaml_null_pr_repo_allowlist_disables_the_lane(tmp_path):
+    """The explicit empty-list case (``pr_repo_allowlist:`` with no
+    rhs, which YAML parses as ``None``) must still be honoured — it
+    is the documented way to disable the merge lane. The fix keeps
+    the ``None → []`` substitution while removing the ``list(...)``
+    wrapper that corrupted strings."""
+    import yaml as yaml_mod
+    from magickit.config import Settings
+
+    cfg_path = tmp_path / "magickit_config.yaml"
+    cfg_path.write_text(
+        yaml_mod.safe_dump({"board": {"pr_repo_allowlist": None}}),
+        encoding="utf-8",
+    )
+    settings = Settings.from_yaml(cfg_path)
+    assert settings.board_pr_repo_allowlist == []
+
+
+def test_yaml_malformed_board_list_does_not_crash_the_loader(tmp_path):
+    """PR-gate BLOCKING (c659102 §1): ``board: []`` in YAML must not crash.
+
+    The earlier revision used ``if (board := ...) is not None:`` in the
+    board-section loader on the theory that this was needed to honour
+    an "explicit empty list to disable the lane". That reasoning was
+    wrong: the disable-the-lane semantic lives at the inner
+    ``pr_repo_allowlist`` key, not at the outer ``board`` key, and the
+    ``is not None`` check let a malformed ``board: []`` slip past the
+    guard and crash on ``board.get("done_days")`` (``list`` has no
+    ``.get``). The fix reverts to ``if board:`` so any falsy shape
+    (empty list, empty dict, missing, ``~``) is silently skipped and
+    the six-repo default is used.
+    """
+    import yaml as yaml_mod
+    from magickit.config import Settings
+
+    for malformed in ([], {}, None):
+        cfg_path = tmp_path / f"malformed_{type(malformed).__name__}.yaml"
+        cfg_path.write_text(
+            yaml_mod.safe_dump({"board": malformed}), encoding="utf-8",
+        )
+        # No exception, and the six-repo default is preserved (skipped
+        # the whole board section without corrupting the default).
+        settings = Settings.from_yaml(cfg_path)
+        assert settings.board_pr_repo_allowlist == [
+            "SpirrowGames/spirrow-magickit",
+            "SpirrowGames/spirrow-conclair",
+            "SpirrowGames/spirrow-lexora",
+            "SpirrowGames/spirrow-cognilens",
+            "SpirrowGames/spirrow-prismind",
+            "SpirrowGames/spirrow-mindwire",
+        ]
+
+
+def test_board_pr_repo_allowlist_default_is_the_documented_six_repos():
+    """PR-gate BLOCKING (934f2cd §2): the prose beside the field and
+    the ``default_factory`` must agree. The prose historically claimed
+    the default was an empty list (so dev hosts would not call
+    GitHub); the actual default was six production repos. This test
+    pins the documented behaviour by asserting the default IS the six
+    production repos and IS NOT empty, so any future edit that lets
+    prose drift again (in either direction) turns red here."""
+    from magickit.config import Settings
+
+    settings = Settings()
+    assert settings.board_pr_repo_allowlist == [
+        "SpirrowGames/spirrow-magickit",
+        "SpirrowGames/spirrow-conclair",
+        "SpirrowGames/spirrow-lexora",
+        "SpirrowGames/spirrow-cognilens",
+        "SpirrowGames/spirrow-prismind",
+        "SpirrowGames/spirrow-mindwire",
+    ]
+
+
+# --- PR-gate BLOCKING at 934f2cd §1: dict payload without items must fail
+# loudly, not silently blank the lane -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_treats_error_envelope_as_fetch_failed(
+    monkeypatch,
+):
+    """A GitHub error envelope (``{"message": "API rate limit exceeded"}``)
+    has no ``items`` key, so the old fallthrough returned ``[]`` — the
+    caller then thought the repo had zero open PRs, silently blanked
+    the lane, and evicted every cached ``/reviews`` entry. The fix
+    routes this shape through :data:`_FETCH_FAILED` so
+    :func:`collect_pr_snapshots` emits a degradation notice and the
+    caller preserves the cache via ``failed_repos``.
+    """
+    from magickit.mcp import github_dispatch
+
+    async def fake_mcp_call(method, params, pat):
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"message": "API rate limit exceeded"}',
+                }
+            ]
+        }
+
+    monkeypatch.setattr(github_dispatch, "_mcp_call", fake_mcp_call)
+    monkeypatch.setattr(
+        github_dispatch, "_resolve_pat", lambda _role: "fake-pat"
+    )
+
+    result = await pr_watch._fetch_open_prs("O", "R")
+    assert result is pr_watch._FETCH_FAILED
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_treats_none_payload_as_fetch_failed(
+    monkeypatch,
+):
+    """When ``_first_json_payload`` cannot decode the body (returns
+    ``None``), the old fallthrough returned ``[]``. Same silent-blank
+    hazard: route through :data:`_FETCH_FAILED` instead."""
+    from magickit.mcp import github_dispatch
+
+    async def fake_mcp_call(method, params, pat):
+        # No content array → _first_json_payload returns None.
+        return {}
+
+    monkeypatch.setattr(github_dispatch, "_mcp_call", fake_mcp_call)
+    monkeypatch.setattr(
+        github_dispatch, "_resolve_pat", lambda _role: "fake-pat"
+    )
+
+    result = await pr_watch._fetch_open_prs("O", "R")
+    assert result is pr_watch._FETCH_FAILED
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_accepts_bare_list_and_items_wrapper(
+    monkeypatch,
+):
+    """Both legitimate success shapes still parse correctly — the
+    tightening of the error path must not close either happy path."""
+    from magickit.mcp import github_dispatch
+
+    call = {"n": 0}
+    payloads = [
+        '[{"number": 1}, {"number": 2}]',       # bare list
+        '{"items": [{"number": 3}]}',             # wrapped
+        '[]',                                     # legit empty
+    ]
+
+    async def fake_mcp_call(method, params, pat):
+        text = payloads[call["n"]]
+        call["n"] += 1
+        return {"content": [{"type": "text", "text": text}]}
+
+    monkeypatch.setattr(github_dispatch, "_mcp_call", fake_mcp_call)
+    monkeypatch.setattr(
+        github_dispatch, "_resolve_pat", lambda _role: "fake-pat"
+    )
+
+    assert await pr_watch._fetch_open_prs("O", "R") == [
+        {"number": 1}, {"number": 2},
+    ]
+    assert await pr_watch._fetch_open_prs("O", "R") == [{"number": 3}]
+    # Legitimate empty-list is still an empty list (NOT _FETCH_FAILED).
+    assert await pr_watch._fetch_open_prs("O", "R") == []

@@ -359,18 +359,86 @@ def _record_call(state: PrWatchState, *, now: float | None = None) -> None:
 def _approved_at_head(
     reviews: list[dict[str, Any]], head_sha: str
 ) -> tuple[bool, int | None]:
-    """Same predicate as ``pr_gate_ledger.evaluate_ledger_verdict``.
+    """Return (approved, approving_review_id) with GitHub branch-protection semantics.
 
-    APPROVED **and** ``commit_id == head`` — a review on an earlier commit
-    judged a different diff. Kept in sync with the ledger's rule so the
-    board and the carve-out cannot disagree on what "approved" means.
+    ``APPROVED`` and ``CHANGES_REQUESTED`` behave **asymmetrically** across
+    commits, and the aggregation must reflect that:
+
+    - An ``APPROVED`` review must be on the current ``head_sha`` to count.
+      A review on an earlier commit judged a different diff (msg-978 §4-2).
+    - A ``CHANGES_REQUESTED`` review stays active across new commits and
+      continues to block the PR until it is explicitly dismissed — even
+      when it was left on an older commit. GitHub branch protection blocks
+      such PRs regardless of subsequent approvals (PR-gate objection at
+      5cec07c §1).
+    - A ``DISMISSED`` review no longer blocks (dismissal turned the review's
+      ``state`` field into ``DISMISSED``) and does not itself approve.
+    - ``COMMENTED`` and ``PENDING`` are non-verdicts; they never displace
+      a prior real verdict.
+
+    Chronological aggregation (GitHub's own rule, per-reviewer latest wins):
+    iterate ``/reviews`` in the order returned (oldest first) and record,
+    per reviewer, their LATEST APPROVED / CHANGES_REQUESTED / DISMISSED
+    review — including its ``commit_id``. Do NOT pre-filter by
+    ``head_sha`` at this stage; the commit-scope check applies to the
+    APPROVED branch of the aggregate, not to the reviewer-latest tracking.
+
+    Aggregate rule:
+    - Any reviewer whose latest verdict is ``CHANGES_REQUESTED`` blocks,
+      regardless of which commit the verdict was left on. (This is the
+      correction over 5cec07c, which incorrectly dropped old-commit
+      CHANGES_REQUESTED reviews.)
+    - Otherwise, any reviewer whose latest verdict is ``APPROVED`` AND
+      whose ``commit_id`` equals ``head_sha`` → True with that review's id.
+    - Else → False.
+
+    Reviews without a resolvable ``user.login`` are treated as coming
+    from a synthetic single-review reviewer keyed by ``id`` (test payloads
+    often omit ``user``; the real GitHub API always populates it). This
+    is fail-safe: it can only under-count CHANGES_REQUESTED blocks (by
+    letting one reviewer's newer CR fail to supersede their older CR),
+    never over-approve.
+
+    Divergence note: ``pr_gate_ledger.evaluate_ledger_verdict`` still
+    uses the older simple predicate ("any APPROVED at head"); the
+    open-PR side and the ledger side are intentionally out of sync
+    pending a follow-up PR that applies the same rule there. That fix
+    is out of scope for PR #87 Part A (``pr_gate_ledger.py`` is not in
+    its declared paths).
     """
+    # per_reviewer[key] = (state, commit_id, review_id) — the latest
+    # verdict this reviewer submitted on ANY commit. COMMENTED / PENDING
+    # are non-verdicts and skipped so they cannot displace a real one.
+    per_reviewer: dict[Any, tuple[str, Any, int | None]] = {}
     for r in reviews:
         if not isinstance(r, dict):
             continue
-        if r.get("state") == _APPROVED and r.get("commit_id") == head_sha:
-            review_id = r.get("id")
-            return True, review_id if isinstance(review_id, int) else None
+        state = r.get("state")
+        if state not in {_APPROVED, "CHANGES_REQUESTED", "DISMISSED"}:
+            continue
+        commit_id = r.get("commit_id")
+        review_id_raw = r.get("id")
+        review_id = review_id_raw if isinstance(review_id_raw, int) else None
+        user = r.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        # Synthetic key when the payload lacks a resolvable login: each
+        # such review counts as its own reviewer (fail-safe — it can
+        # only under-block, never over-approve).
+        key: Any = login if isinstance(login, str) else ("__no_login__", review_id_raw)
+        # Chronological order → later entry wins for this reviewer.
+        per_reviewer[key] = (state, commit_id, review_id)
+
+    # Any active CHANGES_REQUESTED blocks — regardless of which commit
+    # (GitHub branch protection keeps CR active across new pushes).
+    for state, _commit_id, _review_id in per_reviewer.values():
+        if state == "CHANGES_REQUESTED":
+            return False, None
+
+    # Otherwise, any active APPROVED whose commit_id equals head_sha wins.
+    for state, commit_id, review_id in per_reviewer.values():
+        if state == _APPROVED and commit_id == head_sha:
+            return True, review_id
+
     return False, None
 
 
@@ -421,6 +489,17 @@ async def _fetch_open_prs(
     when the eventual merge went by unobserved. The sentinel lets
     :func:`collect_pr_snapshots` emit a notice on true failure while
     keeping the "empty repo" case silent.
+
+    Two payload shapes count as success:
+
+    - a bare JSON list of PR dicts (``[{...}, {...}]``), or
+    - a wrapped object with ``{"items": [...]}``.
+
+    Any other shape — a GitHub error envelope such as
+    ``{"message": "API rate limit exceeded"}``, ``None`` from a
+    non-decodable payload, or a scalar — is treated as
+    :data:`_FETCH_FAILED`, not as an empty list. The empty-list case is
+    reserved for a genuine 200-OK response carrying zero open PRs.
     """
     from magickit.mcp.github_dispatch import _mcp_call, _resolve_pat  # noqa: PLC0415
 
@@ -449,10 +528,23 @@ async def _fetch_open_prs(
         items = payload.get("items")
         if isinstance(items, list):
             return [p for p in items if isinstance(p, dict)]
-    # A parseable but shape-wrong response is treated as empty (200 OK
-    # with unexpected body); a networking-level failure went through the
-    # exception path above. Only the exception path is 「outage」.
-    return []
+    # Any other shape is unrecognisable as a PR list: a GitHub error
+    # envelope (``{"message": "API rate limit exceeded"}`` /
+    # ``{"message": "Bad credentials"}``), a scalar, or ``None`` from a
+    # non-decodable payload. Returning ``[]`` here would tell the caller
+    # "0 open PRs", which silently drops the repo's PRs from the board,
+    # evicts every cached ``/reviews`` / ledger pointer for them, and
+    # forces a rate-limit burst the moment the API recovers — the exact
+    # failure the ``failed_repos`` preserve was designed to prevent
+    # (PR-gate BLOCKING at 934f2cd §1). Route this through the same
+    # sentinel path the exception branch uses so ``collect_pr_snapshots``
+    # emits a degradation notice and the pruners spare the cache.
+    logger.warning(
+        "pr_watch: list_pull_requests unrecognized payload shape",
+        repo=f"{owner}/{repo}",
+        payload_type=type(payload).__name__,
+    )
+    return _FETCH_FAILED
 
 
 async def _fetch_reviews(
@@ -514,16 +606,25 @@ async def collect_pr_snapshots(
     Returns:
         ``(snapshots, notices, failed_repos)``. ``failed_repos`` is the
         set of ``(owner, repo)`` whose ``list_pull_requests`` returned
-        :data:`_FETCH_FAILED`; the caller must NOT prune cache entries
-        for those repos this cycle (PR-gate objection at 7d5aa57 §1 —
-        pruning on transient failure would force a rate-burst re-fetch
-        of every PR the moment the API recovers).
+        :data:`_FETCH_FAILED`; pass it as the ``failed_repos=`` kwarg to
+        :func:`prune_review_cache`, :func:`prune_ledger_pointers`, and
+        :func:`prune_negative_ledger` so those repos' cache entries are
+        preserved across the failing cycle (PR-gate objection at
+        7d5aa57 §1 — pruning on transient failure would force a
+        rate-burst re-fetch of every PR the moment the API recovers).
+        The prune functions own the exclusion; the caller does not need
+        to know the shape of the internal cache dicts to uphold the
+        invariant.
 
     The steady-state cost:
     - Always: one ``list_pull_requests`` per repo (per 5-minute cycle in
       production; the caller controls cycle frequency).
     - Only when needed: ``get_reviews`` per PR whose ``updated_at`` moved
       or whose 15-minute self-heal window expired (see module docstring).
+
+    Memory hygiene: ``state.call_log`` is pruned to the last rolling
+    hour at the end of every cycle, so long dormant periods (no open PRs
+    across any polled repo) cannot cause unbounded growth.
     """
     fetch_open_prs = fetch_open_prs or _fetch_open_prs
     fetch_reviews = fetch_reviews or _fetch_reviews
@@ -575,6 +676,15 @@ async def collect_pr_snapshots(
                 continue
             if snapshot is not None:
                 snapshots.append(snapshot)
+
+    # Decouple call-log hygiene from PR activity (PR-gate objection at
+    # d8bc61a §advisory — the pruner was only invoked inside `_rate_capped`,
+    # which is reached via `_snapshot_for_pr`; if every polled repo has zero
+    # open PRs for a prolonged quiet period, that path is skipped and
+    # `call_log` accumulates one float per repo per cycle indefinitely).
+    # Pruning once per cycle bounds the log to the last rolling hour
+    # regardless of PR activity, and self-heals the moment PRs return.
+    _prune_call_log(state, now=now)
 
     return snapshots, notices, failed_repos
 
@@ -832,8 +942,31 @@ def clear_negative_ledger(state: PrWatchState, key: LedgerKey) -> None:
     state.negative_ledger_cache.pop(key, None)
 
 
+def _is_from_failed_repo(
+    key: LedgerKey, failed_repos: set[tuple[str, str]] | None,
+) -> bool:
+    """True if ``key`` belongs to a repo whose fetch failed this cycle.
+
+    Encapsulates the ``failed_repos`` skip that
+    :func:`prune_review_cache`, :func:`prune_ledger_pointers`, and
+    :func:`prune_negative_ledger` all apply identically. The three
+    prune functions own this exclusion because :func:`collect_pr_snapshots`
+    yields no snapshots for failed repos, so their PRs are missing from
+    the caller's ``live_keys`` set — pruning against ``live_keys`` alone
+    would evict every cache entry for the failing repo and force a
+    rate-burst re-fetch the moment the API recovered (PR-gate objection
+    at e7d20da §1).
+    """
+    if failed_repos is None:
+        return False
+    return (key[0], key[1]) in failed_repos
+
+
 def prune_review_cache(
-    state: PrWatchState, *, live_keys: set[LedgerKey]
+    state: PrWatchState,
+    *,
+    live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
 ) -> None:
     """Drop review-cache entries for PRs no longer in the open set.
 
@@ -845,14 +978,27 @@ def prune_review_cache(
 
     Kept separate from :func:`prune_negative_ledger` because this
     cache has no TTL: staleness is measured only against the live set.
+
+    ``failed_repos`` (optional): the ``(owner, repo)`` set that
+    :func:`collect_pr_snapshots` returns for cycles where a repo's
+    ``list_pull_requests`` failed. Entries belonging to those repos are
+    kept regardless of ``live_keys`` — the caller does not need to know
+    the shape of ``state.cache`` to preserve them.
     """
-    stale = [k for k in state.cache if k not in live_keys]
+    stale = [
+        k
+        for k in state.cache
+        if k not in live_keys and not _is_from_failed_repo(k, failed_repos)
+    ]
     for key in stale:
         state.cache.pop(key, None)
 
 
 def prune_ledger_pointers(
-    state: PrWatchState, *, live_keys: set[LedgerKey]
+    state: PrWatchState,
+    *,
+    live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
 ) -> None:
     """Drop positive-cache pointers for PRs no longer in the open set.
 
@@ -860,8 +1006,17 @@ def prune_ledger_pointers(
     thread_id)`` pointer is useful only while the PR it names is still
     being polled. Retaining pointers for closed PRs would grow the
     ``ledger_pointers`` dict indefinitely with no upside.
+
+    ``failed_repos`` (optional): same semantics as
+    :func:`prune_review_cache` — entries belonging to those repos are
+    preserved across the failing cycle so the API recovery does not
+    trigger a rate-burst re-scan of every PR's ledger.
     """
-    stale = [k for k in state.ledger_pointers if k not in live_keys]
+    stale = [
+        k
+        for k in state.ledger_pointers
+        if k not in live_keys and not _is_from_failed_repo(k, failed_repos)
+    ]
     for key in stale:
         state.ledger_pointers.pop(key, None)
 
@@ -871,6 +1026,7 @@ def prune_negative_ledger(
     *,
     now: datetime,
     live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
 ) -> None:
     """Drop stale / superseded entries from the negative cache.
 
@@ -887,11 +1043,20 @@ def prune_negative_ledger(
       Pass B would need to re-fire regardless. Dropping it here means
       :func:`iter_truncated_prs` can rely on "still-live entries" as
       the whole set to emit.
+
+    ``failed_repos`` (optional): entries whose repo is in this set are
+    preserved even when ``key not in live_keys`` (they only fall out of
+    the live set because ``list_pull_requests`` failed transiently). The
+    TTL check still applies — a genuinely stale entry drops on its own
+    schedule.
     """
     stale_keys = [
         key
         for key, entry in state.negative_ledger_cache.items()
-        if key not in live_keys
+        if (
+            key not in live_keys
+            and not _is_from_failed_repo(key, failed_repos)
+        )
         or entry.cached_at + _NEGATIVE_LEDGER_TTL <= now
     ]
     for key in stale_keys:

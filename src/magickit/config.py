@@ -175,9 +175,15 @@ class Settings(BaseSettings):
     # excluded until measured (msg-829 §4). The value is `list[str]` with
     # `owner/repo` grammar because YAML doesn't cleanly express tuples.
     #
-    # Empty list disables the lane entirely (skips all GitHub calls). This
-    # is the correct default outside production: a dev host without the
-    # implementer PAT never calls GitHub at all.
+    # Default is the six-repo production allowlist below; empty list
+    # (via `board.pr_repo_allowlist: []` in YAML) disables the lane
+    # entirely (skips all GitHub calls). Dev hosts without the implementer
+    # PAT should override to the empty list in their YAML to avoid the
+    # 401-driven outage notices the production default would otherwise
+    # produce. The default was set at the six-repo list rather than the
+    # empty list because production is the primary consumer and asking
+    # every deployment YAML to enumerate the same six entries would move
+    # the drift risk (dual-management) into every operator's config.
     board_pr_repo_allowlist: list[str] = Field(
         default_factory=lambda: [
             "SpirrowGames/spirrow-magickit",
@@ -486,14 +492,30 @@ class Settings(BaseSettings):
             flat_config["ops_stall_minutes"] = ops.get("stall_minutes")
 
         # Board view settings
-        if (board := yaml_config.get("board")) is not None:
+        #
+        # ``if board:`` (not ``is not None``) guards this block so that
+        # malformed YAML like ``board: []`` or ``board: ~`` is silently
+        # skipped rather than crashing on ``board.get(...)``. The
+        # "disable the merge lane" semantic lives at the inner
+        # ``pr_repo_allowlist`` key (``pr_repo_allowlist: []`` inside a
+        # non-empty ``board`` dict is truthy at this level and enters
+        # the block), so this outer check does not need to distinguish
+        # None from an empty list (PR-gate objection at c659102 §1 —
+        # earlier ``is not None`` change conflated the two levels).
+        if board := yaml_config.get("board"):
             flat_config["board_done_days"] = board.get("done_days")
-            # `is not None` so an explicit empty list (「マージ lane を
-            # 全 repo で無効にする」) is honoured rather than silently
-            # falling back to the six-repo default.
             if "pr_repo_allowlist" in board:
-                flat_config["board_pr_repo_allowlist"] = list(
-                    board.get("pr_repo_allowlist") or []
+                raw = board.get("pr_repo_allowlist")
+                # ``pr_repo_allowlist:`` with no rhs (None) is the
+                # explicit empty-list case; substitute [] to preserve
+                # the "disable the lane" semantics. Anything else is
+                # forwarded verbatim so Pydantic's ``list[str]``
+                # validator can reject a mistaken string input
+                # (``list("owner/repo")`` would silently split it into
+                # single-character entries — PR-gate objection at
+                # e7d20da §2).
+                flat_config["board_pr_repo_allowlist"] = (
+                    [] if raw is None else raw
                 )
             if "ui_poll_seconds" in board:
                 flat_config["board_ui_poll_seconds"] = board.get("ui_poll_seconds")
