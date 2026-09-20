@@ -766,6 +766,107 @@ async def test_a_human_role_the_record_denies_is_still_rejected_on_a_close(
     chat.close_thread.assert_not_awaited()
 
 
+# ---- outage asymmetry: the human close degrade does NOT extend to post
+#
+# T-human-outage-degrade-close-only msg-244 / msg-951. The full rationale for
+# the asymmetry lives on ``_check_close_permitted`` in
+# ``src/magickit/mcp/tools/chatroom.py``; this section pins the observable
+# consequence rather than restating it, so that "keep the docstring and the
+# tests aligned" is a two-place edit, not three.
+
+
+@pytest.mark.asyncio
+async def test_human_post_with_role_fails_closed_when_prismind_is_down(wired) -> None:
+    """The other side of the msg-041 Q6 exemption: this exemption is close-only.
+
+    Falsified if a role-carrying human post silently proceeds while Prismind
+    is unreachable — that would be the close-path degrade smuggled onto the
+    post path (msg-951 §2). Same fixture as
+    ``test_human_close_does_not_depend_on_prismind_even_with_a_role``, only
+    the entrypoint changes: the close succeeds, the post refuses.
+
+    The last assertion pins the *mitigation text* named by the docstring on
+    ``_check_role_allowed``: the ``RoleValidationUnavailableError`` envelope
+    must tell the caller how to proceed ("post without `role`"), not just
+    that the write refused. If a future edit rewrites the envelope and drops
+    the instruction, the docstring becomes a misleading claim and this test
+    goes red — that is the point of asserting on the ``error`` string, not
+    only the ``error_type``.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="human",
+        content="c", role="human",
+    )
+
+    assert result["error_type"] == "RoleValidationUnavailableError"
+    assert "connection refused" in result["details"]["reason"]
+    assert "without `role`" in result["error"]
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_human_post_without_role_still_writes_during_a_prismind_outage(
+    wired,
+) -> None:
+    """The mitigation named in the ``RoleValidationUnavailableError`` envelope.
+
+    The fail-closed choice above is a real cost — a role-carrying human post
+    cannot be written during an outage — but the mitigation lives one call
+    away: retry with ``role`` omitted. That branch never consults Prismind
+    (I-3, see ``test_role_omitted_is_allowed_and_skips_lookup``) and records
+    ``role=None`` (honestly unverified). If a future edit teaches the post
+    path to fail closed even when ``role`` is omitted, the escape hatch the
+    envelope invites disappears and the outage becomes total for this
+    caller; that regression must show up RED here.
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="human",
+        content="c",
+    )
+
+    assert "error_type" not in result
+    prismind.get_identity.assert_not_awaited()
+    chat.post_message.assert_awaited_once()
+    assert chat.post_message.call_args.kwargs["role"] is None
+
+
+@pytest.mark.asyncio
+async def test_close_and_post_disagree_on_the_same_outage_for_the_human(wired) -> None:
+    """Symmetry pin: the asymmetry is intentional and applies to the SAME call.
+
+    Two entries into the gate layer, same author, same ``role``, same fixture
+    (Prismind unreachable). The close succeeds with ``role`` degraded to null
+    (ADR-2026-06-04-19 D-5 / msg-041 Q6); the post refuses with
+    ``RoleValidationUnavailableError``. Colocating them so that a future
+    "unify the degrade" edit cannot flip one without visibly flipping the
+    other (msg-951 §2, msg-032 §2).
+    """
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=RuntimeError("down"))
+
+    close_result = await tools["chatroom_close_thread"](
+        project="p", thread_id="T-1", summary_content="done", author="human",
+        role="human",
+    )
+    post_result = await tools["chatroom_post_message"](
+        project="p", thread_id="T-1", msg_type="report", author="human",
+        content="c", role="human",
+    )
+
+    assert "error_type" not in close_result
+    chat.close_thread.assert_awaited_once()
+    assert chat.close_thread.call_args.kwargs["role"] is None
+
+    assert post_result["error_type"] == "RoleValidationUnavailableError"
+    chat.post_message.assert_not_awaited()
+
+
 # ---- I-9: unregistered authors are not bound --------------------------
 
 

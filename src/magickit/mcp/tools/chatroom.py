@@ -1207,6 +1207,31 @@ async def _check_role_allowed(
     close path asks two questions of one record). When omitted the record is
     fetched here -- and only if ``role`` was supplied, which is what keeps an
     ordinary post off the identity service's critical path (I-3).
+
+    Asymmetry with ``_check_close_permitted`` (post fails closed on an
+    unusable lookup, close silently degrades to null; recorded here at the
+    site where the choice is made, T-human-outage-degrade-close-only
+    msg-951). The full rationale for the split is on ``_check_close_permitted``
+    (the mandate that authorises the close-side degrade lives there); this
+    docstring records the post-side of it so a reader arriving from this
+    gate does not have to reconstruct why the two answers differ:
+
+    - This gate makes the post/open path **deliberately dependent on
+      Prismind** for any call that carries a ``role``. That is a decision,
+      not an oversight: the close path has a specific mandate to survive a
+      downstream outage over an optional argument (ADR-2026-06-04-19 D-5 /
+      msg-041 Q6, ``_check_close_permitted``); ordinary posts carry no such
+      mandate, so the write refuses rather than silently mutating the
+      caller's ``role`` claim to null.
+    - Cost of that choice, named rather than left implicit: a role-carrying
+      post cannot be written while Prismind is unreachable. The mitigation
+      lives one call away and is named in the ``RoleValidationUnavailableError``
+      envelope's ``error`` field: **retry with ``role`` omitted**, which
+      takes the "caller opted out" branch above, records null, and does not
+      consult Prismind. For the human specifically, msg-244 §2 measured
+      that today's traffic already lands in that branch (3/3 human posts on
+      T-magickit-identity-extension carried ``role=null``), so the wall is
+      latent — the pin below keeps it visible if that changes.
     """
     if not role:
         return _ALLOW_WITHOUT_ROLE
@@ -1325,6 +1350,32 @@ async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
       cannot be blocked by a downstream service over an optional argument
       (msg-041 Q6). A claim the record *denies* is still a verdict, not an
       outage, so it stays rejected.
+
+    Asymmetry with ``_check_role_allowed`` (this close path degrades an
+    unusable human lookup; the post path fails closed on the same outcome;
+    T-human-outage-degrade-close-only msg-951). This is the primary site
+    of the rationale — the post-side docstring cross-references here:
+
+    - The close path silently strips a human's unverifiable ``role`` to null
+      and proceeds; the post path refuses instead. The difference is
+      intentional: the mandate that authorises silently stripping the role
+      here is specific to the above-loop Tier-C force-close of
+      ADR-2026-06-04-19 D-5 (msg-041 Q6), and ordinary posts do not carry
+      that mandate. So they correctly refuse rather than unilaterally
+      mutate the caller's ``role`` claim.
+    - Framing note (msg-951 Einstein advisory): the trade-off between the
+      two answers is *not* "invariant vs. availability" — a null recorded
+      ``role`` is not an unverified role — it is "silently strip the
+      caller's input to save availability" vs. "fail the request and let
+      the caller drop the role themselves". Both branches preserve the
+      "recorded role is verified" invariant; the split is over who owns the
+      choice to drop the claim.
+    - Cost/mitigation footprint: on this close side the human needs no
+      mitigation — the degrade lives here so the force-close can complete.
+      On the post side the mitigation is to retry with ``role`` omitted;
+      see ``_check_role_allowed``, which names it in the
+      ``RoleValidationUnavailableError`` envelope. Today the post-side
+      refusal is latent for the human (msg-244 §2).
     """
     if author in HUMAN_IDENTITY_NAMES:
         # I-8. See the note on CLOSEABLE_ROLES: the human record is
