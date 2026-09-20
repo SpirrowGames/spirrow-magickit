@@ -1211,18 +1211,14 @@ async def _check_role_allowed(
     Asymmetry with ``_check_close_permitted`` (post fails closed on an
     unusable lookup, close silently degrades to null; recorded here at the
     site where the choice is made, T-human-outage-degrade-close-only
-    msg-951). The full rationale for the split is on ``_check_close_permitted``
-    (the mandate that authorises the close-side degrade lives there); this
-    docstring records the post-side of it so a reader arriving from this
-    gate does not have to reconstruct why the two answers differ:
+    msg-951 / msg-964). Rationale: see ``_check_close_permitted``. This
+    docstring records only the two facts a reader on the post path needs
+    on the way in — the *why* is not duplicated here:
 
     - This gate makes the post/open path **deliberately dependent on
-      Prismind** for any call that carries a ``role``. That is a decision,
-      not an oversight: the close path has a specific mandate to survive a
-      downstream outage over an optional argument (ADR-2026-06-04-19 D-5 /
-      msg-041 Q6, ``_check_close_permitted``); ordinary posts carry no such
-      mandate, so the write refuses rather than silently mutating the
-      caller's ``role`` claim to null.
+      Prismind** for any call that carries a ``role``. Ordinary posts
+      refuse rather than silently mutating the caller's ``role`` claim to
+      null while the lookup is unusable.
     - Cost of that choice, named rather than left implicit: a role-carrying
       post cannot be written while Prismind is unreachable. The mitigation
       lives one call away and is named in the ``RoleValidationUnavailableError``
