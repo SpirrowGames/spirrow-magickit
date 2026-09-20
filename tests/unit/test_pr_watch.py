@@ -26,6 +26,7 @@ import pytest
 
 from magickit.core import pr_watch
 from magickit.core.pr_watch import (
+    MERGEABILITY_REFETCH_SECONDS,
     NON_APPROVED_REFETCH_SECONDS,
     SOFT_CAP_CALLS_PER_HOUR,
     DeepPaginationOutcome,
@@ -44,6 +45,7 @@ from magickit.core.pr_watch import (
     min_last_activity_at,
     pr_key,
     prune_ledger_pointers,
+    prune_mergeability_cache,
     prune_negative_ledger,
     prune_review_cache,
     resolve_old_prs_by_deep_pagination,
@@ -52,12 +54,50 @@ from magickit.core.pr_watch import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mergeable_by_default(monkeypatch):
+    """Every test here gets ``clean`` unless it injects its own fetcher.
+
+    Without this, the tests that predate the mergeability filter would
+    reach the real github-mcp round trip (and, in CI, its missing PAT).
+    The filter's own behaviour is asserted by the tests that pass
+    ``fetch_mergeable_state=`` explicitly.
+    """
+
+    async def _clean(owner: str, repo: str, number: int) -> str:
+        return "clean"
+
+    monkeypatch.setattr(pr_watch, "_fetch_mergeable_state", _clean)
+
+
+def _mergeable_fetcher(
+    states_by_pr: dict[int, str | None] | None = None,
+    *,
+    default: str | None = "clean",
+):
+    """Return ``(fetch_fn, counts)`` for ``mergeable_state`` injection.
+
+    ``None`` as a value models "GitHub would not say" (outage, or the
+    lazily-computed ``unknown``), which the module must treat as
+    fail-open.
+    """
+    states_by_pr = states_by_pr or {}
+    counts = {"mergeable": 0}
+
+    async def _fetch(owner: str, repo: str, number: int) -> str | None:
+        counts["mergeable"] += 1
+        return states_by_pr.get(number, default)
+
+    return _fetch, counts
+
+
 def _pr(
     *,
     number: int = 1,
     updated_at: str = "2026-09-18T10:00:00Z",
     head: str = "sha-a",
     title: str = "example",
+    draft: bool = False,
 ) -> dict[str, Any]:
     return {
         "number": number,
@@ -65,6 +105,7 @@ def _pr(
         "html_url": f"https://github.com/O/R/pull/{number}",
         "head": {"sha": head},
         "updated_at": updated_at,
+        "draft": draft,
     }
 
 
@@ -603,8 +644,9 @@ async def test_call_log_prunes_after_an_hour():
         fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
         now=3602.0,  # 1 second past the strict > 1-hour cutoff for both entries
     )
-    # The 2 stale entries pruned; only the 2 new ones remain (list + reviews).
-    assert len(state.call_log) == 2
+    # The 2 stale entries pruned; only the 3 new ones remain
+    # (list + mergeable_state + reviews).
+    assert len(state.call_log) == 3
 
 
 @pytest.mark.asyncio
@@ -649,6 +691,274 @@ async def test_call_log_pruned_at_cycle_end_even_when_all_repos_have_zero_prs():
     assert len(state.call_log) == 2
     # And they all sit inside the rolling hour.
     assert all(t >= 3602.0 - 3600.0 for t in state.call_log)
+
+
+# --- mergeable-only filter -------------------------------------------------
+#
+# The lane's next action is "click merge", so a PR nobody can merge is
+# noise. The filter is narrow on purpose: it drops conflicts and drafts
+# and nothing else, because `blocked` is what every gate-pending PR looks
+# like and dropping those would empty the lane.
+
+
+@pytest.mark.asyncio
+async def test_conflicting_pr_is_dropped_and_counted_in_a_notice():
+    """`dirty` never becomes a card, but the operator still hears the count."""
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(number=1, head="H1"), _pr(number=2, head="H2")],
+        reviews_by_pr={1: [], 2: []},
+    )
+    mergeable_fn, _ = _mergeable_fetcher({1: "dirty", 2: "blocked"})
+
+    snapshots, notices, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert [s.number for s in snapshots] == [2]
+    assert any("1 件は非表示" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_draft_pr_is_dropped_without_spending_an_api_call():
+    """The list payload already says `draft`; paying for `get` would be waste."""
+    state = PrWatchState()
+    list_fn, reviews_fn, counts = _make_fetchers(
+        prs=[_pr(number=1, draft=True)],
+        reviews_by_pr={1: []},
+    )
+    mergeable_fn, m_counts = _mergeable_fetcher()
+
+    snapshots, notices, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert snapshots == []
+    assert m_counts["mergeable"] == 0, "draft must short-circuit before the fetch"
+    assert counts["reviews"] == 0
+    assert any("1 件は非表示" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_blocked_unstable_and_behind_prs_are_kept():
+    """The whole point of the lane: a gate-pending PR is always `blocked`.
+
+    Regression pin. `blocked` (required review outstanding), `unstable`
+    (a non-required check is red) and `behind` (base moved) all still
+    leave the PR the operator's to act on — filtering any of them would
+    hide the 未依頼 PRs this lane exists to surface.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[
+            _pr(number=1, head="H1"),
+            _pr(number=2, head="H2"),
+            _pr(number=3, head="H3"),
+        ],
+        reviews_by_pr={1: [], 2: [], 3: []},
+    )
+    mergeable_fn, _ = _mergeable_fetcher(
+        {1: "blocked", 2: "unstable", 3: "behind"},
+    )
+
+    snapshots, notices, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert [s.number for s in snapshots] == [1, 2, 3]
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_mergeable_state_fails_open():
+    """No answer → show the PR. Hiding is the destructive direction."""
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(number=1)],
+        reviews_by_pr={1: []},
+    )
+    # None models both the outage and GitHub's lazily-computed `unknown`.
+    mergeable_fn, _ = _mergeable_fetcher(default=None)
+
+    snapshots, notices, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert [s.number for s in snapshots] == [1]
+    assert notices == []
+    assert state.mergeability == {}, "a non-answer must not be cached"
+
+
+@pytest.mark.asyncio
+async def test_dropped_pr_does_not_pay_for_its_reviews():
+    """A PR we are about to hide must not cost a `/reviews` call."""
+    state = PrWatchState()
+    list_fn, reviews_fn, counts = _make_fetchers(
+        prs=[_pr(number=1)],
+        reviews_by_pr={1: []},
+    )
+    mergeable_fn, _ = _mergeable_fetcher({1: "dirty"})
+
+    await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert counts["reviews"] == 0
+
+
+@pytest.mark.asyncio
+async def test_mergeable_state_is_cached_for_fifteen_minutes():
+    """Within the window, a second poll reuses the cached verdict."""
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(number=1, updated_at="U1", head="H")],
+        reviews_by_pr={1: [_review("APPROVED", "H")]},
+    )
+    mergeable_fn, m_counts = _mergeable_fetcher({1: "clean"})
+
+    for tick in (0.0, 5 * 60.0, 10 * 60.0):
+        await collect_pr_snapshots(
+            [("O", "R")], state,
+            fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+            fetch_mergeable_state=mergeable_fn, now=tick,
+        )
+    assert m_counts["mergeable"] == 1
+
+
+@pytest.mark.asyncio
+async def test_mergeable_state_refetches_without_an_updated_at_bump():
+    """The timer is the only invalidator that can catch a base-branch merge.
+
+    Somebody merging an unrelated PR into `main` turns this PR from
+    `clean` to `dirty` while touching nothing on it — `updated_at` does
+    not move. Keying the cache on `updated_at` alone (the review cache's
+    rule) would pin the stale `clean` forever.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(number=1, updated_at="U1", head="H")],
+        reviews_by_pr={1: [_review("APPROVED", "H")]},
+    )
+    states: dict[int, str | None] = {1: "clean"}
+    mergeable_fn, m_counts = _mergeable_fetcher(states)
+
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert [s.number for s in snapshots] == [1]
+
+    # Base branch moved; the PR itself saw no event.
+    states[1] = "dirty"
+    snapshots, notices, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn,
+        now=MERGEABILITY_REFETCH_SECONDS + 1.0,
+    )
+    assert m_counts["mergeable"] == 2
+    assert snapshots == []
+    assert any("1 件は非表示" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_rate_cap_shows_the_pr_rather_than_hiding_it():
+    """Under the cap we do not spend scarcity on hiding a card."""
+    state = PrWatchState()
+    for i in range(SOFT_CAP_CALLS_PER_HOUR):
+        state.call_log.append(float(i))
+
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(number=1)],
+        reviews_by_pr={1: []},
+    )
+    mergeable_fn, m_counts = _mergeable_fetcher({1: "dirty"})
+
+    snapshots, notices, _ = await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn,
+        now=float(SOFT_CAP_CALLS_PER_HOUR) - 1.0,
+    )
+    assert m_counts["mergeable"] == 0, "rate cap must suppress the fetch"
+    assert [s.number for s in snapshots] == [1]
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_dropped_pr_keeps_its_cache_entry_across_cycles():
+    """A hidden PR must not be re-fetched every cycle.
+
+    The prune runs against every PR the cycle *saw*, not the ones it
+    returned; otherwise the conflicting PR's entry would be evicted on
+    the cycle that wrote it and cost a call on every subsequent poll —
+    more expensive than the mergeable PRs it hides.
+    """
+    state = PrWatchState()
+    list_fn, reviews_fn, _ = _make_fetchers(
+        prs=[_pr(number=1, updated_at="U1")],
+        reviews_by_pr={1: []},
+    )
+    mergeable_fn, m_counts = _mergeable_fetcher({1: "dirty"})
+
+    for tick in (0.0, 5 * 60.0):
+        await collect_pr_snapshots(
+            [("O", "R")], state,
+            fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+            fetch_mergeable_state=mergeable_fn, now=tick,
+        )
+    assert m_counts["mergeable"] == 1
+    assert ("O", "R", 1) in state.mergeability
+
+
+@pytest.mark.asyncio
+async def test_merged_pr_drops_out_of_the_mergeability_cache():
+    """Closed PRs are never polled again; their entries are pure leak."""
+    state = PrWatchState()
+    mergeable_fn, _ = _mergeable_fetcher({1: "dirty", 2: "clean"})
+
+    list_v1, reviews_v1, _ = _make_fetchers(
+        prs=[_pr(number=1), _pr(number=2)],
+        reviews_by_pr={1: [], 2: []},
+    )
+    await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_v1, fetch_reviews=reviews_v1,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+    assert set(state.mergeability) == {("O", "R", 1), ("O", "R", 2)}
+
+    # #1 got merged: it is gone from the open list.
+    list_v2, reviews_v2, _ = _make_fetchers(
+        prs=[_pr(number=2)], reviews_by_pr={2: []},
+    )
+    await collect_pr_snapshots(
+        [("O", "R")], state,
+        fetch_open_prs=list_v2, fetch_reviews=reviews_v2,
+        fetch_mergeable_state=mergeable_fn, now=60.0,
+    )
+    assert set(state.mergeability) == {("O", "R", 2)}
+
+
+def test_prune_mergeability_cache_spares_failed_repos():
+    """A transient outage must not force a re-fetch burst on recovery."""
+    state = PrWatchState()
+    state.mergeability[("O", "R1", 1)] = pr_watch._MergeabilityEntry(
+        updated_at="U1", mergeable_state="clean", fetched_at=0.0,
+    )
+    state.mergeability[("O", "R2", 9)] = pr_watch._MergeabilityEntry(
+        updated_at="U1", mergeable_state="clean", fetched_at=0.0,
+    )
+    prune_mergeability_cache(
+        state, live_keys=set(), failed_repos={("O", "R1")},
+    )
+    assert set(state.mergeability) == {("O", "R1", 1)}
 
 
 # --- outage sentinel & notice ----------------------------------------------

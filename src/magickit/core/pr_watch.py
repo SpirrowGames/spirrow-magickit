@@ -30,6 +30,23 @@ this module owns two reads:
    exists".
 2. ``pull_request_read(get_reviews)`` per PR whose reviews we need,
    yielding the APPROVED-at-head predicate.
+3. ``pull_request_read(get)`` per PR, yielding ``mergeable_state`` — the
+   one field that tells us the PR cannot be merged as it stands no
+   matter what the gate says (see "Unmergeable PRs" below).
+
+Unmergeable PRs are dropped, with a count
+-----------------------------------------
+
+A PR whose branch conflicts with its base, or which is still a draft,
+cannot be merged by anyone — showing it in a lane whose next action is
+"click merge" is noise. Those two states are filtered out here and
+replaced by a single notice carrying the count, so the operator still
+learns that N PRs are parked rather than silently losing them.
+
+The filter is deliberately narrow: ``blocked`` (waiting on a required
+review) and a red CI are **kept**, because a gate-pending PR is always
+``blocked`` — filtering on that would empty the lane and destroy the
+very signal this module exists to produce.
 
 The ledger-side check (Tier-C settled) lives in
 :mod:`magickit.mcp.pr_gate_ledger` as an independent predicate; the board
@@ -103,6 +120,31 @@ SOFT_CAP_CALLS_PER_HOUR = 500
 
 #: The `state` value GitHub returns for an APPROVED review.
 _APPROVED = "APPROVED"
+
+#: Mandatory refetch window for ``mergeable_state``. Unlike the review
+#: cache, there is **no sticky case** here: a PR goes from ``clean`` to
+#: ``dirty`` when somebody merges an unrelated PR into the base branch,
+#: which touches nothing on this PR — ``updated_at`` does not move. So
+#: ``updated_at`` alone cannot invalidate this cache and the timer is the
+#: only thing that can; keeping it at the review window's 15 minutes
+#: means both signals refresh in the same cycle rather than at drifting
+#: phases.
+MERGEABILITY_REFETCH_SECONDS = 15 * 60
+
+#: ``mergeable_state`` values that mean "nobody can merge this PR as it
+#: stands, and no review will change that".
+#:
+#: Deliberately excludes ``blocked`` (a required review is outstanding —
+#: which is what EVERY pre-gate PR looks like, so filtering on it would
+#: empty the lane), ``unstable`` (a non-required check is red; the merge
+#: button still works) and ``behind`` (the base moved; GitHub offers an
+#: update-branch button in place of merge, so the PR is still the
+#: operator's to act on).
+#:
+#: ``draft`` appears here for completeness, but drafts are normally
+#: caught earlier from the list payload's own ``draft`` flag, which costs
+#: no API call.
+_UNMERGEABLE_STATES = frozenset({"dirty", "draft"})
 
 # --- ledger-attached state (bounded closed-ledger discovery) ---------------
 #
@@ -225,6 +267,24 @@ class _CacheEntry:
     fetched_at: float
 
 
+@dataclass
+class _MergeabilityEntry:
+    """One ``mergeable_state`` fetch, keyed by PR identity.
+
+    ``updated_at`` is stored (not keyed on) for the same reason as
+    :class:`_CacheEntry`: it lets a stale-but-honest entry stay reachable
+    when the rate cap forbids a refetch. It is one of two invalidation
+    triggers, and — unlike the review cache — it is the *weaker* one:
+    a base-branch merge turns ``clean`` into ``dirty`` without touching
+    this PR at all, so :data:`MERGEABILITY_REFETCH_SECONDS` is what
+    actually bounds staleness.
+    """
+
+    updated_at: str
+    mergeable_state: str
+    fetched_at: float
+
+
 @dataclass(frozen=True)
 class NegativeLedgerEntry:
     """Records "we looked for PR X's ledger and did not find it".
@@ -318,6 +378,13 @@ class PrWatchState:
     #: B every 5-minute cycle for the same 未依頼 PR. TTL + updated_at
     #: gate the entry.
     negative_ledger_cache: dict[LedgerKey, NegativeLedgerEntry] = field(
+        default_factory=dict
+    )
+    #: ``mergeable_state`` cache: ``LedgerKey → _MergeabilityEntry``.
+    #: Keyed over **every** PR seen this cycle, including the ones the
+    #: filter drops — a conflicting PR that we re-fetched every cycle
+    #: would cost more calls than the mergeable ones it hides.
+    mergeability: dict[LedgerKey, _MergeabilityEntry] = field(
         default_factory=dict
     )
 
@@ -471,6 +538,28 @@ def _needs_review_refetch(
     return (now - entry.fetched_at) > NON_APPROVED_REFETCH_SECONDS
 
 
+def _needs_mergeability_refetch(
+    entry: _MergeabilityEntry | None,
+    *,
+    live_updated_at: str,
+    now: float | None = None,
+) -> bool:
+    """Should we refetch ``mergeable_state`` for this PR?
+
+    Same shape as :func:`_needs_review_refetch` minus the sticky case.
+    There is no state worth pinning here: ``clean`` can rot into
+    ``dirty`` with no PR-side event at all (somebody merged into the
+    base), and ``dirty`` can heal the same way (the conflicting commit
+    got reverted). So the timer always applies, in both directions.
+    """
+    if entry is None:
+        return True
+    if entry.updated_at != live_updated_at:
+        return True
+    now = now if now is not None else time.monotonic()
+    return (now - entry.fetched_at) > MERGEABILITY_REFETCH_SECONDS
+
+
 #: Sentinel returned by :func:`_fetch_open_prs` on API failure. Distinct
 #: from ``[]`` (which means "we asked and this repo has no open PRs") so
 #: the caller can emit a truthful notice rather than silently drop the
@@ -586,12 +675,113 @@ async def _fetch_reviews(
     return None
 
 
+async def _fetch_mergeable_state(
+    owner: str, repo: str, number: int
+) -> str | None:
+    """``pull_request_read(get)``'s ``mergeable_state``, or None.
+
+    None covers three cases that the caller must treat identically —
+    show the PR:
+
+    - the call failed (outage / auth / rate),
+    - the payload had no ``mergeable_state`` (upstream trimmed it), or
+    - GitHub answered ``unknown``, which is not a verdict but "ask me
+      again in a moment": merge-commit computation is lazy and kicks off
+      on the first read after a push.
+
+    Returning None for ``unknown`` (rather than the literal string) is
+    what keeps it out of the cache, so the next cycle re-asks instead of
+    freezing a non-answer for 15 minutes.
+    """
+    from magickit.mcp.github_dispatch import _mcp_call, _resolve_pat  # noqa: PLC0415
+
+    try:
+        pat = _resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")
+        result = await _mcp_call(
+            "tools/call",
+            {
+                "name": "pull_request_read",
+                "arguments": {
+                    "method": "get",
+                    "owner": owner,
+                    "repo": repo,
+                    "pullNumber": number,
+                },
+            },
+            pat,
+        )
+    except Exception as exc:  # noqa: BLE001 — mirror _fetch_reviews
+        logger.warning(
+            "pr_watch: get mergeable_state failed",
+            pr=f"{owner}/{repo}#{number}",
+            err=str(exc),
+        )
+        return None
+    payload = _first_json_payload(result)
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("mergeable_state")
+    if not isinstance(value, str) or not value or value == "unknown":
+        return None
+    return value
+
+
+async def _mergeable_state_for_pr(
+    pr: dict[str, Any],
+    *,
+    owner: str,
+    repo: str,
+    state: PrWatchState,
+    fetch_mergeable_state: Any,
+    now: float | None = None,
+) -> str | None:
+    """Cached ``mergeable_state`` for one PR, or None when unknown.
+
+    None is the fail-open answer and every caller must read it as "show
+    this PR". Hiding a PR is the destructive direction here: the lane
+    exists so that no live PR escapes the 未依頼 check, and a card we
+    wrongly drop is exactly the silent failure the lane was built to
+    prevent. A conflicting PR we wrongly keep costs one line of noise.
+    """
+    number_raw = pr.get("number")
+    updated_at = pr.get("updated_at")
+    if not isinstance(number_raw, int) or not isinstance(updated_at, str):
+        return None
+
+    key: LedgerKey = (owner, repo, number_raw)
+    entry = state.mergeability.get(key)
+    if not _needs_mergeability_refetch(
+        entry, live_updated_at=updated_at, now=now,
+    ):
+        assert entry is not None
+        return entry.mergeable_state
+
+    if _rate_capped(state, now=now):
+        # Stale-but-honest beats a fabricated verdict, and no entry at
+        # all means "show it" — never spend the cap's scarcity on
+        # hiding a card.
+        return entry.mergeable_state if entry is not None else None
+
+    _record_call(state, now=now)
+    value = await fetch_mergeable_state(owner, repo, number_raw)
+    if value is None:
+        return entry.mergeable_state if entry is not None else None
+
+    state.mergeability[key] = _MergeabilityEntry(
+        updated_at=updated_at,
+        mergeable_state=value,
+        fetched_at=now if now is not None else time.monotonic(),
+    )
+    return value
+
+
 async def collect_pr_snapshots(
     repos: list[tuple[str, str]],
     state: PrWatchState,
     *,
     fetch_open_prs: Any = None,
     fetch_reviews: Any = None,
+    fetch_mergeable_state: Any = None,
     now: float | None = None,
 ) -> tuple[list[PrSnapshot], list[str], set[tuple[str, str]]]:
     """Fetch open PRs across ``repos`` and return one snapshot per live PR.
@@ -599,8 +789,9 @@ async def collect_pr_snapshots(
     Args:
         repos: ``[(owner, repo), ...]`` in allowlist order.
         state: per-process cache + call log.
-        fetch_open_prs / fetch_reviews: dependency injection for tests.
-            Both default to the real github-mcp round trips.
+        fetch_open_prs / fetch_reviews / fetch_mergeable_state:
+            dependency injection for tests. All three default to the
+            real github-mcp round trips.
         now: monotonic-clock override (tests only).
 
     Returns:
@@ -616,11 +807,21 @@ async def collect_pr_snapshots(
         to know the shape of the internal cache dicts to uphold the
         invariant.
 
+    Unmergeable PRs (conflicting / draft) never become snapshots; the
+    count of what was dropped rides back on ``notices`` as one line, so
+    the operator sees "N 件は非表示" instead of a lane that quietly
+    shrank. Drafts are caught from the list payload's own flag, before
+    any per-PR call is spent on them.
+
     The steady-state cost:
     - Always: one ``list_pull_requests`` per repo (per 5-minute cycle in
       production; the caller controls cycle frequency).
     - Only when needed: ``get_reviews`` per PR whose ``updated_at`` moved
       or whose 15-minute self-heal window expired (see module docstring).
+    - Only when needed: ``pull_request_read(get)`` per non-draft PR on
+      the same 15-minute cadence. A PR the filter drops costs this one
+      call and then skips its ``get_reviews``, so the worst case is the
+      same per-PR budget as before the filter existed.
 
     Memory hygiene: ``state.call_log`` is pruned to the last rolling
     hour at the end of every cycle, so long dormant periods (no open PRs
@@ -628,10 +829,16 @@ async def collect_pr_snapshots(
     """
     fetch_open_prs = fetch_open_prs or _fetch_open_prs
     fetch_reviews = fetch_reviews or _fetch_reviews
+    fetch_mergeable_state = fetch_mergeable_state or _fetch_mergeable_state
 
     snapshots: list[PrSnapshot] = []
     notices: list[str] = []
     failed_repos: set[tuple[str, str]] = set()
+    #: Every PR seen this cycle, dropped ones included — the mergeability
+    #: cache is pruned against this rather than against the surviving
+    #: snapshots, or a conflicting PR would be re-fetched every cycle.
+    seen_keys: set[LedgerKey] = set()
+    unmergeable = 0
 
     for owner, repo in repos:
         # Every list call costs one API call regardless of the answer.
@@ -657,7 +864,28 @@ async def collect_pr_snapshots(
         # Narrow type from list | object → list for the loop below.
         assert isinstance(prs, list)
         for pr in prs:
+            number_raw = pr.get("number")
+            if isinstance(number_raw, int):
+                seen_keys.add((owner, repo, number_raw))
             try:
+                # Draft is free: the list payload carries it, so a draft
+                # never costs the per-PR `get`.
+                if pr.get("draft") is True:
+                    unmergeable += 1
+                    continue
+                if (
+                    await _mergeable_state_for_pr(
+                        pr,
+                        owner=owner,
+                        repo=repo,
+                        state=state,
+                        fetch_mergeable_state=fetch_mergeable_state,
+                        now=now,
+                    )
+                    in _UNMERGEABLE_STATES
+                ):
+                    unmergeable += 1
+                    continue
                 snapshot = await _snapshot_for_pr(
                     pr,
                     owner=owner,
@@ -685,6 +913,18 @@ async def collect_pr_snapshots(
     # Pruning once per cycle bounds the log to the last rolling hour
     # regardless of PR activity, and self-heals the moment PRs return.
     _prune_call_log(state, now=now)
+    prune_mergeability_cache(
+        state, live_keys=seen_keys, failed_repos=failed_repos,
+    )
+
+    if unmergeable:
+        # One line, not N cards: the operator asked for a lane of PRs
+        # they can act on, but a silently shorter lane is how a stuck PR
+        # gets forgotten.
+        notices.append(
+            f"マージできない PR {unmergeable} 件は非表示"
+            "（コンフリクト / draft）"
+        )
 
     return snapshots, notices, failed_repos
 
@@ -992,6 +1232,34 @@ def prune_review_cache(
     ]
     for key in stale:
         state.cache.pop(key, None)
+
+
+def prune_mergeability_cache(
+    state: PrWatchState,
+    *,
+    live_keys: set[LedgerKey],
+    failed_repos: set[tuple[str, str]] | None = None,
+) -> None:
+    """Drop ``mergeable_state`` entries for PRs no longer in the open set.
+
+    Symmetric with :func:`prune_review_cache`, with one difference in
+    what the caller must pass: ``live_keys`` here is every PR the cycle
+    *saw*, not every PR it *returned*. The PRs this cache exists to
+    classify are precisely the ones that get filtered out of the
+    snapshot list, so pruning against the snapshots would evict the
+    conflicting PR's entry on the very cycle that recorded it and
+    re-fetch it on the next — turning the cache into a per-cycle cost.
+
+    :func:`collect_pr_snapshots` calls this itself for that reason; the
+    board does not need to.
+    """
+    stale = [
+        k
+        for k in state.mergeability
+        if k not in live_keys and not _is_from_failed_repo(k, failed_repos)
+    ]
+    for key in stale:
+        state.mergeability.pop(key, None)
 
 
 def prune_ledger_pointers(
