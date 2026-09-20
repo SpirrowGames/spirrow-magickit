@@ -768,21 +768,11 @@ async def test_a_human_role_the_record_denies_is_still_rejected_on_a_close(
 
 # ---- outage asymmetry: the human close degrade does NOT extend to post
 #
-# T-human-outage-degrade-close-only msg-244 / msg-951. ``_check_close_permitted``
-# silently strips a human's unverifiable ``role`` to null when the identity
-# service is unreachable, because the above-loop Tier-C force-close of
-# ADR-2026-06-04-19 D-5 has a specific mandate to survive downstream outages
-# (msg-041 Q6). ``_check_role_allowed`` -- the gate the ordinary post path
-# uses -- carries no such mandate: silently mutating the caller's ``role`` to
-# save availability would broaden proxy-post capability under downstream
-# degradation, which msg-032 §2 routes to Tier-C rather than proposer. The
-# post path therefore fails closed on the same lookup outcome.
-#
-# Today the failure is latent (msg-244 §2: role-carrying human posts are not
-# in traffic), but "latent" is the point of the pin: a future flip of the
-# posture should show up here as a red test, not as an unremarked change in
-# behavior. The mitigation is retry without ``role`` (see the pass-through
-# case below); it is named in the ``RoleValidationUnavailableError`` envelope.
+# T-human-outage-degrade-close-only msg-244 / msg-951. The full rationale for
+# the asymmetry lives on ``_check_close_permitted`` in
+# ``src/magickit/mcp/tools/chatroom.py``; this section pins the observable
+# consequence rather than restating it, so that "keep the docstring and the
+# tests aligned" is a two-place edit, not three.
 
 
 @pytest.mark.asyncio
@@ -794,6 +784,14 @@ async def test_human_post_with_role_fails_closed_when_prismind_is_down(wired) ->
     post path (msg-951 §2). Same fixture as
     ``test_human_close_does_not_depend_on_prismind_even_with_a_role``, only
     the entrypoint changes: the close succeeds, the post refuses.
+
+    The last assertion pins the *mitigation text* named by the docstring on
+    ``_check_role_allowed``: the ``RoleValidationUnavailableError`` envelope
+    must tell the caller how to proceed ("post without `role`"), not just
+    that the write refused. If a future edit rewrites the envelope and drops
+    the instruction, the docstring becomes a misleading claim and this test
+    goes red — that is the point of asserting on the ``error`` string, not
+    only the ``error_type``.
     """
     tools, chat, prismind = wired
     prismind.get_identity = AsyncMock(side_effect=RuntimeError("connection refused"))
@@ -805,6 +803,7 @@ async def test_human_post_with_role_fails_closed_when_prismind_is_down(wired) ->
 
     assert result["error_type"] == "RoleValidationUnavailableError"
     assert "connection refused" in result["details"]["reason"]
+    assert "without `role`" in result["error"]
     chat.post_message.assert_not_awaited()
 
 
