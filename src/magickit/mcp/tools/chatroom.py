@@ -1207,6 +1207,42 @@ async def _check_role_allowed(
     close path asks two questions of one record). When omitted the record is
     fetched here -- and only if ``role`` was supplied, which is what keeps an
     ordinary post off the identity service's critical path (I-3).
+
+    Asymmetry with ``_check_close_permitted`` (post fails closed, close does
+    not; recorded here at the site of the choice, T-human-outage-degrade-close-only
+    msg-951):
+
+    - This gate makes the post/open path **deliberately dependent on
+      Prismind** for any call that carries a ``role``. When the lookup is
+      unusable the write is refused rather than allowed with the unverified
+      claim silently stripped to null. That posture is a decision, not an
+      oversight: nothing in a post's semantics grants Magickit permission to
+      unilaterally mutate the caller's input (silently rewrite a claimed
+      ``role`` to null in order to save availability). Refusing keeps the
+      choice with the caller (msg-951 Einstein advisory).
+    - The close path takes the other side of that trade-off, and only there:
+      ``_check_close_permitted`` degrades an unusable human lookup to null so
+      the above-loop Tier-C force-close of ADR-2026-06-04-19 D-5 cannot be
+      blocked over an optional string argument (msg-041 Q6). The mandate is
+      specific to force-close; ordinary posts do not carry it, so the
+      asymmetry is intended, not a bug.
+    - The cost of this choice, made explicit rather than left implicit: a
+      role-carrying human post cannot be written while Prismind is
+      unreachable. Today that is latent — human posts under Bohr/Fermi proxy
+      operation do not carry ``role`` (msg-244 §2 measured 3/3 null on
+      T-magickit-identity-extension), so no traffic hits the wall — but the
+      wall is real. The mitigation is direct and lives one call away:
+      **retry the post without ``role``**; ``role`` omitted takes the "caller
+      opted out" branch above, records null, and does not consult Prismind.
+      The ``RoleValidationUnavailableError`` envelope names this remedy in
+      its ``error`` field.
+    - Changing this posture to match the close path (silently degrade the
+      unverified role to null) would broaden what a proxy-authored human
+      post can accomplish while a downstream service is degraded, which is
+      an expansion of proxy capability. Under msg-032 §2 that boundary is
+      not proposer-owned; a future flip belongs on Tier-C, and this
+      docstring pins the current fail-closed posture so a flip is a visible
+      change rather than a drift.
     """
     if not role:
         return _ALLOW_WITHOUT_ROLE
@@ -1325,6 +1361,30 @@ async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
       cannot be blocked by a downstream service over an optional argument
       (msg-041 Q6). A claim the record *denies* is still a verdict, not an
       outage, so it stays rejected.
+
+    Asymmetry with ``_check_role_allowed`` (this close path degrades an
+    unusable human lookup; the post path does not; T-human-outage-degrade-close-only
+    msg-951):
+
+    - The close path silently strips a human's unverifiable ``role`` to null
+      and proceeds; the post path fails closed instead. That difference is
+      intentional and load-bearing: the mandate to survive a downstream
+      outage is specific to the above-loop force-close (ADR-2026-06-04-19
+      D-5 / msg-041 Q6). Ordinary posts do not carry that mandate, so they
+      correctly refuse rather than silently mutate the caller's ``role``
+      claim (msg-951 Einstein advisory: the actual trade-off is not
+      "invariant vs. availability" — a null recorded ``role`` is not an
+      unverified role — it is "silently strip user input to save
+      availability" vs. "fail the request and let the caller choose").
+    - Latency footprint of the *post*-side refusal is currently near zero
+      (msg-244 §2: role-carrying human posts have not appeared in traffic).
+      The mitigation on the post side, when it does bite, is to retry
+      without ``role``. On this close side no mitigation is needed for the
+      human — the degrade lives here so the force-close can complete.
+    - Widening this close-side degrade onto the post path would broaden
+      proxy-post capability during downstream outages, which msg-032 §2
+      routes to Tier-C rather than proposer. The current shape is pinned
+      by tests so a flip is a visible change, not a drift.
     """
     if author in HUMAN_IDENTITY_NAMES:
         # I-8. See the note on CLOSEABLE_ROLES: the human record is
