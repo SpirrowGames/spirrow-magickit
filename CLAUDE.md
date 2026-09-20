@@ -570,6 +570,149 @@ GitHub API は事前知識が強く信頼性が高い。上流通信は**ステ�
 回避した経緯がある。補足: Claude Code (CLI) は `tools/list_changed` を自動反映するので、
 CLI 利用に限れば動的 gate 方式も成立する (本構成はコネクタ = モバイル前提)。
 
+### PR 起票後の naysayer gate 自発火
+
+*(T-merged-to-main-without-gate-artifact msg-292 / msg-751 / msg-752 で確定。
+根拠: ADR-2026-06-03-16 (naysayer CI-gate) — thread 内引用で D-1 APPROVE⇒CI 緑 /
+D-2 failure→RC 短絡・pending→COMMENT / D-5 naysayer は one-shot / N-2 再 fire は
+orchestration。ADR 本文は本 repo に無く mindwire 側 ∴ 一次照合は thread quote まで。)*
+
+AI が PR を起票したら、head sha に対する CI が完了するのを待ってから独立 naysayer gate を
+発火させる。**artifact (`spirrowgames-ops` の APPROVED review、head sha 紐づき) が GitHub 上に
+成立するまで `NEXT: human` を出さない。**
+
+- **check row が現れるまで待つ (pre-queue race)**: PR 作成直後は GitHub Actions が
+  check suite を parse するまで数秒〜十数秒あり、この間 `gh pr checks` は **empty
+  (0 行) を返す**。これを「completed」と誤判定して gate を撃つと、gate 側の CI 参照が
+  pending/unknown を見て D-2 の `COMMENT` を返す (下記の COMMENT 分岐で拾うが、pre-queue で
+  無駄撃ちしないのが先)。**empty は completed ではない** — 少なくとも 1 件の check row が
+  現れてから状態評価を始める
+- CI が **pending** の間は待つ (`gh pr checks` などの決定論的手段で確認)。gate はまだ撃たない
+- **polling は sleep 付き until-loop で書く**。canonical パターン (二段構え、pre-queue と
+  非終端状態を両方カバー):
+
+  ```bash
+  # 1. check row が現れるまで待つ (pre-queue race, 最大 120s で bail out)
+  #    stdout・stderr・exit code の 3 つを別々に見て
+  #    (a) checks 出現 / (b) 「no checks reported」で benign wait / (c) hard failure で即 escape
+  #    を区別する。stderr を捨てると (b) と (c) が判別不能になる (pr-gate-relay msg-770)。
+  tries=0
+  while true; do
+    err_file=$(mktemp)
+    out=$(gh pr checks <n> 2>"$err_file"); rc=$?
+    err=$(cat "$err_file"); rm -f "$err_file"
+
+    # (a) checks 出現 → 次ステップ (--watch) へ
+    if [ -n "$out" ]; then break; fi
+
+    # (b) benign「no checks reported」→ pre-queue か checkless PR、bail-out まで待つ
+    if [ $rc -eq 1 ] && echo "$err" | grep -q "no checks reported"; then
+      tries=$((tries+1))
+      if [ $tries -ge 24 ]; then
+        echo "no CI checks for #<n> after 120s — path filter で skip か未設定" >&2
+        echo "→ 「撃てなかった」escape に倒し、スレッドに差し戻す" >&2
+        exit 1
+      fi
+      sleep 5
+      continue
+    fi
+
+    # (c) hard failure (auth 失効 / network / rate limit / 予期しない stderr) → 即 escape
+    #     ここで benign と混同すると「path filter で skip」の嘘診断を吐く (msg-770)
+    echo "gh pr checks が hard failure: rc=$rc stderr=$err" >&2
+    echo "→ 「撃てなかった」escape に倒し、スレッドに差し戻す" >&2
+    exit 2
+  done
+  # 2. 完了 (pass/fail 確定) まで watch
+  gh pr checks <n> --watch --interval 10 || true
+  ```
+
+  「stderr 捨て + stdout 空チェックだけ」だと、path filter skip (benign) と auth 失効 /
+  network 障害 (hard failure) が **区別できず**、後者を 120s 待たされた挙句「path filter
+  で skip か未設定」と嘘の診断で escape することになる (pr-gate-relay msg-770 correctness
+  objection の実バグ)。`gh pr checks` は「no checks reported」のみ exit code 1 + 特定
+  stderr で返し、それ以外の error は別の stderr 文字列を出す ∴ **stderr を捨てずに
+  pattern match して分岐する**。120s の bail-out はあくまで「本当に checks が無い PR」
+  (path filter / 未設定) のためであって、hard failure を隠すためではない。
+
+  `--watch` は `gh` に built-in で、非終端状態 (`pending` / `in_progress` / `queued` / ...)
+  を internally 正規化してから完了で exit する。`|| true` は failure 時の exit code 1 を
+  吸収 — 本規則では失敗でも gate を撃つので loop 抜けを止めない。
+
+  **自作 grep で「pending の不在」を判定しない**。`gh pr checks` の text 出力は check の
+  種類によって非終端状態が `pending` 以外 (`in_progress` / `queued` 等) で現れる場合があり、
+  `grep -q pending` や `grep -c pending` は non-terminal を「terminal」と誤読して loop を
+  早抜けさせる。実測されたバグ 2 件:
+
+  - `until [ "$(gh pr checks <n> | grep -c pending)" -eq 0 ]; do ...` — pre-queue で
+    empty を返すと `[ 0 -eq 0 ]` が真、初回で抜ける (pr-gate-relay msg-758)
+  - `until out=$(gh pr checks <n>); [ -n "$out" ] && ! grep -q pending <<<"$out"; do ...` —
+    `in_progress` の check が並んでいるとき `grep -q pending` は miss、`! ...` が真、
+    非空 `$out` と AND で真、CI 走行中に loop を抜ける (pr-gate-relay msg-761)
+
+  ∴ **状態判定は `--watch` に任せる。**独自の bucket 判定が必要なら `gh pr checks <n>
+  --json bucket -q '[.[].bucket] | unique'` を使い、bucket の enum (`pass` / `fail` /
+  `pending` / `skipping` / `cancel`) に対して集合演算する — text 出力の単純 grep は書かない。
+
+  tight-loop で連打すると agent iteration / context を食い尽くして session が crash する
+  (Claude Code の run rule: 「Long leading sleep commands are blocked. To poll until a
+  condition is met, use Monitor with an until-loop」)。長時間 CI では `run_in_background`
+  を使って turn を跨ぐことも許される
+- CI が完了したら **SUCCESS でも FAILURE でも** gate を撃つ — FAILURE 時に AI 側で
+  fix loop に戻す事前判定はしない。ADR-2026-06-03-16 の gate 側 L1 短絡 (failure 時に
+  Lexora を呼ばずに `REQUEST_CHANGES` を返す) と同じ責務を AI 側に実装すると二重管理になる
+- **gate の返り値は 3 種** (ADR-2026-06-03-16 D-2 の分岐表: `SUCCESS→内容 review` /
+  `FAILURE→REQUEST_CHANGES 短絡` / `PENDING→COMMENT 保留` / `UNKNOWN→fail-closed`):
+  - `APPROVE` → artifact 成立 ∴ `NEXT: human`
+  - `REQUEST_CHANGES` → fix loop に戻る (判別子不要 — L1 短絡でも内容起因でも AI が返すべき
+    action は「直せ」で同じ)
+  - `COMMENT` → gate が pending / unknown を見た (local `gh` は既に terminal を見ているのに
+    remote gate 側が webhook 伝播遅延で古い state を掴んだ propagation race)。**上の CI 待機
+    ロジックに戻ってはならない** — local CLI は既に terminal ∴ `until` も `--watch` も即 exit で
+    実質 0 秒 delay になり、rapid infinite retry に化ける (pr-gate-relay msg-764 correctness
+    objection の実バグ)。代わりに **短 sleep の反復で 60s 待って 1 度だけ再発火**する:
+
+    ```bash
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 5; done  # 12 × 5s = 60s
+    # remote gate の webhook 伝播バッファ (local CLI は既に terminal)
+    # 再発火 (pr-review 経路への 2 度目のハンドオフ)
+    ```
+
+    **`sleep 60` を直書きしない** — Claude Code の run rule (上の polling 節で引用済) が
+    「Long leading sleep commands are blocked」を明記しており、bare `sleep 60` は runtime に
+    弾かれて retry pathway 全体が壊れる (pr-gate-relay msg-767 correctness objection の実バグ)。
+    短 sleep の反復に倒すことで、合計 60s の buffer を確保しつつ blocker を回避する。
+
+    2 度目も COMMENT が返ったら fix loop ではなく **「撃てなかった」escape** に倒し、
+    「gate が COMMENT を 2 度返した (remote propagation race 継続) — 自動再試行を諦めて渡す」
+    と書いてスレッドに差し戻す。無限再試行は turn 予算を焼き切るだけで、状態を進めない。
+
+    **「pending 由来 RC」という phantom branch を作らない** — ADR D-2 は pending を明確に
+    `COMMENT` で返し `REQUEST_CHANGES` に潰さない (T-merged-to-main-without-gate-artifact
+    msg-751 §1 の ADR 読了報告)
+- head が動いたら CI も artifact もやり直し (新しい head sha に対する CI 完了を再度待って
+  gate を撃ち直す)。前 head の APPROVED は無効
+- CI 取得や gate 発火が構造的に不能な場合 (token 権限欠如・network・gate エラー等) は
+  「撃てなかった」と書いて渡す。「たぶん通る」で渡さない
+- **handoff message に artifact の sha を書いても、それは人の確認材料にならない** —
+  人は GitHub PR で `spirrowgames-ops` の APPROVED を一次情報として視認する。本規則の目的は
+  artifact を **産む** ことであって **報告する** ことではない。chatroom に「gate 通した」旨の
+  欄・鏡・サマリーを作らない — 自然言語で書かれた「通した」は LLM の幻覚と区別不能で、
+  最も信用ならないものの信用度を継承する (T-merged-to-main-without-gate-artifact msg-287 / msg-288 §1)
+
+**位置付け**: `main` merge の Tier-C 固定は動かさない。本規則が塞ぐのは「AI が撃ち忘れたまま
+`NEXT: human` を出し、人が gate 未通過に気付かず merge する」経路であって、branch protection の
+代替ではない。branch protection はこの GitHub プランで不可 ∴ 最終強制点は「merge 前に人が
+GitHub PR 上で `spirrowgames-ops` の APPROVED を視認する」ままである
+(T-merged-to-main-without-gate-artifact msg-288 §2)。
+
+**残る穴 (解決済みではない)**: AI が撃たなかった場合 (幻覚 / 落ち / gate 自体のエラー) を
+拾う機構は本規則にない。人の視認統制も measured で不完全 (`spirrow-magickit` の直近 3 merge の
+うち 2 本が `spirrowgames-ops` の APPROVED 無しで `main` に載っていた、2026-09-06 実測、
+T-merged-to-main-without-gate-artifact §1)。着手条件は ①同型の未 gate merge がもう 1 本出たとき、
+②CI check として GitHub 上に出す候補が具体化したとき (branch protection が使えない本 repo で
+`required` にできないため advisory 止まり)。
+
 ## 設定
 
 `config/magickit_config.yaml`。環境変数で上書き可能 (`MAGICKIT_` prefix)。
