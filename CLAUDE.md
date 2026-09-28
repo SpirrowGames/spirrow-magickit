@@ -419,6 +419,19 @@ URL の分割は**形**であって登録順ではない: 板は 1 セグメン�
 **読めないものは空欄にしない。** Conclair が読めなければ判断待ちは「0 件」ではなく判定不能で、
 何が読めなかったかを板の上に書く。承認待ちはローカル file store ∴ chatroom が落ちていても出る。
 
+## PR 一覧 (`web/prs.py`)
+
+`/dashboard/prs` = org の open PR から **マージ待ち (gate 済)** と **停滞 (`prs.stale_hours` 更新なし)** の 2 表。
+行はすべて GitHub PR へのリンク。
+
+- **board のマージ lane とは範囲が違う**: board は allowlist 6 repo (カードごとに ledger 照合が要る)、
+  こちらは **org 全体を search 1 回**で取る。allowlist 外の PR (UeRestartCommand 等) を見落とさないため
+- **gate 済の判定は再実装しない**: `pr_watch.collect_pr_snapshots` を search で見つかった repo に対して呼ぶ。
+  ただし **`PrWatchState` は board と別**。あの関数は渡された repo 集合へ cache を prune するので、
+  共有すると互いの entry を毎周期消し合う
+- 除外は `prs.exclude_repos` (既定 `thirdy-sandbox`)。検索クエリの `-repo:` で外し、**ページに除外一覧を出す**
+- 結果は `prs.refresh_seconds` (既定 300) キャッシュ。**失敗はキャッシュしない**。検索失敗は「0 件」ではなく「読めませんでした」と描く
+
 ## 稼働状況ページ (`web/ops.py`)
 
 `/dashboard` = **稼働状況**。「自律ループが今回っているのか、止まっているのか、何を待っているのか」に

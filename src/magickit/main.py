@@ -43,6 +43,7 @@ from magickit.web import (
     decisions_router,
     deploys_router,
     ops_router,
+    prs_router,
 )
 from magickit.web import router as chatroom_ui_router
 from magickit.web import writes_router as chatroom_writes_router
@@ -301,6 +302,10 @@ def create_app() -> FastAPI:
     # the judgement page's are two (`/{project}/{thread_id}`) -- so the
     # split is by shape, not by registration order.
     app.include_router(board_router)
+
+    # PR 一覧: org の open PR から「マージ待ち」と「停滞」を。The board
+    # reads an allowlist; this page reads the whole org (web/prs.py says why).
+    app.include_router(prs_router)
 
     # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
     # Starlette matches routes in insertion order, and this router claims the

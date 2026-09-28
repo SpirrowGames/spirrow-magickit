@@ -1,0 +1,89 @@
+{#
+  PR 一覧の中身。行はすべて GitHub の PR に飛ぶ。
+
+  「読めなかった」は 0 件ではない (board_columns.html と同じ理由):
+  検索が失敗したら表を「なし」で出さず、読めなかったと書く。
+#}
+
+{% for notice in notices %}
+<div class="alert alert-warn">{{ notice }}</div>
+{% endfor %}
+
+{% macro pr_table(rows, show_draft) %}
+<table class="table table-stack prs-table">
+    <thead>
+        <tr>
+            <th>リポジトリ</th>
+            <th>PR</th>
+            <th>作成者</th>
+            <th>最終更新</th>
+            <th>open</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for pr in rows %}
+        <tr>
+            <td data-label="リポジトリ"><code>{{ pr.repo }}</code></td>
+            <td data-label="PR">
+                <a href="{{ pr.html_url }}" target="_blank" rel="noopener noreferrer">#{{ pr.number }} {{ pr.title }}</a>
+                {% if show_draft and pr.draft %}<span class="prs-draft">draft</span>{% endif %}
+            </td>
+            <td data-label="作成者">{{ pr.author or "—" }}</td>
+            <td data-label="最終更新" class="prs-age" title="{{ pr.updated_at | iso }}">{{ pr.updated_at | ago }}</td>
+            <td data-label="open" class="prs-age" title="{{ pr.created_at | iso }}">{{ pr.created_at | ago }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endmacro %}
+
+{% if unavailable %}
+<p class="empty-state">GitHub を読めませんでした</p>
+<p class="muted">
+    どちらの表も <strong>「0 件」ではなく不明</strong> です。次の更新で読み直します。
+</p>
+
+{% else %}
+<div class="board-meta muted">
+    open <strong>{{ total }}</strong> 件
+    <span class="board-checked">{{ checked_at | iso }} 時点</span>
+</div>
+
+<section class="card prs-section">
+    <div class="card-header">
+        <h2>マージ待ち <span class="muted">{{ merge_ready | length }} 件</span></h2>
+    </div>
+    <div class="card-body">
+        <p class="muted">
+            現在の head に naysayer の APPROVE があり、コンフリクトも draft でもないもの。次は merge クリックです。
+        </p>
+        {% if merge_ready %}
+        {{ pr_table(merge_ready, false) }}
+        {% else %}
+        <p class="empty-state">なし</p>
+        {% endif %}
+    </div>
+</section>
+
+<section class="card prs-section">
+    <div class="card-header">
+        <h2>停滞 <span class="muted">{{ stale | length }} 件</span></h2>
+    </div>
+    <div class="card-body">
+        <p class="muted">{{ stale_label }}以上更新が無い open PR（draft を含む）。古い順。</p>
+        {% if stale %}
+        {{ pr_table(stale, true) }}
+        {% else %}
+        <p class="empty-state">なし</p>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
+<p class="muted">
+    対象: <code>{{ org }}</code> の全リポジトリ
+    {% if excluded %}
+    — 除外中: {% for name in excluded %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    （<code>prs.exclude_repos</code>）
+    {% endif %}
+</p>

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}PR - Magickit{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>PR</h1>
+    <p class="subtitle">
+        org の open PR のうち、マージを待っているものと止まっているもの。
+        <span class="muted">{{ stale_label }}以上更新が無いものを「停滞」としています。</span>
+    </p>
+</div>
+
+{#
+  表は 60 秒ごとに描き直る。GitHub を読み直すのは prs.refresh_seconds ごと
+  で、その間の poll はキャッシュを描き直すだけ（経過時間を進めるため）。
+#}
+<section id="prs-tables"
+         hx-get="/dashboard/prs/_tables"
+         hx-trigger="load, every 60s"
+         hx-target="this"
+         hx-swap="innerHTML">
+    <p class="loading">GitHub から PR を集めています...</p>
+</section>
+{% endblock %}
