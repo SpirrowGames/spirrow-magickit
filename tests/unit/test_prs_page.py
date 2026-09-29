@@ -126,6 +126,21 @@ def test_yaml_prs_section_is_read(tmp_path):
     assert settings.prs_refresh_seconds == 60
 
 
+def test_yaml_partial_prs_section_keeps_defaults(tmp_path):
+    # Absent keys reach `flat_config` as None; `from_yaml` strips None
+    # before building Settings, so they fall back to the field defaults
+    # instead of failing validation.
+    import yaml
+
+    path = tmp_path / "magickit_config.yaml"
+    path.write_text(yaml.safe_dump({"prs": {"stale_hours": 48}}), encoding="utf-8")
+    settings = Settings.from_yaml(path)
+    assert settings.prs_stale_hours == 48
+    assert settings.prs_org == "SpirrowGames"
+    assert settings.prs_refresh_seconds == 300
+    assert settings.prs_exclude_repos == ["thirdy-sandbox"]
+
+
 # --- search ----------------------------------------------------------------
 
 
