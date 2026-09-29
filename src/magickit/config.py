@@ -201,7 +201,9 @@ class Settings(BaseSettings):
     # far less often. The two are unlinked on purpose: coupling them would
     # blow through the rate-limit budget on the first user who opened the
     # board on a second monitor.
-    board_ui_poll_seconds: int = Field(default=20)
+    # ``ge=1``: the value lands in the board's ``hx-trigger="every Ns"``,
+    # and 0 would have every open tab re-render back to back.
+    board_ui_poll_seconds: int = Field(default=20, ge=1)
     board_pr_refresh_seconds: int = Field(default=300)
 
     # PR 一覧 (`/dashboard/prs`) — every open PR in the org, not the

@@ -217,7 +217,7 @@ class CardLink:
     """カードから出ていく脇道 1 本 (題名のリンクとは別)。
 
     ``external`` はホストの外へ出るかどうか。テンプレートは真のときだけ
-    新しいタブで開き ``rel`` を付ける ——— 板は 20 秒ごとに描き直るので、
+    新しいタブで開き ``rel`` を付ける ——— 板は poll のたびに描き直るので、
     同じタブで GitHub に出ると戻ってきたときに板が別物になっている。
     """
 
@@ -851,10 +851,11 @@ def _merge_card_from(
 #: show one state on the board and a different verdict on click.
 _LEDGER_OPEN_STATUSES = ("active", "awaiting_reply", "parked")
 
-#: The board re-renders every 20s, but GitHub is read at most once per
-#: ``board_pr_refresh_seconds``. Without this every render cost one
-#: ``list_pull_requests`` per allowlisted repo, so one board tab in the
-#: foreground (180 renders/h x 6 repos) ran past ``pr_watch``'s 500/h soft
+#: The board re-renders every ``board_ui_poll_seconds`` (20 by default),
+#: but GitHub is read at most once per ``board_pr_refresh_seconds``.
+#: Without this every render cost one ``list_pull_requests`` per
+#: allowlisted repo, so one board tab in the foreground at the default
+#: poll (180 renders/h x 6 repos) ran past ``pr_watch``'s 500/h soft
 #: cap on its own, and PRs stopped re-reading their reviews — the
 #: 「rate-cap でこの周期は再取得を見送り」 seen on the board 2026-09-28.
 #:
@@ -1455,10 +1456,15 @@ async def board_page(request: Request) -> HTMLResponse:
     URL は据え置き。ここは 302 の置き石だった (「増分 3 で本物の一覧に
     差し替える」) ので、判断待ちを見に来た人の着地点がそのまま板になる。
     """
+    settings = get_settings()
     return templates.TemplateResponse(
         request,
         "board.html",
-        {"active_page": "board", "done_days": get_settings().board_done_days},
+        {
+            "active_page": "board",
+            "done_days": settings.board_done_days,
+            "ui_poll_seconds": settings.board_ui_poll_seconds,
+        },
         headers={"Cache-Control": _NO_STORE},
     )
 

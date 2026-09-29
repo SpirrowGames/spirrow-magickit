@@ -12,14 +12,14 @@
 </div>
 
 {#
-  板は 20 秒ごとに描き直る。ドラッグ中に描き直すとカードが手から消える
+  板は board_ui_poll_seconds (既定 20) 秒ごとに描き直る。ドラッグ中に描き直すとカードが手から消える
   ので、HTMX の trigger filter で掴んでいる間だけ poll を止める
   (`board.js` が window.__boardDragging を立てる)。ボタン経由の移動は
   この fragment 自身を swap するので、次の tick を待たずに反映される。
 #}
 <section id="board"
          hx-get="/dashboard/decisions/_board"
-         hx-trigger="load, every 20s[!window.__boardDragging]"
+         hx-trigger="load, every {{ ui_poll_seconds }}s[!window.__boardDragging]"
          hx-target="this"
          hx-swap="innerHTML">
     <p class="loading">やることを集めています...</p>
