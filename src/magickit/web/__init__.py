@@ -14,6 +14,7 @@ from magickit.web.decision_summary import router as decision_summary_router
 from magickit.web.decisions import router as decisions_router
 from magickit.web.deploys import router as deploys_router
 from magickit.web.ops import router as ops_router
+from magickit.web.prs import router as prs_router
 
 __all__ = [
     "router",
@@ -24,5 +25,6 @@ __all__ = [
     "deploys_router",
     "ops_router",
     "board_router",
+    "prs_router",
     "close_client",
 ]

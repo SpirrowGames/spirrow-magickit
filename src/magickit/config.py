@@ -204,6 +204,26 @@ class Settings(BaseSettings):
     board_ui_poll_seconds: int = Field(default=20)
     board_pr_refresh_seconds: int = Field(default=300)
 
+    # PR 一覧 (`/dashboard/prs`) — every open PR in the org, not the
+    # board's allowlist. Two tables: gate 済 (the next click is merge) and
+    # 停滞 (no update for `prs_stale_hours`). The board asks "what is
+    # waiting for me right now"; this page asks "what is sitting open",
+    # which is a question about the whole org by nature -- a PR in a repo
+    # nobody put on a list is exactly the one that gets forgotten.
+    #
+    # `prs_exclude_repos` names repos (bare names inside `prs_org`, or
+    # `owner/repo`) that the search skips. It exists for repos whose open
+    # PRs are known dead weight (thirdy-sandbox: 143 PRs untouched since
+    # 2026-03) and would otherwise bury every live row. The page prints the
+    # list, so a hidden repo stays visible as hidden.
+    prs_org: str = Field(default="SpirrowGames")
+    prs_stale_hours: float = Field(default=24)
+    prs_exclude_repos: list[str] = Field(default_factory=lambda: ["thirdy-sandbox"])
+    # How long one GitHub read is reused. The page polls far more often
+    # than this; each poll re-renders the cached result so the relative
+    # ages keep moving without spending API calls.
+    prs_refresh_seconds: int = Field(default=300)
+
     # Chatroom thread digests. Magickit is the producer (Cognilens -> Lexora
     # `light`); Conclair stores and renders. See core/digest_producer.py.
     #
@@ -523,6 +543,16 @@ class Settings(BaseSettings):
                 flat_config["board_pr_refresh_seconds"] = board.get(
                     "pr_refresh_seconds"
                 )
+
+        # PR 一覧 settings. ``exclude_repos: []`` is a real answer (hide
+        # nothing), so read the key rather than truth-testing the value.
+        if prs := yaml_config.get("prs"):
+            flat_config["prs_org"] = prs.get("org")
+            flat_config["prs_stale_hours"] = prs.get("stale_hours")
+            flat_config["prs_refresh_seconds"] = prs.get("refresh_seconds")
+            if "exclude_repos" in prs:
+                raw = prs.get("exclude_repos")
+                flat_config["prs_exclude_repos"] = [] if raw is None else raw
 
         # Who may approve a deploy from the dashboard. An explicit empty
         # list is meaningful (nobody), so this reads the key rather than

@@ -1143,3 +1143,21 @@ textarea {
 @media (max-width: 900px) {
     .board-columns { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ==========================================================================
+   PR 一覧 (/dashboard/prs)
+   ========================================================================== */
+.prs-section { margin-bottom: 20px; }
+.prs-section .card-body > p.muted { margin-bottom: 12px; }
+.prs-table td { vertical-align: top; }
+.prs-table a { word-break: break-word; }
+.prs-age { white-space: nowrap; }
+.prs-draft {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    font-size: 11px;
+    border: 1px solid var(--gray-300);
+    border-radius: 4px;
+    color: var(--gray-500);
+}

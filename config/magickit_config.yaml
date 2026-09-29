@@ -53,6 +53,19 @@ ops:
   # これは推測であって観測ではない (web/ops.py を参照)。
   stall_minutes: 30
 
+# PR 一覧 (/dashboard/prs)
+# org の open PR 全部から「gate 済（次: merge）」と「停滞」を出す。
+prs:
+  org: "SpirrowGames"
+  # 最終更新からこれだけ経った open PR を「停滞」とする。
+  stale_hours: 24
+  # 検索から外すリポジトリ（org 内の名前 or owner/repo）。ページに一覧を出すので
+  # 隠したこと自体は見える。thirdy-sandbox は 2026-03 から動いていない PR が 143 本。
+  exclude_repos:
+    - "thirdy-sandbox"
+  # GitHub を読み直す間隔（秒）。ページの poll はこれより短く、その間はキャッシュを描き直す。
+  refresh_seconds: 300
+
 # deploy の承認をダッシュボードから行える tailnet ログイン。
 # 空 = 誰も承認できない (ページは従来どおり読み取り専用)。
 # tagged device (sg-tomtebo-01 = 自律ループ) はユーザログインを持たないので
