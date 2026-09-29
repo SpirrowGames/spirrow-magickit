@@ -682,6 +682,38 @@ def test_the_board_owns_the_decisions_index_and_nothing_else_does():
     )
 
 
+async def _board_page_html(settings: Settings) -> str:
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with patch.object(board, "get_settings", return_value=settings):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.get("/dashboard/decisions")
+    assert response.status_code == 200
+    return response.text
+
+
+@pytest.mark.asyncio
+async def test_board_polls_at_the_configured_interval(temp_db_path):
+    html = await _board_page_html(_settings(temp_db_path, board_ui_poll_seconds=45))
+
+    assert 'hx-trigger="load, every 45s[!window.__boardDragging]"' in html
+
+
+@pytest.mark.asyncio
+async def test_board_polls_every_20s_by_default(temp_db_path):
+    html = await _board_page_html(_settings(temp_db_path))
+
+    assert 'hx-trigger="load, every 20s[!window.__boardDragging]"' in html
+
+
+def test_zero_ui_poll_seconds_is_refused(temp_db_path):
+    """``every 0s`` would have each open tab re-render back to back."""
+    with pytest.raises(ValueError, match="board_ui_poll_seconds"):
+        _settings(temp_db_path, board_ui_poll_seconds=0)
+
+
 def test_the_board_fragments_do_not_collide_with_the_judgement_page():
     """`/_board` is one segment, `/{project}/{thread_id}` is two."""
     app = create_app()
