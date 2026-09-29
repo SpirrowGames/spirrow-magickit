@@ -24,6 +24,7 @@ import pytest
 
 from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.mcp.tools import chatroom as chatroom_tools
+from magickit.web import board as board_module
 from magickit.web import decisions as decisions_module
 
 #: The production ``_get_material_store`` captured at **import time**
@@ -39,6 +40,18 @@ from magickit.web import decisions as decisions_module
 #: same reference the same way ∴ this is a unification with an existing
 #: pattern, not a new one.
 _REAL_GET_MATERIAL_STORE = decisions_module._get_material_store
+
+
+@pytest.fixture(autouse=True)
+def fresh_board_pr_read(monkeypatch):
+    """Start every test with no cached board PR read.
+
+    ``board._PR_READ`` holds the last GitHub read for
+    ``board_pr_refresh_seconds`` (300 by default), and tests swap
+    ``pr_watch.collect_pr_snapshots`` per test ∴ without this reset a test
+    would be served the snapshots the previous test's fake returned.
+    """
+    monkeypatch.setattr(board_module, "_PR_READ", None)
 
 
 @pytest.fixture(autouse=True)

@@ -853,3 +853,121 @@ def test_merge_kind_gets_a_specific_gone_reason(temp_db_path):
         {"kind": "merge", "item_key": "merge:O/R#1"}, _Live()
     )
     assert "PR" in reason and "open でなくなり" in reason
+
+
+# --- GitHub read cadence ---------------------------------------------------
+
+
+class _Clock:
+    """Stand-in for ``board.time``; only ``monotonic`` is read."""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+def _counting_pr_watch(monkeypatch, *, failed_repos=None, raises=False):
+    calls: list[list[tuple[str, str]]] = []
+
+    async def fake(repos, _state):
+        calls.append(list(repos))
+        if raises:
+            raise RuntimeError("github down")
+        return [_snapshot()], [], set(failed_repos or ())
+
+    monkeypatch.setattr(pr_watch, "collect_pr_snapshots", fake)
+    return calls
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = _Clock()
+    monkeypatch.setattr(board, "time", c)
+    return c
+
+
+@pytest.mark.asyncio
+async def test_renders_inside_refresh_window_reuse_one_github_read(
+    temp_db_path, monkeypatch, clock
+):
+    """The 20s re-render must not cost a GitHub read each time."""
+    calls = _counting_pr_watch(monkeypatch)
+    settings = _settings(temp_db_path)
+
+    first = await _collect(_Adapter(), settings)
+    clock.t += settings.board_pr_refresh_seconds - 1
+    second = await _collect(_Adapter(), settings)
+
+    assert len(calls) == 1
+    assert len(_merge_cards(first)) == len(_merge_cards(second)) == 1
+
+
+@pytest.mark.asyncio
+async def test_github_is_read_again_once_the_window_passes(
+    temp_db_path, monkeypatch, clock
+):
+    calls = _counting_pr_watch(monkeypatch)
+    settings = _settings(temp_db_path)
+
+    await _collect(_Adapter(), settings)
+    clock.t += settings.board_pr_refresh_seconds
+    await _collect(_Adapter(), settings)
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_zero_refresh_seconds_reads_every_render(
+    temp_db_path, monkeypatch, clock
+):
+    calls = _counting_pr_watch(monkeypatch)
+    settings = Settings(
+        db_path=temp_db_path,
+        board_pr_repo_allowlist=["O/R"],
+        board_pr_refresh_seconds=0,
+    )
+
+    await _collect(_Adapter(), settings)
+    await _collect(_Adapter(), settings)
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_read_with_a_failed_repo_is_not_reused(
+    temp_db_path, monkeypatch, clock
+):
+    """A partial read would pin its degradation notice for the whole window."""
+    calls = _counting_pr_watch(monkeypatch, failed_repos=[("O", "R")])
+    settings = _settings(temp_db_path)
+
+    await _collect(_Adapter(), settings)
+    await _collect(_Adapter(), settings)
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_raised_read_is_not_reused(temp_db_path, monkeypatch, clock):
+    calls = _counting_pr_watch(monkeypatch, raises=True)
+    settings = _settings(temp_db_path)
+
+    for _ in range(2):
+        context = await _collect(_Adapter(), settings)
+        assert any("マージ待ち PR" in n for n in context["notices"])
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_allowlist_change_is_not_served_the_old_read(
+    temp_db_path, monkeypatch, clock
+):
+    calls = _counting_pr_watch(monkeypatch)
+
+    await _collect(_Adapter(), _settings(temp_db_path, repos=("O/R",)))
+    await _collect(_Adapter(), _settings(temp_db_path, repos=("O/R", "O/S")))
+
+    assert calls == [[("O", "R")], [("O", "R"), ("O", "S")]]

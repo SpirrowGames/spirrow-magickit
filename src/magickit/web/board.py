@@ -91,6 +91,7 @@ Conclair が読めないとき、判断待ちは「0 件」ではなく **判定
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -850,6 +851,48 @@ def _merge_card_from(
 #: show one state on the board and a different verdict on click.
 _LEDGER_OPEN_STATUSES = ("active", "awaiting_reply", "parked")
 
+#: The board re-renders every 20s, but GitHub is read at most once per
+#: ``board_pr_refresh_seconds``. Without this every render cost one
+#: ``list_pull_requests`` per allowlisted repo, so one board tab in the
+#: foreground (180 renders/h x 6 repos) ran past ``pr_watch``'s 500/h soft
+#: cap on its own, and PRs stopped re-reading their reviews — the
+#: 「rate-cap でこの周期は再取得を見送り」 seen on the board 2026-09-28.
+#:
+#: ``(monotonic fetched_at, repos, result)`` of the last read that reached
+#: every repo. Keyed on ``repos`` so an allowlist change is not served the
+#: previous list. A read with any failed repo is not kept: the next render
+#: retries instead of showing the degradation for the whole window.
+_PR_READ: tuple[
+    float,
+    tuple[tuple[str, str], ...],
+    tuple[list[PrSnapshot], list[str], set[tuple[str, str]]],
+] | None = None
+_PR_READ_LOCK = asyncio.Lock()
+
+
+async def _read_pr_snapshots(
+    repos: list[tuple[str, str]], settings: Settings
+) -> tuple[list[PrSnapshot], list[str], set[tuple[str, str]]]:
+    """``pr_watch.collect_pr_snapshots``, reused for ``board_pr_refresh_seconds``."""
+    global _PR_READ
+    key = tuple(repos)
+    async with _PR_READ_LOCK:
+        now = time.monotonic()
+        if (
+            _PR_READ is not None
+            and _PR_READ[1] == key
+            and now - _PR_READ[0] < settings.board_pr_refresh_seconds
+        ):
+            snapshots, notices, failed_repos = _PR_READ[2]
+        else:
+            snapshots, notices, failed_repos = await pr_watch.collect_pr_snapshots(
+                repos, pr_watch.get_state()
+            )
+            if not failed_repos:
+                _PR_READ = (now, key, (snapshots, notices, failed_repos))
+    # Copies, so a caller that edits what it got cannot edit the cache.
+    return list(snapshots), list(notices), set(failed_repos)
+
 
 async def _collect_merges(
     adapter: ChatroomAdapter,
@@ -887,8 +930,8 @@ async def _collect_merges(
         return
 
     try:
-        snapshots, watch_notices, failed_repos = await pr_watch.collect_pr_snapshots(
-            repos, pr_watch.get_state()
+        snapshots, watch_notices, failed_repos = await _read_pr_snapshots(
+            repos, settings
         )
     except Exception as exc:  # noqa: BLE001 - 板全体を殺さない
         logger.warning("board: pr_watch failed", err=str(exc))
