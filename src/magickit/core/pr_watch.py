@@ -236,6 +236,16 @@ class PrSnapshot:
     #: Board treats this as ``gate 進行中`` unless the ledger says otherwise
     #: — safer than falsely claiming ``未依頼`` for a PR we could not read.
     rate_capped: bool = False
+    #: Branch names from the list payload (``head.ref`` / ``base.ref``),
+    #: and whether the head branch lives in the base repository. Carried
+    #: so a consumer can recognise a promotion PR (``develop`` → ``main``)
+    #: without a second read. This module draws no conclusion from them.
+    #: Empty / ``False`` means the payload did not say — read it as
+    #: "unknown", never as a match: a fork's ``develop`` is not the
+    #: repository's ``develop``.
+    head_ref: str = ""
+    base_ref: str = ""
+    head_in_base_repo: bool = False
 
     @property
     def slug(self) -> str:
@@ -929,6 +939,32 @@ async def collect_pr_snapshots(
     return snapshots, notices, failed_repos
 
 
+def _branch_fields(pr: dict[str, Any]) -> dict[str, Any]:
+    """``head_ref`` / ``base_ref`` / ``head_in_base_repo`` for one list item.
+
+    Anything the payload does not carry as a non-empty string stays at
+    the :class:`PrSnapshot` default. ``head.repo`` is null once a fork is
+    deleted, so its absence is ordinary and means "not the base repo".
+    """
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+
+    def _text(value: Any) -> str:
+        return value if isinstance(value, str) else ""
+
+    def _repo_name(side: dict[str, Any]) -> str:
+        repo = side.get("repo")
+        return _text(repo.get("full_name")) if isinstance(repo, dict) else ""
+
+    head_repo = _repo_name(head)
+    return {
+        "head_ref": _text(head.get("ref")),
+        "base_ref": _text(base.get("ref")),
+        "head_in_base_repo": bool(head_repo)
+        and head_repo.lower() == _repo_name(base).lower(),
+    }
+
+
 async def _snapshot_for_pr(
     pr: dict[str, Any],
     *,
@@ -967,6 +1003,8 @@ async def _snapshot_for_pr(
         or f"https://github.com/{owner}/{repo}/pull/{number_raw}"
     )
 
+    branches = _branch_fields(pr)
+
     cache_key: LedgerKey = (owner, repo, number_raw)
     entry = state.cache.get(cache_key)
     should_refetch = _needs_review_refetch(
@@ -983,6 +1021,7 @@ async def _snapshot_for_pr(
             head_sha=head_sha,
             updated_at=updated_at,
             created_at=created_at,
+            **branches,
             artifact_approved=entry.artifact_approved,
             approving_review_id=entry.approving_review_id,
         )
@@ -1009,6 +1048,7 @@ async def _snapshot_for_pr(
                 head_sha=head_sha,
                 updated_at=updated_at,
                 created_at=created_at,
+                **branches,
                 artifact_approved=approved_now,
                 approving_review_id=review_id_now,
                 rate_capped=True,
@@ -1022,6 +1062,7 @@ async def _snapshot_for_pr(
             head_sha=head_sha,
             updated_at=updated_at,
             created_at=created_at,
+            **branches,
             artifact_approved=False,
             rate_capped=True,
         )
@@ -1046,6 +1087,7 @@ async def _snapshot_for_pr(
                 head_sha=head_sha,
                 updated_at=updated_at,
                 created_at=created_at,
+                **branches,
                 artifact_approved=approved_now,
                 approving_review_id=review_id_now,
                 rate_capped=True,
@@ -1059,6 +1101,7 @@ async def _snapshot_for_pr(
             head_sha=head_sha,
             updated_at=updated_at,
             created_at=created_at,
+            **branches,
             artifact_approved=False,
             rate_capped=True,
         )
@@ -1081,6 +1124,7 @@ async def _snapshot_for_pr(
         head_sha=head_sha,
         updated_at=updated_at,
         created_at=created_at,
+        **branches,
         artifact_approved=approved,
         approving_review_id=review_id,
     )

@@ -221,6 +221,19 @@ class Settings(BaseSettings):
     prs_org: str = Field(default="SpirrowGames")
     prs_stale_hours: float = Field(default=24)
     prs_exclude_repos: list[str] = Field(default_factory=lambda: ["thirdy-sandbox"])
+    # マージ待ち is not only gate 済: some PRs wait for a human merge and no
+    # gate will ever speak on them (web/prs.py, "PRs the gate does not
+    # cover"). Two ways a PR says so:
+    #
+    # `prs_release_heads` -- head branches whose PRs are releases (the
+    # integration branch being promoted, `develop` -> `main`). Matched
+    # exactly, and only when the head lives in the base repository.
+    #
+    # `prs_merge_assignees` -- GitHub logins; a PR assigned to one of them
+    # is asking that person to merge it. Empty by default: whose request
+    # queue this page is belongs to the deployment, not to the code.
+    prs_release_heads: list[str] = Field(default_factory=lambda: ["develop"])
+    prs_merge_assignees: list[str] = Field(default_factory=list)
     # How long one GitHub read is reused. The page polls far more often
     # than this; each poll re-renders the cached result so the relative
     # ages keep moving without spending API calls.
@@ -552,9 +565,15 @@ class Settings(BaseSettings):
             flat_config["prs_org"] = prs.get("org")
             flat_config["prs_stale_hours"] = prs.get("stale_hours")
             flat_config["prs_refresh_seconds"] = prs.get("refresh_seconds")
-            if "exclude_repos" in prs:
-                raw = prs.get("exclude_repos")
-                flat_config["prs_exclude_repos"] = [] if raw is None else raw
+            # Same for the two lists below: `[]` turns the signal off.
+            for yaml_key, field in (
+                ("exclude_repos", "prs_exclude_repos"),
+                ("release_heads", "prs_release_heads"),
+                ("merge_assignees", "prs_merge_assignees"),
+            ):
+                if yaml_key in prs:
+                    raw = prs.get(yaml_key)
+                    flat_config[field] = [] if raw is None else raw
 
         # Who may approve a deploy from the dashboard. An explicit empty
         # list is meaningful (nobody), so this reads the key rather than
