@@ -1952,3 +1952,61 @@ async def test_fetch_open_prs_accepts_bare_list_and_items_wrapper(
     assert await pr_watch._fetch_open_prs("O", "R") == [{"number": 3}]
     # Legitimate empty-list is still an empty list (NOT _FETCH_FAILED).
     assert await pr_watch._fetch_open_prs("O", "R") == []
+
+
+# --- branch fields (head/base refs for promotion-PR consumers) -------------
+
+
+@pytest.mark.asyncio
+async def test_snapshot_carries_branch_names_and_same_repo_flag():
+    """The list payload's refs ride on the snapshot so ``web/prs.py`` can
+    recognise a ``develop`` → ``main`` release without a second read."""
+    pr = _pr(number=7)
+    pr["head"] = {
+        "sha": "sha-a",
+        "ref": "develop",
+        "repo": {"full_name": "O/R"},
+    }
+    pr["base"] = {"ref": "main", "repo": {"full_name": "o/r"}}
+    list_fn, reviews_fn, _ = _make_fetchers(prs=[pr], reviews_by_pr={7: []})
+    mergeable_fn, _ = _mergeable_fetcher()
+
+    snapshots, _, _ = await collect_pr_snapshots(
+        [("O", "R")], PrWatchState(),
+        fetch_open_prs=list_fn, fetch_reviews=reviews_fn,
+        fetch_mergeable_state=mergeable_fn, now=0.0,
+    )
+
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert (snap.head_ref, snap.base_ref) == ("develop", "main")
+    # Repository names are case-insensitive on GitHub.
+    assert snap.head_in_base_repo is True
+
+
+@pytest.mark.parametrize(
+    "head, base",
+    [
+        # A fork's `develop` is somebody else's branch.
+        (
+            {"sha": "s", "ref": "develop", "repo": {"full_name": "fork/R"}},
+            {"ref": "main", "repo": {"full_name": "O/R"}},
+        ),
+        # `head.repo` is null once the fork is deleted.
+        (
+            {"sha": "s", "ref": "develop", "repo": None},
+            {"ref": "main", "repo": {"full_name": "O/R"}},
+        ),
+        # Neither side names its repo: unknown is not "same".
+        ({"sha": "s", "ref": "develop"}, {"ref": "main"}),
+        # Pre-existing payload shape (no refs at all).
+        ({"sha": "s"}, None),
+    ],
+)
+def test_branch_fields_do_not_claim_same_repo_without_evidence(head, base):
+    pr: dict[str, Any] = {"number": 1, "head": head}
+    if base is not None:
+        pr["base"] = base
+    fields = pr_watch._branch_fields(pr)
+    assert fields["head_in_base_repo"] is False
+    assert fields["head_ref"] == head.get("ref", "")

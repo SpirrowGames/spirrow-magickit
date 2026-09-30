@@ -421,8 +421,25 @@ URL の分割は**形**であって登録順ではない: 板は 1 セグメン�
 
 ## PR 一覧 (`web/prs.py`)
 
-`/dashboard/prs` = org の open PR から **マージ待ち (gate 済)** と **停滞 (`prs.stale_hours` 更新なし)** の 2 表。
+`/dashboard/prs` = org の open PR から **マージ待ち (次が merge クリック)** と **停滞 (`prs.stale_hours` 更新なし)** の 2 表。
 行はすべて GitHub PR へのリンク。
+
+- **マージ待ちは gate 済だけではない**。draft でもコンフリクトでもなく、次のどれかに当たるもの。
+  載っている理由は行ごとに出す (release / 依頼は「gate を通った」ではない ∴ 理由を混ぜて見せない):
+  - **gate 済** — 現在の head に naysayer の APPROVE
+  - **release** — head が `prs.release_heads` (既定 `develop`) で、**base と同じ repo** にある PR。
+    develop → main の release PR は gate が付かない (中身は develop に入る時に PR 単位で gate 済) ∴
+    gate 済だけを見ていると永久に載らない (実測 2026-09-30: 2026-08-25 以降の release PR 44 本中
+    35 本が gate の APPROVE 無しで merge されていた)
+  - **依頼** — assignee が `prs.merge_assignees` の login。**gate の無い PR を人に渡すときは
+    その人を assignee に付ける** (`gh pr edit <n> --add-assignee <login>` /
+    `github(operation="issue_write", arguments={method:"update", issue_number:<n>, assignees:[...]})`)。
+    これが「この PR は人の merge 待ち」を GitHub 上に残す唯一の目印
+- **依頼の目印に review request を使わない**。`humans` ruleset の repo は PR 作成と同時に team の
+  review request が自動で付き、`review-requested:<login>` は team 宛も拾う ∴ 全 PR が一致する
+  (実測: gate が REQUEST_CHANGES を返している mindwire#359 が一致した)。
+  個人宛の request だけを読む手段も無い — github-mcp の `list_pull_requests` /
+  `pull_request_read(get)` は `requested_reviewers` を返さない
 
 - **board のマージ lane とは範囲が違う**: board は allowlist 6 repo (カードごとに ledger 照合が要る)、
   こちらは **org 全体を search 1 回**で取る。allowlist 外の PR (UeRestartCommand 等) を見落とさないため

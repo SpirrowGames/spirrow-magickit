@@ -2,9 +2,14 @@
 
 Two tables, each row linking to the PR on GitHub:
 
-- **マージ待ち** — gate 済: the independent naysayer's APPROVE stands at
-  the current head and the PR is neither conflicting nor a draft. The
-  next action is a human clicking merge.
+- **マージ待ち** — the next action is a human clicking merge. The PR is
+  neither conflicting nor a draft, and at least one of these holds:
+
+  - *gate 済*: the independent naysayer's APPROVE stands at the current
+    head;
+  - *release*: its head is a release branch (``prs_release_heads``) of
+    the same repository, e.g. ``develop`` → ``main``;
+  - *依頼*: it is assigned to a login in ``prs_merge_assignees``.
 - **停滞** — no update for ``prs_stale_hours``. Drafts included: a draft
   nobody touched is still a thing somebody forgot.
 
@@ -31,6 +36,37 @@ function prunes its caches down to the repos it was just given, so
 sharing the board's state would have each caller evict the other's
 entries every cycle.
 
+PRs the gate does not cover
+---------------------------
+
+The first version listed gate 済 only, which left out every PR that was
+never going to get a gate verdict. Measured 2026-09-30: of 44
+``develop`` → ``main`` release PRs merged since 2026-08-25 (playproof /
+voxelworld / lexora), 35 had no APPROVE from the gate. Their content had
+been gated PR by PR on the way into ``develop``. Each one waited for a
+human merge and the page showed none of them.
+
+Two signals, both read from payloads the page already fetches, so they
+cost no extra API call:
+
+- **release** — the head branch is in ``prs_release_heads`` and lives in
+  the base repository (a fork's ``develop`` is somebody else's branch).
+  The branch names ride on the ``pr_watch`` snapshot, from the
+  ``list_pull_requests`` payload.
+- **依頼** — an assignee in ``prs_merge_assignees``, from the search
+  payload. This is how a PR outside any gate says "a human should merge
+  this".
+
+Why assignee and not a review request: repos under the ``humans``
+ruleset request that team's review on every PR the moment it opens, and
+``review-requested:<login>`` matches team requests too. Measured
+2026-09-30: it matched mindwire #359 while the gate's verdict on that
+head was CHANGES_REQUESTED. A mark that every PR carries is not a
+request. Nothing assigns a PR on its own.
+
+Neither signal says the gate passed. The row names its reason so that
+"listed because somebody asked" is never read as "gate 済".
+
 Cost is bounded by caching the whole result for ``prs_refresh_seconds``.
 The page polls more often than that; a poll inside the window re-renders
 the cached result, so ages keep moving without spending API calls.
@@ -40,7 +76,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -88,10 +124,19 @@ class PrRow:
     created_at: str
     updated_at: str
     draft: bool
+    assignees: tuple[str, ...] = ()
 
     @property
     def key(self) -> tuple[str, str, int]:
         return (self.owner, self.repo, self.number)
+
+
+@dataclass(frozen=True)
+class MergeReason:
+    """One reason a row is in マージ待ち. ``kind`` is the CSS hook."""
+
+    kind: str
+    label: str
 
 
 @dataclass
@@ -102,6 +147,11 @@ class Overview:
     rows: list[PrRow]
     approved: set[tuple[str, str, int]]
     notices: list[str]
+    #: Every PR ``pr_watch`` returned, approved or not: neither a draft
+    #: nor conflicting. An assignee only counts inside this set.
+    mergeable: set[tuple[str, str, int]] = field(default_factory=set)
+    #: Release PRs among ``mergeable``, with their ``head → base`` text.
+    release: dict[tuple[str, str, int], str] = field(default_factory=dict)
 
 
 def excluded_repo_names(org: str, entries: list[str]) -> list[str]:
@@ -163,6 +213,7 @@ def _row_from_item(item: dict[str, Any]) -> PrRow | None:
     if not owner or not repo or not isinstance(number, int):
         return None
     user = item.get("user") if isinstance(item.get("user"), dict) else {}
+    assignees = item.get("assignees") if isinstance(item.get("assignees"), list) else []
     return PrRow(
         owner=owner,
         repo=repo,
@@ -173,6 +224,11 @@ def _row_from_item(item: dict[str, Any]) -> PrRow | None:
         created_at=str(item.get("created_at") or ""),
         updated_at=str(item.get("updated_at") or ""),
         draft=item.get("draft") is True,
+        assignees=tuple(
+            a["login"]
+            for a in assignees
+            if isinstance(a, dict) and isinstance(a.get("login"), str) and a["login"]
+        ),
     )
 
 
@@ -219,6 +275,22 @@ async def search_open_prs(
     return rows, notices
 
 
+def release_prs(
+    snapshots: list[pr_watch.PrSnapshot], release_heads: list[str]
+) -> dict[tuple[str, str, int], str]:
+    """The snapshots whose head is a release branch of the base repository.
+
+    Branch names match exactly (git refs are case-sensitive). A snapshot
+    that does not say where its head lives is not a match.
+    """
+    heads = {str(h or "").strip() for h in release_heads} - {""}
+    return {
+        pr_watch.pr_key(s): f"{s.head_ref} → {s.base_ref or '?'}"
+        for s in snapshots
+        if s.head_in_base_repo and s.head_ref in heads
+    }
+
+
 class _SearchFailedError(Exception):
     """The search itself failed: there is no live set to show."""
 
@@ -253,6 +325,8 @@ async def read_overview(
 
     repos = sorted({(r.owner, r.repo) for r in rows if not r.draft})
     approved: set[tuple[str, str, int]] = set()
+    mergeable: set[tuple[str, str, int]] = set()
+    release: dict[tuple[str, str, int], str] = {}
     if repos:
         collect_snapshots = collect_snapshots or pr_watch.collect_pr_snapshots
         try:
@@ -265,6 +339,8 @@ async def read_overview(
         else:
             notices.extend(watch_notices)
             approved = {pr_watch.pr_key(s) for s in snapshots if s.artifact_approved}
+            mergeable = {pr_watch.pr_key(s) for s in snapshots}
+            release = release_prs(snapshots, settings.prs_release_heads)
             capped = sum(1 for s in snapshots if s.rate_capped and not s.artifact_approved)
             if capped:
                 notices.append(
@@ -277,6 +353,8 @@ async def read_overview(
         rows=rows,
         approved=approved,
         notices=notices,
+        mergeable=mergeable,
+        release=release,
     )
 
 
@@ -300,6 +378,26 @@ async def get_overview(settings: Settings) -> tuple[Overview | None, list[str]]:
         return overview, []
 
 
+def merge_reasons(
+    row: PrRow, overview: Overview, merge_assignees: set[str]
+) -> list[MergeReason]:
+    """Every reason ``row`` is waiting for a merge click. Empty = it is not.
+
+    ``merge_assignees`` is lower-cased: GitHub logins are
+    case-insensitive.
+    """
+    reasons: list[MergeReason] = []
+    if row.key in overview.approved:
+        reasons.append(MergeReason("gate", "gate 済"))
+    if row.key in overview.release:
+        reasons.append(MergeReason("release", f"release {overview.release[row.key]}"))
+    if row.key in overview.mergeable:
+        asked = [a for a in row.assignees if a.lower() in merge_assignees]
+        if asked:
+            reasons.append(MergeReason("asked", "依頼 → " + ", ".join(asked)))
+    return reasons
+
+
 def build_context(
     overview: Overview | None,
     failure_notices: list[str],
@@ -315,14 +413,23 @@ def build_context(
         "excluded": excluded,
         "stale_hours": settings.prs_stale_hours,
         "stale_label": _hours_label(settings.prs_stale_hours),
+        "release_heads": [h for h in settings.prs_release_heads if str(h or "").strip()],
+        "merge_assignees": [a for a in settings.prs_merge_assignees if str(a or "").strip()],
     }
     if overview is None:
         return {**base, "unavailable": True, "notices": failure_notices,
-                "merge_ready": [], "stale": [], "total": 0, "checked_at": None}
+                "merge_ready": [], "merge_reasons": {}, "stale": [], "total": 0,
+                "checked_at": None}
 
     cutoff = now - timedelta(hours=settings.prs_stale_hours)
+    assignees = {str(a or "").strip().lower() for a in settings.prs_merge_assignees} - {""}
+    reasons = {
+        r.key: found
+        for r in overview.rows
+        if (found := merge_reasons(r, overview, assignees))
+    }
     merge_ready = sorted(
-        (r for r in overview.rows if r.key in overview.approved),
+        (r for r in overview.rows if r.key in reasons),
         key=lambda r: r.updated_at,
     )
     stale = sorted(
@@ -337,6 +444,7 @@ def build_context(
         "unavailable": False,
         "notices": overview.notices,
         "merge_ready": merge_ready,
+        "merge_reasons": reasons,
         "stale": stale,
         "total": len(overview.rows),
         "checked_at": overview.checked_at,

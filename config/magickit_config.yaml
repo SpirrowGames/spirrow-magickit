@@ -54,7 +54,7 @@ ops:
   stall_minutes: 30
 
 # PR 一覧 (/dashboard/prs)
-# org の open PR 全部から「gate 済（次: merge）」と「停滞」を出す。
+# org の open PR 全部から「マージ待ち（次: merge クリック）」と「停滞」を出す。
 prs:
   org: "SpirrowGames"
   # 最終更新からこれだけ経った open PR を「停滞」とする。
@@ -63,6 +63,18 @@ prs:
   # 隠したこと自体は見える。thirdy-sandbox は 2026-03 から動いていない PR が 143 本。
   exclude_repos:
     - "thirdy-sandbox"
+  # マージ待ちに載るのは gate 済だけではない。gate が付かないまま人の merge を
+  # 待つ PR が 2 種類ある（どちらも draft / コンフリクトは載せない）。
+  #
+  # release_heads: この名前のブランチを head にした PR は release（develop → main）。
+  # 完全一致、かつ head が base と同じ repo にあるときだけ（fork の develop は別物）。
+  release_heads:
+    - "develop"
+  # merge_assignees: この login が assignee に付いた PR は「この人に merge を依頼」。
+  # gate の無い repo の PR を人に渡すときの目印。review request は使えない —
+  # humans ruleset の repo では全 PR に team の review request が自動で付くため。
+  merge_assignees:
+    - "takayan0908"
   # GitHub を読み直す間隔（秒）。ページの poll はこれより短く、その間はキャッシュを描き直す。
   refresh_seconds: 300
 

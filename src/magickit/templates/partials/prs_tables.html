@@ -9,12 +9,17 @@
 <div class="alert alert-warn">{{ notice }}</div>
 {% endfor %}
 
-{% macro pr_table(rows, show_draft) %}
+{#
+  reasons: PR の key → マージ待ちに載っている理由の一覧。渡したときだけ
+  「理由」列が出る（停滞の表には理由が無い）。
+#}
+{% macro pr_table(rows, show_draft, reasons=none) %}
 <table class="table table-stack prs-table">
     <thead>
         <tr>
             <th>リポジトリ</th>
             <th>PR</th>
+            {% if reasons is not none %}<th>理由</th>{% endif %}
             <th>作成者</th>
             <th>最終更新</th>
             <th>open</th>
@@ -28,6 +33,11 @@
                 <a href="{{ pr.html_url }}" target="_blank" rel="noopener noreferrer">#{{ pr.number }} {{ pr.title }}</a>
                 {% if show_draft and pr.draft %}<span class="prs-draft">draft</span>{% endif %}
             </td>
+            {% if reasons is not none %}
+            <td data-label="理由">
+                {% for reason in reasons[pr.key] %}<span class="prs-reason prs-reason-{{ reason.kind }}">{{ reason.label }}</span>{% endfor %}
+            </td>
+            {% endif %}
             <td data-label="作成者">{{ pr.author or "—" }}</td>
             <td data-label="最終更新" class="prs-age" title="{{ pr.updated_at | iso }}">{{ pr.updated_at | ago }}</td>
             <td data-label="open" class="prs-age" title="{{ pr.created_at | iso }}">{{ pr.created_at | ago }}</td>
@@ -55,10 +65,18 @@
     </div>
     <div class="card-body">
         <p class="muted">
-            現在の head に naysayer の APPROVE があり、コンフリクトも draft でもないもの。次は merge クリックです。
+            コンフリクトも draft でもなく、次が merge クリックのもの。載っている理由は行ごとに出ます。
+            <strong>gate 済</strong>: 現在の head に naysayer の APPROVE がある。
+            {% if release_heads %}
+            <strong>release</strong>: head が {% for name in release_heads %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %} の PR（gate の対象外）。
+            {% endif %}
+            {% if merge_assignees %}
+            <strong>依頼</strong>: assignee が {% for name in merge_assignees %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}。
+            {% endif %}
+            release と依頼は、gate を通ったという意味ではありません。
         </p>
         {% if merge_ready %}
-        {{ pr_table(merge_ready, false) }}
+        {{ pr_table(merge_ready, false, merge_reasons) }}
         {% else %}
         <p class="empty-state">なし</p>
         {% endif %}

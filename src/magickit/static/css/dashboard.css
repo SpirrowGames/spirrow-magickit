@@ -1152,6 +1152,16 @@ textarea {
 .prs-table td { vertical-align: top; }
 .prs-table a { word-break: break-word; }
 .prs-age { white-space: nowrap; }
+.prs-reason {
+    display: inline-block;
+    margin: 0 6px 2px 0;
+    padding: 0 6px;
+    font-size: 11px;
+    white-space: nowrap;
+    border: 1px solid var(--gray-300);
+    border-radius: 4px;
+    color: var(--gray-700);
+}
 .prs-draft {
     display: inline-block;
     margin-left: 6px;
