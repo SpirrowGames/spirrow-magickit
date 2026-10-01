@@ -18,6 +18,7 @@ from fastmcp import FastMCP
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
+from magickit.core.identity_normalize import normalize_identity_key
 from magickit.mcp.disposition import DispositionError, parse_disposition
 from magickit.mcp.pr_gate_ledger import (
     LedgerVerdict,
@@ -1569,14 +1570,24 @@ async def _check_next_participant(name: str) -> dict[str, Any] | None:
 # fetched with ``_lookup_identity``, reused for the same reason the
 # next_participant gate reuses it.
 #
-# The registry is consulted ONLY when the disposition names ``human``; every
-# other post stays off Prismind's critical path. When it is consulted and
-# cannot answer, the post is refused (fail-closed, like next_participant): a
-# Prismind outage must not open the bypass this gate exists to close. The
-# remedy is to retry; omitting ``disposition`` also lands the post, recorded
-# as before this feature.
+# DESIGN v11 §1 adds the wake existence check: ``wake`` is an identity, so it
+# is checked against the registry the way ``next_participant`` is, and an
+# unregistered wake is refused. That is also how ``wake = none`` is refused --
+# by not being a registered identity, not by this layer knowing the word.
+# ADR-11 normalisation is applied first: the stripped wake is looked up, and if
+# the registry does not know that spelling, its ADR-11 key is tried as well.
+#
+# When the registry is consulted and cannot answer, the post is refused
+# (fail-closed, like next_participant): a Prismind outage must not open the
+# bypass this gate exists to close. The remedy is to retry; omitting
+# ``disposition`` also lands the post, recorded as before this feature. A post
+# without ``disposition``, or with ``{kind: done}``, never consults Prismind.
+#
+# Which ``NEXT:`` line a disposition belongs to, and the ``unclassified`` /
+# ``human_close`` classification of a stop without one, are NOT decided here
+# (DESIGN v11 §1, option (b)): that vocabulary is the consumer's (msg-072 §1).
 
-_DISPOSITION_CONTRACT = "T-magickit-stop-disposition-intake (DESIGN v8 §2)"
+_DISPOSITION_CONTRACT = "T-magickit-stop-disposition-intake (DESIGN v8 §2 / v11 §1)"
 _HUMAN_ROLE = "human"
 
 
@@ -1601,16 +1612,42 @@ def _disposition_human_not_allowed_error(*, author: str) -> dict[str, Any]:
     }
 
 
-def _disposition_validation_unavailable_error(*, author: str, reason: str) -> dict[str, Any]:
+def _disposition_validation_unavailable_error(*, subject: str, reason: str) -> dict[str, Any]:
     return {
         "error_type": "DispositionValidationUnavailableError",
         "error": (
-            f"cannot decide whether {author!r} may name 'human' in a "
-            f"disposition: the identity lookup failed ({reason}). Nothing was "
-            "written; retry."
+            f"cannot validate the disposition: the identity lookup for "
+            f"{subject!r} failed ({reason}). Nothing was written; retry."
         ),
-        "details": {"author": author, "reason": reason, "contract": _DISPOSITION_CONTRACT},
+        "details": {"subject": subject, "reason": reason, "contract": _DISPOSITION_CONTRACT},
     }
+
+
+def _disposition_wake_unknown_error(*, wake: str) -> dict[str, Any]:
+    return {
+        "error_type": "DispositionWakeUnknownError",
+        "error": (
+            f"disposition wake {wake!r} is not a registered identity (checked "
+            "as given and by its ADR-11 key). Name a registered identity."
+        ),
+        "details": {"wake": wake, "contract": _DISPOSITION_CONTRACT},
+    }
+
+
+async def _lookup_wake(wake: str) -> _IdentityLookup:
+    """Registry lookup for ``wake``: as given, then by its ADR-11 key.
+
+    The second lookup only runs when the first one confirms "not registered"
+    and the key differs from the spelling given; an unusable first answer is
+    returned as is (fail-closed).
+    """
+    lookup = await _lookup_identity(wake)
+    if lookup.is_unavailable or lookup.found:
+        return lookup
+    key = normalize_identity_key(wake)
+    if not key or key == wake:
+        return lookup
+    return await _lookup_identity(key)
 
 
 class _DispositionDecision(NamedTuple):
@@ -1630,6 +1667,20 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
     except DispositionError as e:
         return _DispositionDecision(_disposition_invalid_error(reason=str(e)), None)
 
+    if disposition.wake is not None:
+        wake_lookup = await _lookup_wake(disposition.wake)
+        if wake_lookup.is_unavailable:
+            return _DispositionDecision(
+                _disposition_validation_unavailable_error(
+                    subject=disposition.wake, reason=wake_lookup.reason_or_raise()
+                ),
+                None,
+            )
+        if not wake_lookup.found:
+            return _DispositionDecision(
+                _disposition_wake_unknown_error(wake=disposition.wake), None
+            )
+
     if not disposition.names_human(HUMAN_IDENTITY_NAMES):
         return _DispositionDecision(None, disposition.wire)
 
@@ -1637,7 +1688,7 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
     if lookup.is_unavailable:
         return _DispositionDecision(
             _disposition_validation_unavailable_error(
-                author=author, reason=lookup.reason_or_raise()
+                subject=author, reason=lookup.reason_or_raise()
             ),
             None,
         )
@@ -1847,8 +1898,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         handled exactly as before. A value that does not fit is refused with
         ``DispositionInvalidError``. Naming ``human`` as arm or wake is
         refused with ``DispositionHumanNotAllowedError`` unless the author's
-        registered roles include ``human``; if the registry cannot answer,
-        ``DispositionValidationUnavailableError``. Forwarded to Conclair as
+        registered roles include ``human``. A ``wake`` that is not a
+        registered identity (checked as given and by its ADR-11 key) is
+        refused with ``DispositionWakeUnknownError``. If the registry cannot
+        answer either check, ``DispositionValidationUnavailableError``. Forwarded to Conclair as
         ``disposition`` (a Conclair that predates the field ignores it).
 
         Returns:

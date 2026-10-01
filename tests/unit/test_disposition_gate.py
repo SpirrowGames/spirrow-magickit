@@ -9,7 +9,9 @@ endorsed by Einstein msg-1007. Covered here:
   is accepted and forwarded; anything else is refused before the write;
 - an agent naming ``human`` as trigger arm or wake is refused;
 - an author whose registered roles include ``human`` is exempt;
-- the exemption is decided by role and NOT by ``independence_class``.
+- the exemption is decided by role and NOT by ``independence_class``;
+- ``wake`` must be a registered identity, checked as given and by its ADR-11
+  key (DESIGN v11 §1); ``none`` is refused only because it is not registered.
 """
 
 from __future__ import annotations
@@ -56,6 +58,23 @@ def _capture_tools(settings: Settings) -> dict[str, Any]:
     return registered
 
 
+_REGISTRY = {
+    "Heisenberg": _identity("Heisenberg", roles=["implementer"]),
+    "human": _identity("human", roles=["human"]),
+    "Takahito": _identity("Takahito", roles=["human"]),
+    "pr-gate-relay": _identity("pr-gate-relay", roles=["integrator"]),
+}
+
+
+def _registry(extra: dict[str, dict] | None = None):
+    table = {**_REGISTRY, **(extra or {})}
+
+    async def _fn(*, identity_name: str, **_: Any) -> dict:
+        return table.get(identity_name, _UNREGISTERED)
+
+    return _fn
+
+
 @pytest.fixture
 def wired():
     settings = Settings(
@@ -68,7 +87,7 @@ def wired():
     chat.post_message = AsyncMock(return_value={"msg": {}, "thread_status_changed_to": None})
     chat.close = AsyncMock()
     prismind = MagicMock()
-    prismind.get_identity = AsyncMock(return_value=_UNREGISTERED)
+    prismind.get_identity = AsyncMock(side_effect=_registry())
     tools = _capture_tools(settings)
     with (
         patch.object(chatroom_tools, "_adapter", return_value=chat),
@@ -116,12 +135,14 @@ async def test_done_is_forwarded(wired) -> None:
 
 @pytest.mark.parametrize("arm", ["thread", "pr", "deploy", "queue-empty"])
 @pytest.mark.asyncio
-async def test_agent_arms_are_forwarded_without_lookup(wired, arm: str) -> None:
+async def test_agent_arms_are_forwarded_after_wake_lookup_only(wired, arm: str) -> None:
     tools, chat, prismind = wired
     result = await _post(tools, disposition=_blocked(arm=arm))
     assert "error_type" not in result
     assert chat.post_message.call_args.kwargs["disposition"] == _blocked(arm=arm)
-    prismind.get_identity.assert_not_awaited()
+    # Only the wake is looked up; the author is not, since no human is named.
+    looked_up = [c.kwargs["identity_name"] for c in prismind.get_identity.await_args_list]
+    assert looked_up == ["Heisenberg"]
 
 
 # ---- schema refusals ---------------------------------------------------
@@ -164,8 +185,7 @@ async def test_invalid_disposition_is_refused_before_write(wired, bad: Any) -> N
 )
 @pytest.mark.asyncio
 async def test_agent_naming_human_is_refused(wired, disposition: dict) -> None:
-    tools, chat, prismind = wired
-    prismind.get_identity = AsyncMock(return_value=_identity("Heisenberg", roles=["implementer"]))
+    tools, chat, _ = wired
     result = await _post(tools, disposition=disposition)
     assert result["error_type"] == "DispositionHumanNotAllowedError"
     chat.post_message.assert_not_awaited()
@@ -184,8 +204,7 @@ async def test_unregistered_author_naming_human_is_refused(wired) -> None:
 )
 @pytest.mark.asyncio
 async def test_role_human_author_is_exempt(wired, disposition: dict) -> None:
-    tools, chat, prismind = wired
-    prismind.get_identity = AsyncMock(return_value=_identity("Takahito", roles=["human"]))
+    tools, chat, _ = wired
     result = await _post(tools, author="Takahito", disposition=disposition)
     assert "error_type" not in result
     assert chat.post_message.call_args.kwargs["disposition"] == disposition
@@ -199,31 +218,60 @@ async def test_exemption_ignores_independence_class(wired, independence_class: s
     tools, _, prismind = wired
     disposition = _blocked(arm="human", ref="decision")
 
-    prismind.get_identity = AsyncMock(
-        return_value=_identity("A", roles=["implementer"], independence_class=independence_class)
-    )
+    prismind.get_identity = AsyncMock(side_effect=_registry({
+        "A": _identity("A", roles=["implementer"], independence_class=independence_class),
+        "H": _identity("H", roles=["human"], independence_class=independence_class),
+    }))
     refused = await _post(tools, author="A", disposition=disposition)
     assert refused["error_type"] == "DispositionHumanNotAllowedError"
 
-    prismind.get_identity = AsyncMock(
-        return_value=_identity("H", roles=["human"], independence_class=independence_class)
-    )
     accepted = await _post(tools, author="H", disposition=disposition)
     assert "error_type" not in accepted
 
 
 @pytest.mark.asyncio
-async def test_registry_outage_fails_closed_only_when_human_is_named(wired) -> None:
+async def test_registry_outage_fails_closed_for_blocked_on_only(wired) -> None:
     tools, chat, prismind = wired
     prismind.get_identity = AsyncMock(side_effect=RuntimeError("prismind down"))
 
-    refused = await _post(tools, disposition=_blocked(arm="human", ref="x"))
-    assert refused["error_type"] == "DispositionValidationUnavailableError"
-    assert refused["details"]["reason"] == "prismind down"
+    for disposition in (_blocked(arm="human", ref="x"), _blocked()):
+        refused = await _post(tools, disposition=disposition)
+        assert refused["error_type"] == "DispositionValidationUnavailableError"
+        assert refused["details"]["reason"] == "prismind down"
+    chat.post_message.assert_not_awaited()
 
-    accepted = await _post(tools, disposition=_blocked())
-    assert "error_type" not in accepted
-    chat.post_message.assert_awaited_once()
+    # {kind: done} and no disposition never consult the registry.
+    assert "error_type" not in await _post(tools, disposition={"kind": "done"})
+    assert "error_type" not in await _post(tools)
+
+
+# ---- wake existence (DESIGN v11 §1) ---------------------------------------
+
+
+@pytest.mark.parametrize("wake", ["Nobody", "none", "Einstien"])
+@pytest.mark.asyncio
+async def test_unregistered_wake_is_refused(wired, wake: str) -> None:
+    tools, chat, _ = wired
+    result = await _post(tools, disposition=_blocked(wake=wake))
+    assert result["error_type"] == "DispositionWakeUnknownError"
+    assert result["details"]["wake"] == wake
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wake_is_matched_by_its_adr11_key(wired) -> None:
+    tools, chat, prismind = wired
+    result = await _post(tools, disposition=_blocked(wake="PR_Gate_Relay"))
+    assert "error_type" not in result
+    looked_up = [c.kwargs["identity_name"] for c in prismind.get_identity.await_args_list]
+    assert looked_up == ["PR_Gate_Relay", "pr-gate-relay"]
+
+
+@pytest.mark.asyncio
+async def test_registered_wake_spelling_is_looked_up_once(wired) -> None:
+    tools, _, prismind = wired
+    await _post(tools, disposition=_blocked(wake="Heisenberg"))
+    assert prismind.get_identity.await_count == 1
 
 
 @pytest.mark.asyncio
