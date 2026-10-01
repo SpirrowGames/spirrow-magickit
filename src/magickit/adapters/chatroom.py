@@ -132,6 +132,7 @@ class ChatroomAdapter(BaseAdapter):
         owner_override_reason: str | None = None,
         close_sanction: dict[str, str] | None = None,
         next_participant: str | None = None,
+        disposition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "type": type,
@@ -170,6 +171,11 @@ class ChatroomAdapter(BaseAdapter):
         # comment on ``open_thread``.
         if next_participant is not None:
             body["next_participant"] = next_participant
+        # T-magickit-stop-disposition-intake. Validated by the MCP tool before
+        # it gets here; additive like ``close_sanction`` (a Conclair that
+        # predates the field ignores it).
+        if disposition is not None:
+            body["disposition"] = disposition
         return await self._request_json(
             "POST",
             f"/v1/projects/{project}/threads/{thread_id}/messages",
