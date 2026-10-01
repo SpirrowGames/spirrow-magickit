@@ -272,6 +272,27 @@ success flash の下に出す (`alert-error` を使うのは `conclair.js` が `
 0x80–0xBF である必要がある。実欧文は「é」の次が ASCII 英字なので必ず失敗する。
 実測: archive 3,243 件の正常メッセージと仏独西北欧葡・通貨記号・ソースコード検体で hit 0。
 
+### probe の仕様と否定報告 (R-spec / R-report)
+
+probe（本番の挙動を合成入力で確かめる 1 回の書き込み + 測定）には、書く側と報告する側に
+1 本ずつ規則がある。どちらも **false negative を作り、受け手を誤った修理へ導く**失敗を防ぐ。
+
+- **R-spec（仕様を書く側）**: pass 条件を書いたら、**その条件に到達できる actor の集合**を
+  **probe で許可した actor の集合**と照合する。一致しないと probe は「壊れている」と
+  「測っていない」を区別できない。
+  実例: pass 条件を出せる identity が 1 つしか無いのに、それより広い identity 集合で撃ってよいと
+  書いたため、配線は正常でも fail が出る仕様になっていたケース。
+- **R-report（結果を報告する側）**: 否定的な観測（到達できない / capability が無い / 機能しない）は、
+  **撃った invocation と返ってきた error を逐語で添えて**初めて報告になる。
+  逐語が無いと「対象が無い」と「呼び方を間違えた」を区別できず、受け手は前者と読む。
+  実例: HTTP 到達不能の報告が、実際には proxy 設定と失効確認 flag の不足であったケース。
+
+適用範囲: R-spec は probe の仕様に、R-report は capability の自己申告と probe の否定的結果に掛かる。
+「実装していない」「読んでいない」のような作為の不在には掛からない（添える invocation が無い）。
+R-report が求めるのは「疑え」ではなく「貼れ」である。否定報告を受け手が毎回検証する運用にはしない。
+
+経緯: chatroom `spirrow-magickit` / `T-integrity-flags-sanctioned-force-close`。
+
 ## ループ自律制御 (HOLD / RESUME)
 
 プロジェクト単位の 3 値 — `run` (完全自律) / `supervised` (設計ループのみ。human decide と
