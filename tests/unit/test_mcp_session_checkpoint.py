@@ -40,9 +40,11 @@ D1 IMPLEMENTATION NOTES (verified against source, 2026-09-07)
   downstream store that answered ``saved_to: []``, a response that did
   not include ``saved_to``, and an exception during ``save_session`` all
   yield ``success: False`` and a message that spells the reason.
-* ``adapters/prismind.py`` — ``save_session`` forwards ``next_action``
-  when it is ``None`` (JSON null = clear) and ``blockers`` whenever it is
-  a list, ``[]`` included (D2a).  The other scalars keep the gate.
+* ``adapters/prismind.py`` — ``save_session`` sends ``next_action=""``
+  only on the keyword-only ``clear_next_action=True`` (msg-1105 §2; a JSON
+  null would be dropped by Prismind, msg-1103 §2), and ``blockers``
+  whenever it is a list, ``[]`` included (D2a).  The other scalars keep
+  the gate.
 """
 
 from __future__ import annotations
@@ -170,8 +172,16 @@ class TestCheckpointRequiredFieldsAreForwardedOrCleared:
         """``null`` is the only way to clear ``next_action`` (msg-1065 §1)."""
         kwargs = await _checkpoint_kwargs(tools, next_action=None)
 
-        assert "next_action" in kwargs
-        assert kwargs["next_action"] is None
+        # msg-1105 §2: the clear travels as the keyword-only flag, never as
+        # a None value the adapter could mistake for "omitted".
+        assert kwargs["clear_next_action"] is True
+        assert kwargs["next_action"] == ""
+
+    @pytest.mark.asyncio
+    async def test_a_next_action_value_does_not_set_the_clear_flag(self, tools):
+        kwargs = await _checkpoint_kwargs(tools, next_action="do x")
+
+        assert "clear_next_action" not in kwargs
 
     @pytest.mark.asyncio
     async def test_a_next_action_value_is_forwarded(self, tools):
@@ -289,9 +299,15 @@ class TestRequiredFieldsAtTheMcpBoundary:
             },
         )
 
+        # t4 (msg-1105 §2): caller null -> adapter clear flag, and the
+        # receipt reports the clear.
         assert result.is_error is False
-        assert save_session.await_args.kwargs["next_action"] is None
-        assert save_session.await_args.kwargs["blockers"] == []
+        kwargs = save_session.await_args.kwargs
+        assert kwargs["clear_next_action"] is True
+        assert kwargs["next_action"] == ""
+        assert kwargs["blockers"] == []
+        assert "next_action" in result.data["fields_cleared"]
+        assert "blockers" in result.data["fields_cleared"]
 
     @pytest.mark.asyncio
     async def test_a_broken_value_is_an_error_result(self, settings):
@@ -340,11 +356,44 @@ class TestAdapterForwardsTheD2aFields:
         assert "blockers" not in arguments
 
     @pytest.mark.asyncio
-    async def test_next_action_none_is_forwarded_as_null(self):
-        arguments = await self._save_session_arguments(summary="s", next_action=None)
+    async def test_t1_no_arguments_sends_no_next_action_key(self):
+        """t1 (msg-1105 §2): omission never clears."""
+        arguments = await self._save_session_arguments()
 
-        assert "next_action" in arguments
-        assert arguments["next_action"] is None
+        assert "next_action" not in arguments
+
+    @pytest.mark.asyncio
+    async def test_t2_clear_flag_sends_empty_string(self):
+        """t2: the clear is sent as "" -- Prismind 3fbde90 drops a null.
+
+        server.py:1865 reads ``args.get("next_action")``, which cannot tell
+        null from a missing key, so only "" reaches the store as a clear
+        (msg-1103 §2).
+        """
+        arguments = await self._save_session_arguments(clear_next_action=True)
+
+        assert arguments["next_action"] == ""
+
+    @pytest.mark.asyncio
+    async def test_t3_clear_flag_with_a_value_is_rejected(self):
+        """t3: contradictory input is loud and nothing is sent."""
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock(return_value=(True, {"success": True}))
+
+        with pytest.raises(ValueError):
+            await adapter.save_session(next_action="x", clear_next_action=True)
+
+        adapter._call_tool_safe.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_clear_flag_is_keyword_only(self):
+        adapter = PrismindAdapter(sse_url="http://localhost:8112")
+        adapter._call_tool_safe = AsyncMock(return_value=(True, {"success": True}))
+
+        with pytest.raises(TypeError):
+            await adapter.save_session(
+                "s", "", None, "", "", "", "", "", "", None, True
+            )
 
     @pytest.mark.asyncio
     async def test_empty_scalars_are_still_dropped(self):

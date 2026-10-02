@@ -470,9 +470,17 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         save_error: str | None = None
         save_args: dict[str, Any] = {
             "summary": processed_summary,
-            "next_action": next_action,
             "blockers": blockers,
         }
+        # msg-1105 §2: a caller ``null`` reaches the adapter as the explicit
+        # keyword-only clear flag, never as a ``None`` value, so an omitted
+        # argument and a clear cannot be confused below this line.  The
+        # adapter sends the clear to Prismind as ``""`` (msg-1103 §3).
+        if next_action is None:
+            save_args["next_action"] = ""
+            save_args["clear_next_action"] = True
+        else:
+            save_args["next_action"] = next_action
         if current_phase:
             save_args["current_phase"] = current_phase
         if current_task:
@@ -488,7 +496,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         fields_cleared = [
             f
             for f in _CHECKPOINT_OPTIONAL_FIELDS
-            if f in save_args and save_args[f] in (None, [])
+            if (f == "next_action" and save_args.get("clear_next_action"))
+            or (f == "blockers" and save_args.get("blockers") == [])
         ]
         fields_written = [
             f

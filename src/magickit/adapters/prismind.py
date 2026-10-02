@@ -765,7 +765,7 @@ class PrismindAdapter(MCPBaseAdapter):
     async def save_session(
         self,
         summary: str = "",
-        next_action: str | None = "",
+        next_action: str = "",
         blockers: list[str] | None = None,
         notes: str = "",
         current_phase: str = "",
@@ -774,6 +774,8 @@ class PrismindAdapter(MCPBaseAdapter):
         user: str = "",
         author: str = "",
         embodiment: str | None = None,
+        *,
+        clear_next_action: bool = False,
     ) -> dict[str, Any]:
         """Save session state without ending.
 
@@ -781,10 +783,7 @@ class PrismindAdapter(MCPBaseAdapter):
             summary: Work summary
             next_action: What to do next.  ``""`` (the default) means "not
                 provided": the key is not sent and the store keeps its
-                value.  ``None`` is an explicit clear request and is sent
-                as JSON ``null`` (chatroom T-checkpoint-silent-partial-write
-                msg-1065 §1, D2a-2).  Whether the store honours it is the
-                pre-land probe's question, not this adapter's.
+                value.  Omitting it never clears anything.
             blockers: List of blockers.  ``None`` (the default) means "not
                 provided".  Any list -- ``[]`` included -- is sent, so
                 ``[]`` reaches the store as "no blockers" instead of being
@@ -796,14 +795,40 @@ class PrismindAdapter(MCPBaseAdapter):
             user: User identifier for multi-user support
             author: Context author/role partition (empty for default context)
             embodiment: ADR-2026-05-29-12 self-declared runtime form.
+            clear_next_action: Keyword-only explicit clear request for
+                ``next_action`` (chatroom T-checkpoint-silent-partial-write
+                msg-1105 §2).  When ``True`` the adapter sends
+                ``next_action=""``; ``next_action`` itself must then be
+                ``""``, otherwise the input is contradictory and
+                ``ValueError`` is raised.  A separate flag rather than a
+                ``None`` value, so an omitted argument and a clear can
+                never be confused.
 
         Returns:
             Dict with success status
+
+        Raises:
+            ValueError: ``clear_next_action=True`` with a non-empty
+                ``next_action``.
         """
+        if clear_next_action and next_action != "":
+            raise ValueError(
+                "save_session: clear_next_action=True contradicts a non-empty "
+                f"next_action ({next_action!r})"
+            )
         arguments: dict[str, Any] = {}
         if summary:
             arguments["summary"] = summary
-        if next_action is None or next_action:
+        if clear_next_action:
+            # The clear is sent as "" and not as JSON null.  Prismind 3fbde90
+            # server.py:1865 dispatches with ``args.get("next_action")``, so a
+            # null and a missing key both arrive as ``None``, and
+            # session_tools.py:346 (``next_action if next_action is not None
+            # else existing``) keeps the old value: a null clear is a silent
+            # no-op.  ``""`` passes ``is not None`` and is stored, and it is
+            # Prismind's own "no value" form (msg-1103 §2/§3).
+            arguments["next_action"] = ""
+        elif next_action:
             arguments["next_action"] = next_action
         if blockers is not None:
             arguments["blockers"] = blockers
