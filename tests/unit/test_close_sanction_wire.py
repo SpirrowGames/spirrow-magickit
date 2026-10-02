@@ -35,6 +35,13 @@ justified the close -- so a human_override with nothing in it is reachable from
 a path the suite already pins (``test_owner_side_c_...``). It must claim
 nothing rather than assert an empty reason.
 
+W-6 (T-close-sanction-unspecified-kind-cannot-be-decomposed, msg-1122) gave
+that path a claim of its own: ``kind="naysayer_approved"`` carrying only
+``review_msg_id``, the fresh APPROVE the gate confirmed. That row is NOT in the
+measured table above: it is the shape conclair's W-6 PR-1 (D-1..D-3) is
+specified to accept, and this side must not ship before that one is deployed
+(D-6) -- an older Conclair refuses the unknown kind with 422.
+
 Short evidence is never sent as a partial claim. It degrades to "no claim",
 which Conclair records as ``kind="unspecified"`` and counts as
 ``unclassified_override`` -- visible, and not a refused close.
@@ -255,27 +262,27 @@ async def test_a_human_force_close_forwards_its_reason_as_the_sanction(
     assert set(kwargs["close_sanction"]) == {"kind", "reason"}
 
 
+_APPROVED_THREAD = [
+    {"msg_id": "msg-001", "author": "Bohr", "type": "propose",
+     "content": "", "tags": [], "role": "proposer"},
+    {"msg_id": "msg-002", "author": "Einstein", "type": "report",
+     "content": "", "tags": ["verdict:approve"], "role": "naysayer"},
+]
+
+
 @pytest.mark.asyncio
-async def test_w4d_a_gated_force_close_without_a_reason_claims_nothing(
+async def test_w6_d7_1_gated_force_close_without_a_reason_is_naysayer_approved(
     settings: Settings,
 ) -> None:
-    """A fresh APPROVE lets a human force-close with no reason of their own.
+    """W-6 D-7 (1): the msg-516 probe shape now records *why* it closed.
 
-    That path reaches the wire with an empty string. ``human_override`` requires
-    a non-empty ``reason`` (and Conclair strips before validating), so claiming
-    one here would 422 a close that succeeds today. It degrades to no claim.
+    gated + fresh APPROVE + human + empty reason used to send no sanction and
+    land in ``unclassified_override`` beside defective bare-boolean callers.
+    The gate already held the APPROVE's msg_id; it is now the sanction, in the
+    shape Conclair's D-2a accepts: ``review_msg_id`` and nothing else.
     """
     tools = _capture_tools(settings)
-    adapter = _adapter(
-        owner="Bohr",
-        tags=[GATE_TAG],
-        messages=[
-            {"msg_id": "msg-001", "author": "Bohr", "type": "propose",
-             "content": "", "tags": []},
-            {"msg_id": "msg-002", "author": "Einstein", "type": "report",
-             "content": "", "tags": ["verdict:approve"]},
-        ],
-    )
+    adapter = _adapter(owner="Bohr", tags=[GATE_TAG], messages=_APPROVED_THREAD)
     with patch.object(chatroom_tools, "_adapter", return_value=adapter), \
          patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()):
         result = await tools["chatroom_close_thread"](
@@ -287,8 +294,106 @@ async def test_w4d_a_gated_force_close_without_a_reason_claims_nothing(
 
     assert "error_type" not in result
     kwargs = adapter.close_thread.await_args.kwargs
-    assert kwargs["owner_override"] is True  # the close still happens
-    assert kwargs["close_sanction"] is None  # but nothing is asserted about why
+    assert kwargs["owner_override"] is True
+    assert kwargs["close_sanction"] == {
+        "kind": "naysayer_approved",
+        "review_msg_id": "msg-002",
+    }
+    assert kwargs["owner_override_reason"] is None
+    assert "[naysayer-gate-override]" not in kwargs["summary_content"]
+
+
+@pytest.mark.asyncio
+async def test_w6_d7_2_gated_force_close_with_a_reason_is_still_naysayer_approved(
+    settings: Settings,
+) -> None:
+    """W-6 D-7 (2) / D-4b: writing prose does not downgrade the classification.
+
+    The sanction is the strongest evidence confirmed. The prose rides the
+    sibling ``owner_override_reason`` field -- never inside the sanction, which
+    the wire refuses for this kind -- and no gate-override note is written,
+    because the gate was satisfied, not bypassed.
+    """
+    tools = _capture_tools(settings)
+    adapter = _adapter(owner="Bohr", tags=[GATE_TAG], messages=_APPROVED_THREAD)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter), \
+         patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()):
+        result = await tools["chatroom_close_thread"](
+            project="p",
+            thread_id="T-pr-review-143",
+            summary_content="force",
+            author="human",
+            naysayer_override_reason="closing on the naysayer's approval",
+        )
+
+    assert "error_type" not in result
+    kwargs = adapter.close_thread.await_args.kwargs
+    assert kwargs["close_sanction"] == {
+        "kind": "naysayer_approved",
+        "review_msg_id": "msg-002",
+    }
+    assert kwargs["owner_override_reason"] == "closing on the naysayer's approval"
+    assert "[naysayer-gate-override]" not in kwargs["summary_content"]
+
+
+@pytest.mark.asyncio
+async def test_w6_gated_force_close_without_fresh_approve_stays_human_override(
+    settings: Settings,
+) -> None:
+    """D-4b, last clause: no confirmed APPROVE + a reason -> human_override."""
+    tools = _capture_tools(settings)
+    adapter = _adapter(
+        owner="Bohr",
+        tags=[GATE_TAG],
+        messages=[
+            _APPROVED_THREAD[0],
+            {"msg_id": "msg-002", "author": "Einstein", "type": "report",
+             "content": "", "tags": ["verdict:request_changes"], "role": "naysayer"},
+        ],
+    )
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter), \
+         patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()):
+        await tools["chatroom_close_thread"](
+            project="p",
+            thread_id="T-pr-review-143",
+            summary_content="force",
+            author="human",
+            naysayer_override_reason="ship and follow up",
+        )
+
+    kwargs = adapter.close_thread.await_args.kwargs
+    assert kwargs["close_sanction"] == {"kind": "human_override", "reason": "ship and follow up"}
+    assert "[naysayer-gate-override]" in kwargs["summary_content"]
+
+
+@pytest.mark.asyncio
+async def test_w6_d5_tag_without_an_enabled_gate_does_not_exempt_the_reason() -> None:
+    """W-6 D-5 (W-6a): the tag alone no longer justifies an empty reason.
+
+    With the gate disabled nothing confirmed an APPROVE, even though one sits
+    in the thread, so the empty-reason force-close blocks exactly like a
+    non-gated one instead of passing unjustified.
+    """
+    off = Settings(
+        conclair_url="http://localhost:8115",
+        conclair_timeout=5.0,
+        naysayer_gate_enabled=False,
+        naysayer_gate_tag=GATE_TAG,
+        naysayer_identities=["Einstein"],
+    )
+    tools = _capture_tools(off)
+    adapter = _adapter(owner="Bohr", tags=[GATE_TAG], messages=_APPROVED_THREAD)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter), \
+         patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()):
+        result = await tools["chatroom_close_thread"](
+            project="p",
+            thread_id="T-pr-review-143",
+            summary_content="force",
+            author="human",
+        )
+
+    assert result["error_type"] == "OwnerOverrideReasonRequiredError"
+    adapter.close_thread.assert_not_awaited()
 
 
 @pytest.mark.asyncio
