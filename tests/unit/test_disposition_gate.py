@@ -191,6 +191,45 @@ async def test_agent_naming_human_is_refused(wired, disposition: dict) -> None:
     chat.post_message.assert_not_awaited()
 
 
+@pytest.mark.parametrize("wake", ["Takahito", "Operator Two"])
+@pytest.mark.asyncio
+async def test_agent_waking_any_role_human_identity_is_refused(wired, wake: str) -> None:
+    """PR-gate on #98 @62bb567: whether the wake is human comes from the wake's
+    registry roles, not from a static name list. A human identity not spelled
+    ``human`` must be refused just the same (also via its ADR-11 key)."""
+    tools, chat, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=_registry({
+        "operator-two": _identity("operator-two", roles=["human"]),
+    }))
+    result = await _post(tools, disposition=_blocked(wake=wake))
+    assert result["error_type"] == "DispositionHumanNotAllowedError"
+    chat.post_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_role_human_author_may_wake_any_human_identity(wired) -> None:
+    tools, chat, _ = wired
+    disposition = _blocked(wake="Takahito")
+    result = await _post(tools, author="human", disposition=disposition)
+    assert "error_type" not in result
+    assert chat.post_message.call_args.kwargs["disposition"] == disposition
+
+
+@pytest.mark.parametrize("independence_class", ["human", "independent", "cooperative", "machine"])
+@pytest.mark.asyncio
+async def test_human_wake_is_decided_by_role_not_independence_class(
+    wired, independence_class: str
+) -> None:
+    tools, _, prismind = wired
+    prismind.get_identity = AsyncMock(side_effect=_registry({
+        "W-agent": _identity("W-agent", roles=["reviewer"], independence_class=independence_class),
+        "W-human": _identity("W-human", roles=["human"], independence_class=independence_class),
+    }))
+    assert "error_type" not in await _post(tools, disposition=_blocked(wake="W-agent"))
+    refused = await _post(tools, disposition=_blocked(wake="W-human"))
+    assert refused["error_type"] == "DispositionHumanNotAllowedError"
+
+
 @pytest.mark.asyncio
 async def test_unregistered_author_naming_human_is_refused(wired) -> None:
     tools, chat, _ = wired

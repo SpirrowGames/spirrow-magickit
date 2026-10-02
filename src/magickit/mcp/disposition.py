@@ -5,10 +5,11 @@ T-magickit-stop-disposition-intake (Bohr DESIGN v6 §2 範囲 1, v8 §2):
     {kind: done} | {kind: blocked_on, trigger: {arm, ref}, wake: <identity>}
 
 A post without ``disposition`` is accepted exactly as before (backward
-compatibility). This module is the pure schema half: it parses the value and
-says whether it names ``human`` as trigger arm or wake. Who may do that
-(``role = human`` only) is decided by the gate in
-``magickit.mcp.tools.chatroom``, which owns the identity lookup.
+compatibility). This module is the pure schema half: it only parses the value.
+Whether it names ``human`` (as trigger arm, or as a wake whose registered
+roles include ``human``) and who may do that (``role = human`` only) are
+decided by the gate in ``magickit.mcp.tools.chatroom``, which owns the
+identity lookup -- the registry is the one source for "who is human".
 
 Trigger arms. An agent may write ``thread`` / ``pr`` / ``deploy`` /
 ``queue-empty`` (DESIGN v6 §2 前提); ``human`` is in the schema because a
@@ -20,8 +21,6 @@ STOP line is a mindwire client error, not a thread lifecycle state).
 from __future__ import annotations
 
 from typing import Any, NamedTuple
-
-from magickit.core.identity_normalize import normalize_identity_key
 
 KIND_DONE = "done"
 KIND_BLOCKED_ON = "blocked_on"
@@ -52,19 +51,6 @@ class Disposition(NamedTuple):
             "trigger": {"arm": self.arm, "ref": self.ref},
             "wake": self.wake,
         }
-
-    def names_human(self, human_identity_names: tuple[str, ...]) -> bool:
-        """True iff the trigger arm is ``human`` or ``wake`` is a human identity.
-
-        ``wake`` is compared after ADR-11 normalisation, so ``Human`` /
-        `` human `` cannot be used to step around the check.
-        """
-        if self.kind != KIND_BLOCKED_ON:
-            return False
-        if self.arm == HUMAN_ARM:
-            return True
-        humans = {normalize_identity_key(h) for h in human_identity_names}
-        return normalize_identity_key(self.wake or "") in humans
 
 
 def _require_str(value: Any, field: str) -> str:

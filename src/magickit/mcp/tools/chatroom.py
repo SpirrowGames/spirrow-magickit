@@ -19,7 +19,7 @@ from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.core.identity_normalize import normalize_identity_key
-from magickit.mcp.disposition import DispositionError, parse_disposition
+from magickit.mcp.disposition import HUMAN_ARM, DispositionError, parse_disposition
 from magickit.mcp.pr_gate_ledger import (
     LedgerVerdict,
     fetch_ledger_verdict,
@@ -1667,6 +1667,12 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
     except DispositionError as e:
         return _DispositionDecision(_disposition_invalid_error(reason=str(e)), None)
 
+    # Whether the wake is a human is read from the wake's own registry record
+    # (``"human" in allowed_roles``), the same source the author exemption
+    # uses. A static name list would be a second spelling of "who is human"
+    # and would let an agent wake any human it does not list (PR-gate on #98
+    # @62bb567: ``wake="Takahito"`` passed).
+    wake_is_human = False
     if disposition.wake is not None:
         wake_lookup = await _lookup_wake(disposition.wake)
         if wake_lookup.is_unavailable:
@@ -1680,8 +1686,9 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
             return _DispositionDecision(
                 _disposition_wake_unknown_error(wake=disposition.wake), None
             )
+        wake_is_human = _HUMAN_ROLE in wake_lookup.allowed_roles
 
-    if not disposition.names_human(HUMAN_IDENTITY_NAMES):
+    if disposition.arm != HUMAN_ARM and not wake_is_human:
         return _DispositionDecision(None, disposition.wire)
 
     lookup = await _lookup_identity(author)
