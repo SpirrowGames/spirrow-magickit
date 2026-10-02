@@ -18,6 +18,8 @@ from fastmcp import FastMCP
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
+from magickit.core.identity_normalize import normalize_identity_key
+from magickit.mcp.disposition import HUMAN_ARM, DispositionError, parse_disposition
 from magickit.mcp.pr_gate_ledger import (
     LedgerVerdict,
     fetch_ledger_verdict,
@@ -1553,6 +1555,155 @@ async def _check_next_participant(name: str) -> dict[str, Any] | None:
     return None
 
 
+# --- disposition gate (T-magickit-stop-disposition-intake) ------------
+#
+# Bohr DESIGN v8 §2 (input table), endorsed by Einstein msg-1007. Of that
+# table this gate enforces the two rows that are decided by the
+# ``disposition`` value alone:
+#
+#   agent       + ``human`` trigger arm / wake -> refused (the spec's 422)
+#   role=human  + ``human`` trigger arm / wake -> accepted
+#
+# The exemption is keyed on ``role = human`` as recorded in the identity
+# registry (``"human" in allowed_roles``), never on ``independence_class``
+# (DESIGN v7 §2: ADR-2026-05-31-15 made that axis a gradation). The record is
+# fetched with ``_lookup_identity``, reused for the same reason the
+# next_participant gate reuses it.
+#
+# DESIGN v11 §1 adds the wake existence check: ``wake`` is an identity, so it
+# is checked against the registry the way ``next_participant`` is, and an
+# unregistered wake is refused. That is also how ``wake = none`` is refused --
+# by not being a registered identity, not by this layer knowing the word.
+# ADR-11 normalisation is applied first: the stripped wake is looked up, and if
+# the registry does not know that spelling, its ADR-11 key is tried as well.
+#
+# When the registry is consulted and cannot answer, the post is refused
+# (fail-closed, like next_participant): a Prismind outage must not open the
+# bypass this gate exists to close. The remedy is to retry; omitting
+# ``disposition`` also lands the post, recorded as before this feature. A post
+# without ``disposition``, or with ``{kind: done}``, never consults Prismind.
+#
+# Which ``NEXT:`` line a disposition belongs to, and the ``unclassified`` /
+# ``human_close`` classification of a stop without one, are NOT decided here
+# (DESIGN v11 §1, option (b)): that vocabulary is the consumer's (msg-072 §1).
+
+_DISPOSITION_CONTRACT = "T-magickit-stop-disposition-intake (DESIGN v8 §2 / v11 §1)"
+_HUMAN_ROLE = "human"
+
+
+def _disposition_invalid_error(*, reason: str) -> dict[str, Any]:
+    return {
+        "error_type": "DispositionInvalidError",
+        "error": f"disposition does not fit the schema: {reason}.",
+        "details": {"contract": _DISPOSITION_CONTRACT, "reason": reason},
+    }
+
+
+def _disposition_human_not_allowed_error(*, author: str) -> dict[str, Any]:
+    return {
+        "error_type": "DispositionHumanNotAllowedError",
+        "error": (
+            f"{author!r} may not name 'human' as a disposition trigger arm or "
+            "wake: only an identity whose registered roles include 'human' "
+            "may. An agent hands a decision to the human through the "
+            "Decider, not through a parked disposition."
+        ),
+        "details": {"author": author, "contract": _DISPOSITION_CONTRACT},
+    }
+
+
+def _disposition_validation_unavailable_error(*, subject: str, reason: str) -> dict[str, Any]:
+    return {
+        "error_type": "DispositionValidationUnavailableError",
+        "error": (
+            f"cannot validate the disposition: the identity lookup for "
+            f"{subject!r} failed ({reason}). Nothing was written; retry."
+        ),
+        "details": {"subject": subject, "reason": reason, "contract": _DISPOSITION_CONTRACT},
+    }
+
+
+def _disposition_wake_unknown_error(*, wake: str) -> dict[str, Any]:
+    return {
+        "error_type": "DispositionWakeUnknownError",
+        "error": (
+            f"disposition wake {wake!r} is not a registered identity (checked "
+            "as given and by its ADR-11 key). Name a registered identity."
+        ),
+        "details": {"wake": wake, "contract": _DISPOSITION_CONTRACT},
+    }
+
+
+async def _lookup_wake(wake: str) -> _IdentityLookup:
+    """Registry lookup for ``wake``: as given, then by its ADR-11 key.
+
+    The second lookup only runs when the first one confirms "not registered"
+    and the key differs from the spelling given; an unusable first answer is
+    returned as is (fail-closed).
+    """
+    lookup = await _lookup_identity(wake)
+    if lookup.is_unavailable or lookup.found:
+        return lookup
+    key = normalize_identity_key(wake)
+    if not key or key == wake:
+        return lookup
+    return await _lookup_identity(key)
+
+
+class _DispositionDecision(NamedTuple):
+    error: dict[str, Any] | None
+    wire: dict[str, Any] | None
+
+
+async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
+    """Validate an optional ``disposition`` and apply the ``human`` rule.
+
+    ``raw is None`` -> nothing supplied; forward nothing (backward compatible).
+    """
+    if raw is None:
+        return _DispositionDecision(None, None)
+    try:
+        disposition = parse_disposition(raw)
+    except DispositionError as e:
+        return _DispositionDecision(_disposition_invalid_error(reason=str(e)), None)
+
+    # Whether the wake is a human is read from the wake's own registry record
+    # (``"human" in allowed_roles``), the same source the author exemption
+    # uses. A static name list would be a second spelling of "who is human"
+    # and would let an agent wake any human it does not list (PR-gate on #98
+    # @62bb567: ``wake="Takahito"`` passed).
+    wake_is_human = False
+    if disposition.wake is not None:
+        wake_lookup = await _lookup_wake(disposition.wake)
+        if wake_lookup.is_unavailable:
+            return _DispositionDecision(
+                _disposition_validation_unavailable_error(
+                    subject=disposition.wake, reason=wake_lookup.reason_or_raise()
+                ),
+                None,
+            )
+        if not wake_lookup.found:
+            return _DispositionDecision(
+                _disposition_wake_unknown_error(wake=disposition.wake), None
+            )
+        wake_is_human = _HUMAN_ROLE in wake_lookup.allowed_roles
+
+    if disposition.arm != HUMAN_ARM and not wake_is_human:
+        return _DispositionDecision(None, disposition.wire)
+
+    lookup = await _lookup_identity(author)
+    if lookup.is_unavailable:
+        return _DispositionDecision(
+            _disposition_validation_unavailable_error(
+                subject=author, reason=lookup.reason_or_raise()
+            ),
+            None,
+        )
+    if lookup.found and _HUMAN_ROLE in lookup.allowed_roles:
+        return _DispositionDecision(None, disposition.wire)
+    return _DispositionDecision(_disposition_human_not_allowed_error(author=author), None)
+
+
 def configure(settings: Settings) -> None:
     """Bind the settings every gate helper in this module reads.
 
@@ -1682,6 +1833,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         naysayer_override_reason: str = "",
         owner_override_reason: str = "",
         next_participant: str = "",
+        disposition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Post a message to an existing thread.
 
@@ -1746,11 +1898,25 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         body-line handoff parser. Only existence is checked -- roles are
         not required of the target.
 
+        disposition (T-magickit-stop-disposition-intake): optional, one of
+        ``{"kind": "done"}`` or ``{"kind": "blocked_on", "trigger": {"arm",
+        "ref"}, "wake": <identity>}``; ``arm`` is one of ``thread`` / ``pr``
+        / ``deploy`` / ``queue-empty`` / ``human``. Omitted -> the post is
+        handled exactly as before. A value that does not fit is refused with
+        ``DispositionInvalidError``. Naming ``human`` as arm or wake is
+        refused with ``DispositionHumanNotAllowedError`` unless the author's
+        registered roles include ``human``. A ``wake`` that is not a
+        registered identity (checked as given and by its ADR-11 key) is
+        refused with ``DispositionWakeUnknownError``. If the registry cannot
+        answer either check, ``DispositionValidationUnavailableError``. Forwarded to Conclair as
+        ``disposition`` (a Conclair that predates the field ignores it).
+
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
             On failure (embodiment missing, role not allowed, not allowed to
             close, naysayer gate, next_participant unknown / unavailable,
+            disposition invalid / human not allowed / unavailable,
             conclair error, ...): error_type envelope.
         """
         # Magickit-side enforcement (F-04: Magickit is the sole role/
@@ -1793,6 +1959,12 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         next_error = await _check_next_participant(next_participant)
         if next_error is not None:
             return next_error
+
+        # Disposition schema + the agent-``human`` refusal. Pre-write, after
+        # the cheaper gates; a post without a disposition skips it entirely.
+        disposition_decision = await _check_disposition(author=author, raw=disposition)
+        if disposition_decision.error is not None:
+            return disposition_decision.error
 
         adapter = _adapter()
         try:
@@ -1837,6 +2009,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 owner_override_reason=owner_override_reason_out,
                 close_sanction=close_sanction_out,
                 next_participant=next_participant or None,
+                disposition=disposition_decision.wire,
             )
         finally:
             await adapter.close()
