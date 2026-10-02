@@ -42,7 +42,7 @@
                      data-fingerprint="{{ card.fingerprint }}"
                      data-lane="{{ lane }}">
                 <div class="board-card-top">
-                    <span class="board-kind board-kind-{{ card.kind }}">{{ card.kind_label }}</span>
+                    <span class="board-kind board-kind-{{ card.kind }}{% if card.ask %} board-ask-{{ card.ask }}{% endif %}">{{ card.kind_label }}</span>
                     {% if card.since %}
                     <span class="board-age" title="{{ card.since | iso }}">{{ card.since | ago }}</span>
                     {% endif %}
@@ -133,7 +133,7 @@
             {% for card in done %}
             <article class="board-card board-card-done">
                 <div class="board-card-top">
-                    <span class="board-kind board-kind-{{ card.kind }}">{{ card.kind_label }}</span>
+                    <span class="board-kind board-kind-{{ card.kind }}{% if card.ask %} board-ask-{{ card.ask }}{% endif %}">{{ card.kind_label }}</span>
                     {% if card.last_seen_at %}
                     <span class="board-age" title="{{ card.last_seen_at | iso }}">{{ card.last_seen_at | ago }}</span>
                     {% endif %}
