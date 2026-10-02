@@ -56,7 +56,13 @@ def test_provenance_names_the_canonical_location() -> None:
     provenance = json.loads(_PROVENANCE.read_text(encoding="utf-8"))
     assert provenance["source_repo"] == "spirrow-mindwire"
     assert provenance["source_path"] == "tests/fixtures/adr11_normalize_vectors.json"
-    assert "source_commit" in provenance
+    # DESIGN v12 §3: the copy does not ship with a "fill it in later" promise.
+    # The commit is the spirrow-mindwire merge that landed the canonical bytes
+    # (SpirrowGames/spirrow-mindwire#412), and the pending marker is gone.
+    commit = provenance["source_commit"]
+    assert isinstance(commit, str) and len(commit) == 40, commit
+    int(commit, 16)
+    assert "status" not in provenance
 
 
 @pytest.mark.parametrize("raw,expected", _vectors()["normalize"])
