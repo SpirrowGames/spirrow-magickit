@@ -1215,10 +1215,11 @@ async def test_a_confirmed_negative_still_posts_and_only_it_does(wired) -> None:
     delegating to ``_check_role_allowed`` -- either by gaining its own path
     or by wrapping the helper -- OR (ii) the ``actor``/``role`` open hands to
     the helper stops being derived from the propose-message author. Today
-    (i) is why the pin is on post: open calls the helper with
-    ``author=owner`` and post calls it with ``author=author``; those name the
-    same identity because the propose-msg's author *is* the owner, so
-    pinning either arm covers the other. On the day (ii) breaks that
+    neither trigger holds, which is why the post pin suffices: open still
+    delegates to the helper (not-(i)), and although open passes
+    ``author=owner`` while post passes ``author=author``, those name the
+    same identity because the propose-msg's author *is* the owner
+    (not-(ii)), so pinning either arm covers the other. On the day (ii) breaks that
     identity -- e.g. open starts resolving the actor from somewhere other
     than the propose-msg author -- the post pin goes green on traffic the
     open path would let through, and the matching open pair is required.
