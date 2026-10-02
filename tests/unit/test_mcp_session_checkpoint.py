@@ -14,20 +14,18 @@ through three added keys — ``fields_written`` / ``fields_skipped`` /
 the downstream session store confirmed persistence (chatroom
 T-checkpoint-silent-partial-write msg-262 §5 / msg-264 §5).
 
-**The D2 characterization tests** are still red-in-spirit even where
-they pass.  They pin the *residual* truthiness gate — the one D1 does
-not touch and D2 will invert once the measurements M1/M2/M3 are
-recorded (msg-264 §1).  They exist so that "the tool layer still drops
-``blockers=[]``" and "the adapter still drops empty scalars a second
-time" show up as *pinned* facts a future change can see and reverse,
-rather than as unstated assumptions.  Do not fix them here; the danger
-is that a naive gate inversion turns today's silent no-op into a silent
-destructive overwrite of the caller's other fields (msg-262 §1.1), and
-that is exactly what M1/M2/M3 are being run first to prevent.
+**The D2a tests** (msg-1063 §3 / msg-1065 §1) pin the contract that
+closes msg-059 requirements 1 and 2 for ``next_action`` / ``blockers``:
+both are required with no default, an explicit ``null`` / ``[]`` is a
+clear that is forwarded and reported in ``fields_cleared``, and an
+empty or whitespace-only value is rejected loudly before anything is
+written.  The three remaining optional fields (``current_phase`` /
+``current_task`` / ``embodiment``) keep "absent or empty keeps the
+stored value" as their documented contract (D2a-3), and the tests that
+pin their truthiness gate stay.
 
-The ``embodiment`` test is the same shape but positive: one field
-already behaves the way D2 wants the others to behave, and it is the
-model D2 will imitate.
+The ``embodiment`` test is the model the D2a adapter change imitates:
+an explicit value survives the adapter instead of being dropped.
 
 D1 IMPLEMENTATION NOTES (verified against source, 2026-09-07)
 -------------------------------------------------------------
@@ -42,8 +40,9 @@ D1 IMPLEMENTATION NOTES (verified against source, 2026-09-07)
   downstream store that answered ``saved_to: []``, a response that did
   not include ``saved_to``, and an exception during ``save_session`` all
   yield ``success: False`` and a message that spells the reason.
-* ``adapters/prismind.py`` — the second truthiness gate is unchanged.
-  D2's task, not D1's.
+* ``adapters/prismind.py`` — ``save_session`` forwards ``next_action``
+  when it is ``None`` (JSON null = clear) and ``blockers`` whenever it is
+  a list, ``[]`` included (D2a).  The other scalars keep the gate.
 """
 
 from __future__ import annotations
@@ -52,6 +51,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
@@ -105,6 +105,9 @@ async def _checkpoint_kwargs(tools: dict[str, Any], **call: Any) -> dict[str, An
         )
 
         call.setdefault("summary", "s")
+        # D2a-1: both are required; tests not about them pass a plain value.
+        call.setdefault("next_action", "n")
+        call.setdefault("blockers", ["b"])
         call.setdefault("auto_extract", False)
         await tools["checkpoint"](**call)
 
@@ -126,69 +129,191 @@ async def _checkpoint_result(
         inst.save_session = AsyncMock(return_value=save_return)
 
         call.setdefault("summary", "s")
+        # D2a-1: both are required; tests not about them pass a plain value.
+        call.setdefault("next_action", "n")
+        call.setdefault("blockers", ["b"])
         call.setdefault("auto_extract", False)
         return await tools["checkpoint"](**call)
 
 
 # ---------------------------------------------------------------------------
-# D2 characterization pins — the residual truthiness gate D1 does not touch.
+# D2a — next_action / blockers are required, clears are explicit, bad values
+# are rejected loudly (msg-1063 §3 / msg-1065 §1).
 # ---------------------------------------------------------------------------
 
 
-class TestCheckpointStillDropsFalsyOptionalFields:
-    """The tool-layer truthiness gate is intact under D1.
+class TestCheckpointRequiredFieldsAreForwardedOrCleared:
+    """``next_action`` / ``blockers`` always leave the tool.
 
-    D2 (msg-264 §1) will flip these once M1/M2/M3 are recorded, at which
-    point ``blockers=[]`` will mean "clear the blocker" instead of "no
-    change".  Until that measurement lands, the gate has to stay — an
-    inversion applied while the schema default of the scalars is still
-    ``""`` would silently overwrite the caller's stored values with
-    empties whenever the field was omitted (msg-262 §1.1).
+    The probe in msg-1055 showed the original symptom at the server
+    boundary: ``next_action=""`` / ``blockers=[]`` returned ``success:true``
+    and the read-back kept the old values, because the truthiness gate
+    never forwarded them.  Under D2a a value is a write and ``null`` /
+    ``[]`` is a clear; nothing in between is silent.
     """
 
     @pytest.mark.asyncio
-    async def test_empty_blockers_list_is_not_forwarded(self, tools):
-        """``blockers=[]`` is still dropped, so a stale blocker cannot be cleared.
-
-        Operationally this is the sharpest observable of the D2 defect:
-        every turn of the trilateral loop wants to say "nothing is
-        blocking me now" and today that call is a silent no-op.  D1's
-        receipt makes the drop *visible* (see the D1 tests below); D2
-        will make the drop *stop*.
-        """
+    async def test_empty_blockers_list_is_forwarded_as_a_clear(self, tools):
+        """``blockers=[]`` means "no blockers" and now reaches the store."""
         kwargs = await _checkpoint_kwargs(tools, blockers=[])
 
-        assert "blockers" not in kwargs
+        assert kwargs["blockers"] == []
 
     @pytest.mark.asyncio
     async def test_a_nonempty_blockers_list_is_forwarded(self, tools):
-        """Control: the drop is about falsiness, not about the field."""
         kwargs = await _checkpoint_kwargs(tools, blockers=["b"])
 
         assert kwargs["blockers"] == ["b"]
 
     @pytest.mark.asyncio
-    async def test_empty_next_action_is_not_forwarded(self, tools):
-        kwargs = await _checkpoint_kwargs(tools, next_action="")
+    async def test_null_next_action_is_forwarded_as_a_clear(self, tools):
+        """``null`` is the only way to clear ``next_action`` (msg-1065 §1)."""
+        kwargs = await _checkpoint_kwargs(tools, next_action=None)
 
-        assert "next_action" not in kwargs
+        assert "next_action" in kwargs
+        assert kwargs["next_action"] is None
 
     @pytest.mark.asyncio
-    async def test_empty_scalars_are_not_forwarded(self, tools):
-        """current_phase / current_task drop on the same gate."""
+    async def test_a_next_action_value_is_forwarded(self, tools):
+        kwargs = await _checkpoint_kwargs(tools, next_action="do x")
+
+        assert kwargs["next_action"] == "do x"
+
+    @pytest.mark.asyncio
+    async def test_optional_empty_scalars_are_still_not_forwarded(self, tools):
+        """current_phase / current_task keep "empty keeps the stored value".
+
+        D2a-3 (msg-1063 §3): that is their contract, not a gap.
+        """
         kwargs = await _checkpoint_kwargs(tools, current_phase="", current_task="")
 
         assert "current_phase" not in kwargs
         assert "current_task" not in kwargs
 
 
-class TestAdapterAppliesTheSameGateASecondTime:
+class TestCheckpointRejectsBrokenRequiredValues:
+    """D2a-2: the server-side forms of a malformed call fail loudly.
+
+    Each rejection must happen before any write: a rejected call that
+    still wrote part of its payload would be msg-059's partial write in a
+    new shape.
+    """
+
+    async def _rejected(self, tools: dict[str, Any], **call: Any) -> Any:
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.save_session = AsyncMock(
+                return_value={"success": True, "saved_to": ["MCP Memory Server"]}
+            )
+            inst.add_knowledge = AsyncMock()
+            call.setdefault("summary", "s")
+            call.setdefault("next_action", "n")
+            call.setdefault("blockers", ["b"])
+            call.setdefault("auto_extract", False)
+            with pytest.raises(ToolError) as excinfo:
+                await tools["checkpoint"](project="p", decisions=["d"], **call)
+            inst.save_session.assert_not_awaited()
+            inst.add_knowledge.assert_not_awaited()
+            return excinfo.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["", " ", "\n\t "])
+    async def test_empty_or_whitespace_next_action_is_rejected(self, tools, value):
+        """probe arm-empty (msg-1055): this used to keep the old value."""
+        err = await self._rejected(tools, next_action=value)
+
+        assert "next_action" in str(err)
+        assert "null" in str(err)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [[""], ["ok", " "], ["ok", "\n"]])
+    async def test_blockers_with_an_empty_element_are_rejected(self, tools, value):
+        """The operator's extra variant (msg-1055): ``[""]`` used to overwrite."""
+        err = await self._rejected(tools, blockers=value)
+
+        assert "blockers" in str(err)
+        assert "[]" in str(err)
+
+
+class TestRequiredFieldsAtTheMcpBoundary:
+    """D2a-1 through the real FastMCP schema, not the captured function.
+
+    The captured-function tests above cannot see the framework's argument
+    validation.  These register ``checkpoint`` on a real ``FastMCP`` and
+    call it the way a client does, so "absent is rejected" and "null is
+    accepted" are tested where they are enforced.
+    """
+
+    async def _call(self, settings: Settings, arguments: dict[str, Any]) -> Any:
+        from fastmcp import Client, FastMCP
+
+        server = FastMCP("t")
+        session_tools.register_tools(server, settings)
+        with patch.object(session_tools, "PrismindAdapter") as MockAdapter:
+            inst = MockAdapter.return_value
+            inst.save_session = AsyncMock(
+                return_value={"success": True, "saved_to": ["MCP Memory Server"]}
+            )
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "checkpoint", arguments, raise_on_error=False
+                )
+            return result, inst.save_session
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing", ["next_action", "blockers"])
+    async def test_an_absent_required_field_is_an_error(self, settings, missing):
+        """probe arm-omit (msg-1055): this used to return success:true."""
+        arguments = {
+            "summary": "s",
+            "next_action": "n",
+            "blockers": ["b"],
+            "auto_extract": False,
+        }
+        del arguments[missing]
+
+        result, save_session = await self._call(settings, arguments)
+
+        assert result.is_error is True
+        save_session.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_next_action_is_accepted(self, settings):
+        result, save_session = await self._call(
+            settings,
+            {
+                "summary": "s",
+                "next_action": None,
+                "blockers": [],
+                "auto_extract": False,
+            },
+        )
+
+        assert result.is_error is False
+        assert save_session.await_args.kwargs["next_action"] is None
+        assert save_session.await_args.kwargs["blockers"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_broken_value_is_an_error_result(self, settings):
+        result, save_session = await self._call(
+            settings,
+            {
+                "summary": "s",
+                "next_action": "",
+                "blockers": ["b"],
+                "auto_extract": False,
+            },
+        )
+
+        assert result.is_error is True
+        save_session.assert_not_awaited()
+
+
+class TestAdapterForwardsTheD2aFields:
     """The second gate, in adapters/prismind.py.
 
-    Pinned separately because D2 has to change both.  A fix applied only
-    to the tool layer would be swallowed here with no signal, which is
-    exactly the "looks like it failed for no visible reason" mode
-    msg-262 §1.3 warns against.
+    D2a has to change both layers: a fix applied only to the tool would be
+    swallowed here with no signal (msg-262 §1.3).
     """
 
     async def _save_session_arguments(self, **call: Any) -> dict[str, Any]:
@@ -202,13 +327,28 @@ class TestAdapterAppliesTheSameGateASecondTime:
         return arguments
 
     @pytest.mark.asyncio
-    async def test_empty_blockers_list_is_dropped_again(self):
+    async def test_empty_blockers_list_is_forwarded(self):
         arguments = await self._save_session_arguments(summary="s", blockers=[])
+
+        assert arguments["blockers"] == []
+
+    @pytest.mark.asyncio
+    async def test_blockers_none_is_not_forwarded(self):
+        """``None`` stays "not provided" for any other adapter caller."""
+        arguments = await self._save_session_arguments(summary="s", blockers=None)
 
         assert "blockers" not in arguments
 
     @pytest.mark.asyncio
-    async def test_empty_scalars_are_dropped_again(self):
+    async def test_next_action_none_is_forwarded_as_null(self):
+        arguments = await self._save_session_arguments(summary="s", next_action=None)
+
+        assert "next_action" in arguments
+        assert arguments["next_action"] is None
+
+    @pytest.mark.asyncio
+    async def test_empty_scalars_are_still_dropped(self):
+        """``""`` stays "not provided" in the adapter; the tool rejects it upstream."""
         arguments = await self._save_session_arguments(
             summary="s", next_action="", current_phase="", current_task=""
         )
@@ -221,79 +361,52 @@ class TestAdapterAppliesTheSameGateASecondTime:
     async def test_even_summary_is_dropped_when_empty(self):
         """``summary`` is unconditional only in the tool, not in the adapter.
 
-        msg-231 describes summary as "the one field always forwarded"; that
-        holds at session.py but not here, so an empty summary reaches
-        Prismind as an absent key and leaves ``last_summary`` untouched.
-        msg-247 §3(a) corrected this: D2 must not exempt ``summary`` from
-        the inversion.
+        msg-247 §3(a): unchanged by D2a, which is scoped to next_action and
+        blockers.
         """
         arguments = await self._save_session_arguments(summary="")
 
         assert "summary" not in arguments
 
     @pytest.mark.asyncio
-    async def test_embodiment_already_uses_the_none_sentinel(self):
-        """One field is already correct — it is the model for D2.
-
-        ``embodiment`` is gated on ``is not None``, so an explicit empty
-        string survives the call.  D2 will make the other fields behave
-        the way this one already does.  (M1 in msg-262 §1.2 still has to
-        check that the *tool* layer forwards this unchanged; if it applies
-        a truthiness gate upstream, ``embodiment`` is a false model and
-        this pin turns into evidence rather than into a template.)
-        """
+    async def test_embodiment_uses_the_none_sentinel(self):
+        """``embodiment`` is gated on ``is not None``: the model D2a follows."""
         arguments = await self._save_session_arguments(summary="s", embodiment="")
 
         assert arguments["embodiment"] == ""
 
 
 # ---------------------------------------------------------------------------
-# D1 receipt — the write is now inspectable and success is fail-closed.
+# D1 receipt — the write is inspectable and success is fail-closed.
 # ---------------------------------------------------------------------------
 
 
 class TestCheckpointReceiptEnumeratesFieldFate:
-    """``fields_written`` / ``fields_skipped`` account for every optional field.
-
-    The read-back the chatroom was doing by hand — "did the field I sent
-    actually get through?" — is now on the wire.  msg-231 opened the
-    thread on this; msg-262 §5 fixed the receipt's shape; msg-264 §5
-    confirmed it.
+    """``fields_written`` / ``fields_cleared`` / ``fields_skipped`` account
+    for every session field (msg-262 §5 / msg-264 §5 / msg-1065 §1).
     """
 
     @pytest.mark.asyncio
-    async def test_omitting_every_optional_field_reports_them_all_as_skipped(
-        self, tools
-    ):
-        """Fields the caller never passed belong in ``fields_skipped`` too.
+    async def test_only_optional_fields_can_be_skipped(self, tools):
+        """With only the required fields, the three optional ones are skipped.
 
-        ``fields_skipped`` does not mean "you supplied this and we threw
-        it away".  It means "this did not go".  The two roads to that
-        outcome -- passing an explicit falsy value, and never passing the
-        field -- are indistinguishable by the time a call reaches the
-        tool: the MCP schema defaults (``""`` / ``None``) collapse them at
-        the call boundary.  Narrowing this list to "caller-supplied only"
-        is therefore not implementable, and an implementation claiming to
-        do it would be asserting something the server cannot know -- the
-        same defect class this thread exists to close, rebuilt inside the
-        receipt (msg-323 §3).  The pin below is true as written; the PR
-        gate's objection was answered by correcting the ``session.py``
-        docstring to match it, not by changing this behaviour.
+        For the optional fields, "passed empty" and "not passed" collapse at
+        the call boundary (msg-323 §3); both mean "keep" (D2a-3).
         """
         result = await _checkpoint_result(
             tools,
             {"success": True, "saved_to": ["MCP Memory Server"]},
             summary="s",
+            next_action="n",
+            blockers=["b"],
         )
 
-        assert result["fields_written"] == []
-        # Order is stable and defined by _CHECKPOINT_OPTIONAL_FIELDS, so the
-        # caller can rely on it when diffing turns.
+        assert result["fields_written"] == ["blockers", "next_action"]
+        assert result["fields_cleared"] == []
+        # Order is stable and defined by _CHECKPOINT_OPTIONAL_FIELDS.
         assert result["fields_skipped"] == [
-            "blockers",
             "current_phase",
             "current_task",
-            "next_action",
             "embodiment",
         ]
 
@@ -317,28 +430,25 @@ class TestCheckpointReceiptEnumeratesFieldFate:
             "next_action",
             "embodiment",
         ]
+        assert result["fields_cleared"] == []
         assert result["fields_skipped"] == []
 
     @pytest.mark.asyncio
-    async def test_falsy_values_are_reported_as_skipped_not_written(self, tools):
-        """The receipt describes what actually left the tool, not intent.
-
-        The caller passed ``blockers=[]`` and ``next_action=""``; both were
-        dropped by the truthiness gate above.  Under D1 the caller does
-        not have to resume to find that out — the receipt says it.
-        """
+    async def test_clears_are_reported_in_fields_cleared(self, tools):
+        """A clear is never silent (msg-1065 §1 / msg-262 §1.1)."""
         result = await _checkpoint_result(
             tools,
             {"success": True, "saved_to": ["MCP Memory Server"]},
             summary="s",
             blockers=[],
-            next_action="",
+            next_action=None,
             current_phase="p",
         )
 
+        assert result["fields_cleared"] == ["blockers", "next_action"]
         assert result["fields_written"] == ["current_phase"]
-        assert "blockers" in result["fields_skipped"]
-        assert "next_action" in result["fields_skipped"]
+        assert "blockers" not in result["fields_skipped"]
+        assert "next_action" not in result["fields_skipped"]
 
 
 class TestCheckpointReceiptRecordsPersistence:
@@ -496,7 +606,9 @@ class TestCheckpointSuccessIsFailClosed:
             inst = MockAdapter.return_value
             inst.save_session = AsyncMock(side_effect=RuntimeError("boom"))
 
-            result = await tools["checkpoint"](summary="s", auto_extract=False)
+            result = await tools["checkpoint"](
+                summary="s", next_action="n", blockers=["b"], auto_extract=False
+            )
 
         assert result["success"] is False
         assert result["persisted"] is None
@@ -522,6 +634,8 @@ class TestCheckpointSuccessIsFailClosed:
 
             result = await tools["checkpoint"](
                 summary="s",
+                next_action="n",
+                blockers=["b"],
                 project="p",
                 decisions=["d1"],
                 auto_extract=False,
@@ -554,6 +668,7 @@ class TestCheckpointReceiptShapeIsStable:
         )
 
         assert "fields_written" in result
+        assert "fields_cleared" in result
         assert "fields_skipped" in result
         assert "persisted" in result
 
@@ -563,9 +678,12 @@ class TestCheckpointReceiptShapeIsStable:
             inst = MockAdapter.return_value
             inst.save_session = AsyncMock(side_effect=RuntimeError("boom"))
 
-            result = await tools["checkpoint"](summary="s", auto_extract=False)
+            result = await tools["checkpoint"](
+                summary="s", next_action="n", blockers=["b"], auto_extract=False
+            )
 
         assert "fields_written" in result
+        assert "fields_cleared" in result
         assert "fields_skipped" in result
         assert result["persisted"] is None
 
@@ -610,6 +728,8 @@ class TestMessageAlwaysReportsUnsavedDecisions:
 
             result = await tools["checkpoint"](
                 summary="s",
+                next_action="n",
+                blockers=["b"],
                 project="p",
                 decisions=["d1"],
                 auto_extract=False,
@@ -634,6 +754,8 @@ class TestMessageAlwaysReportsUnsavedDecisions:
 
             result = await tools["checkpoint"](
                 summary="s",
+                next_action="n",
+                blockers=["b"],
                 project="p",
                 decisions=["d1"],
                 auto_extract=False,
@@ -654,6 +776,8 @@ class TestMessageAlwaysReportsUnsavedDecisions:
 
             result = await tools["checkpoint"](
                 summary="s",
+                next_action="n",
+                blockers=["b"],
                 project="p",
                 decisions=["d1"],
                 auto_extract=False,
@@ -685,6 +809,8 @@ class TestMessageAlwaysReportsUnsavedDecisions:
 
             result = await tools["checkpoint"](
                 summary="s",
+                next_action="n",
+                blockers=["b"],
                 decisions=["d1"],
                 auto_extract=False,
             )

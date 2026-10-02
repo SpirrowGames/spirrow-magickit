@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
@@ -28,9 +29,11 @@ DETAIL_LEVEL_TOKENS = {
     "full": 4000,
 }
 
-# Optional caller-supplied fields on ``checkpoint`` that participate in the
-# truthiness gate.  Listed explicitly so the D1 receipt can report each one
-# as either forwarded (``fields_written``) or dropped (``fields_skipped``);
+# Caller-supplied session-state fields on ``checkpoint``.  (The name is
+# historical: since D2a, msg-1063 §3, ``blockers`` / ``next_action`` are
+# required and always forwarded; the other three remain optional and gated.)
+# Listed explicitly so the receipt can report each one as forwarded
+# (``fields_written`` / ``fields_cleared``) or dropped (``fields_skipped``);
 # the caller then no longer has to do a read-back to detect a silent drop.
 # ``summary`` is not listed because it is always attempted; ``project`` /
 # ``user`` / ``author`` are not listed because they route the write, not
@@ -196,6 +199,42 @@ async def _begin_task_impl(
     return response
 
 
+def _validate_checkpoint_required_fields(
+    next_action: str | None, blockers: list[str]
+) -> None:
+    """Reject the broken-value forms of checkpoint's two required fields.
+
+    D2a-2 (chatroom T-checkpoint-silent-partial-write msg-1063 §3 /
+    msg-1065 §1).  Raising :class:`ToolError` makes the MCP response an
+    ``isError`` result, so the caller cannot mistake a rejected call for a
+    saved one (msg-059 requirement 1: return success only when every field
+    was written, otherwise fail loudly).
+
+    * ``next_action``: ``None`` is the clear request and passes.  A string
+      that is empty or whitespace only is rejected -- that is one way a
+      field that fell off a malformed call reaches the server (probe
+      arm-empty, msg-1055), and accepting it kept the old value silently.
+    * ``blockers``: ``[]`` is "no blockers" and passes.  An element that is
+      not a string, or is empty / whitespace only, is rejected: ``[""]``
+      used to overwrite the stored blockers with garbage while returning
+      success (msg-1055 extra variant, msg-1063 §1).
+    """
+    if next_action is not None and not next_action.strip():
+        raise ToolError(
+            "checkpoint rejected: next_action is empty or whitespace only. "
+            "Send the next action, or null to clear it. Nothing was written."
+        )
+    bad = [
+        i for i, b in enumerate(blockers) if not isinstance(b, str) or not b.strip()
+    ]
+    if bad:
+        raise ToolError(
+            "checkpoint rejected: blockers contains empty or whitespace-only "
+            f"element(s) at index {bad}. Send [] for no blockers. "
+            "Nothing was written."
+        )
+
+
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
     """Register session management tools with the MCP server.
 
@@ -262,12 +301,12 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def checkpoint(
         summary: str,
+        next_action: str | None,
+        blockers: list[str],
         project: str = "",
         decisions: list[str] | None = None,
-        blockers: list[str] | None = None,
         current_phase: str = "",
         current_task: str = "",
-        next_action: str = "",
         auto_extract: bool = True,
         user: str = "",
         author: str = "",
@@ -288,11 +327,26 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Args:
             summary: Summary of work done since last checkpoint.
             project: Project identifier for saving decisions.
+            next_action: REQUIRED, no default.  What to do next (saved for
+                session continuity).  Send ``null`` to clear it; the clear is
+                reported in ``fields_cleared``.  ``""`` or whitespace only is
+                rejected as an error.  Omitting the argument is rejected as
+                an error too: a missing field cannot be told apart from a
+                field that fell off a malformed tool call, so the server does
+                not guess (chatroom T-checkpoint-silent-partial-write
+                msg-1063 §3 D2a-1 / msg-1065 §1).
+            blockers: REQUIRED, no default.  List of current blockers.  ``[]``
+                means "no blockers" and is written (reported in
+                ``fields_cleared``).  An element that is ``""`` or whitespace
+                only is rejected as an error.
             decisions: List of decisions made (will be saved as knowledge).
-            blockers: List of current blockers or issues.
             current_phase: Update the current phase (e.g., "Phase 2").
+                Optional: absent or ``""`` keeps the stored value (reported in
+                ``fields_skipped``).  That is the contract, not a gap
+                (msg-1063 §3 D2a-3).
             current_task: Update the current task (e.g., "T01: Implement feature").
-            next_action: What to do next (saved for session continuity).
+                Optional, with the same "absent keeps the stored value"
+                contract as ``current_phase``.
             auto_extract: If True, use Cognilens to extract essence from long summaries.
             user: User identifier for multi-user support (empty for default user).
             author: Context author/role partition to save under. Use the same
@@ -317,21 +371,20 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
               a no-answer response, and -- on every branch, the failure
               branches included -- reports any decisions this call did not
               save (msg-323 §2, R5).
-            - fields_written: The optional session fields this call
-              actually forwarded to Prismind (chatroom
+            - fields_written: The session fields this call forwarded to
+              Prismind with a value (chatroom
               T-checkpoint-silent-partial-write msg-262 §2 / msg-264 §5).
-            - fields_skipped: The optional session fields that were *not*
-              forwarded.  Two different things land here and they cannot
-              be told apart from inside this function: a field the caller
-              passed as an explicit falsy value, and a field the caller
-              never passed at all.  The MCP schema defaults (``""`` for
-              the four string fields, ``None`` for ``blockers``) collapse
-              that distinction at the call boundary, before this function is
-              entered, so the server is not able to report which one
-              happened -- the indistinguishability is the subject of this
-              thread, not a gap in the receipt (msg-323 §3).  How to read
-              it: if a field you meant to send is in ``fields_skipped``,
-              it did not arrive.
+            - fields_cleared: The session fields this call forwarded as an
+              explicit clear: ``next_action`` sent as ``null``, ``blockers``
+              sent as ``[]`` (msg-1065 §1).  A clear is never silent.
+            - fields_skipped: The session fields that were *not* forwarded,
+              so the store kept their old value.  Only the optional fields
+              (``current_phase`` / ``current_task`` / ``embodiment``) can
+              land here: ``next_action`` and ``blockers`` are required and
+              are always either written or cleared.  For the optional
+              fields, "passed ``""``" and "not passed" collapse at the call
+              boundary (msg-323 §3); both mean "keep", which is their
+              documented contract (msg-1063 §3 D2a-3).
             - persisted: ``True`` if the downstream response reported a
               non-empty ``saved_to``, ``False`` if it reported an empty
               ``saved_to``, ``None`` if the response did not include the
@@ -340,6 +393,13 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
+
+        # D2a-2 (chatroom T-checkpoint-silent-partial-write msg-1063 §3 /
+        # msg-1065 §1): reject broken values loudly, before anything is
+        # written.  The framework already rejects an *absent* next_action /
+        # blockers (D2a-1: both are required with no default); this catches
+        # the other server-side forms of a malformed call.
+        _validate_checkpoint_required_fields(next_action, blockers)
 
         # Auto-detect user if not specified
         effective_user = user or get_current_user()
@@ -393,25 +453,30 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         # Step 2: Save session state
         #
         # D1 receipt (chatroom T-checkpoint-silent-partial-write msg-262 §5 /
-        # msg-264 §5): the truthiness gate below is *retained* under D1 —
-        # inverting it belongs to D2 and requires the caller enumeration
-        # (M2) plus the ``embodiment`` measurement (M1) to avoid turning
-        # today's silent no-op into a silent destructive overwrite (msg-262
-        # §1.1).  What D1 changes is the *report*: for every optional
-        # session field the caller could have set, we say whether it was
-        # forwarded or dropped, and we no longer claim that the write
-        # persisted without the downstream store saying so.
+        # msg-264 §5): every session field is reported as written, cleared
+        # or skipped, and ``persisted`` is never claimed without the
+        # downstream store saying so.
+        #
+        # D2a (msg-1063 §3 / msg-1065 §1): next_action and blockers are no
+        # longer behind the truthiness gate.  They are required, validated
+        # above, and always forwarded: a value is a write, ``null`` / ``[]``
+        # is an explicit clear.  This does not turn the old silent no-op
+        # into a silent destructive overwrite (msg-262 §1.1): a clear only
+        # happens on an explicit null / [] from the caller, an absent field
+        # is a framework error, and the clear is reported in
+        # ``fields_cleared``.  The three optional fields keep the gate:
+        # "absent keeps the stored value" is their contract (D2a-3).
         persisted: bool | None = None
         save_error: str | None = None
-        save_args: dict[str, Any] = {"summary": processed_summary}
-        if blockers:
-            save_args["blockers"] = blockers
+        save_args: dict[str, Any] = {
+            "summary": processed_summary,
+            "next_action": next_action,
+            "blockers": blockers,
+        }
         if current_phase:
             save_args["current_phase"] = current_phase
         if current_task:
             save_args["current_task"] = current_task
-        if next_action:
-            save_args["next_action"] = next_action
         if project:
             save_args["project"] = project
         save_args["user"] = effective_user
@@ -420,7 +485,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if embodiment:
             save_args["embodiment"] = embodiment
 
-        fields_written = [f for f in _CHECKPOINT_OPTIONAL_FIELDS if f in save_args]
+        fields_cleared = [
+            f
+            for f in _CHECKPOINT_OPTIONAL_FIELDS
+            if f in save_args and save_args[f] in (None, [])
+        ]
+        fields_written = [
+            f
+            for f in _CHECKPOINT_OPTIONAL_FIELDS
+            if f in save_args and f not in fields_cleared
+        ]
         fields_skipped = [f for f in _CHECKPOINT_OPTIONAL_FIELDS if f not in save_args]
 
         try:
@@ -553,6 +627,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "knowledge_added": knowledge_added,
             "message": message,
             "fields_written": fields_written,
+            "fields_cleared": fields_cleared,
             "fields_skipped": fields_skipped,
             "persisted": persisted,
         }

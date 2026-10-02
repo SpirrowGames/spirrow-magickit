@@ -765,7 +765,7 @@ class PrismindAdapter(MCPBaseAdapter):
     async def save_session(
         self,
         summary: str = "",
-        next_action: str = "",
+        next_action: str | None = "",
         blockers: list[str] | None = None,
         notes: str = "",
         current_phase: str = "",
@@ -779,8 +779,16 @@ class PrismindAdapter(MCPBaseAdapter):
 
         Args:
             summary: Work summary
-            next_action: What to do next
-            blockers: List of blockers
+            next_action: What to do next.  ``""`` (the default) means "not
+                provided": the key is not sent and the store keeps its
+                value.  ``None`` is an explicit clear request and is sent
+                as JSON ``null`` (chatroom T-checkpoint-silent-partial-write
+                msg-1065 §1, D2a-2).  Whether the store honours it is the
+                pre-land probe's question, not this adapter's.
+            blockers: List of blockers.  ``None`` (the default) means "not
+                provided".  Any list -- ``[]`` included -- is sent, so
+                ``[]`` reaches the store as "no blockers" instead of being
+                dropped (msg-1063 §3, D2a-2).
             notes: Notes
             current_phase: Update current phase
             current_task: Update current task
@@ -795,9 +803,9 @@ class PrismindAdapter(MCPBaseAdapter):
         arguments: dict[str, Any] = {}
         if summary:
             arguments["summary"] = summary
-        if next_action:
+        if next_action is None or next_action:
             arguments["next_action"] = next_action
-        if blockers:
+        if blockers is not None:
             arguments["blockers"] = blockers
         if notes:
             arguments["notes"] = notes
