@@ -29,9 +29,9 @@ DETAIL_LEVEL_TOKENS = {
     "full": 4000,
 }
 
-# Caller-supplied session-state fields on ``checkpoint``.  (The name is
-# historical: since D2a, msg-1063 §3, ``blockers`` / ``next_action`` are
-# required and always forwarded; the other three remain optional and gated.)
+# Caller-supplied session-state fields on ``checkpoint``.  Since D2a
+# (msg-1063 §3) ``blockers`` / ``next_action`` are required and always
+# forwarded; the other three remain optional and gated.
 # Listed explicitly so the receipt can report each one as forwarded
 # (``fields_written`` / ``fields_cleared``) or dropped (``fields_skipped``);
 # the caller then no longer has to do a read-back to detect a silent drop.
@@ -39,7 +39,7 @@ DETAIL_LEVEL_TOKENS = {
 # ``user`` / ``author`` are not listed because they route the write, not
 # session state itself.  See chatroom T-checkpoint-silent-partial-write
 # msg-262 §5 / msg-264 §5 for the specification.
-_CHECKPOINT_OPTIONAL_FIELDS: tuple[str, ...] = (
+_CHECKPOINT_SESSION_FIELDS: tuple[str, ...] = (
     "blockers",
     "current_phase",
     "current_task",
@@ -495,16 +495,16 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         fields_cleared = [
             f
-            for f in _CHECKPOINT_OPTIONAL_FIELDS
+            for f in _CHECKPOINT_SESSION_FIELDS
             if (f == "next_action" and save_args.get("clear_next_action"))
             or (f == "blockers" and save_args.get("blockers") == [])
         ]
         fields_written = [
             f
-            for f in _CHECKPOINT_OPTIONAL_FIELDS
+            for f in _CHECKPOINT_SESSION_FIELDS
             if f in save_args and f not in fields_cleared
         ]
-        fields_skipped = [f for f in _CHECKPOINT_OPTIONAL_FIELDS if f not in save_args]
+        fields_skipped = [f for f in _CHECKPOINT_SESSION_FIELDS if f not in save_args]
 
         try:
             save_result = await prismind.save_session(**save_args)

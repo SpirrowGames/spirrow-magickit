@@ -452,7 +452,7 @@ class TestCheckpointReceiptEnumeratesFieldFate:
 
         assert result["fields_written"] == ["blockers", "next_action"]
         assert result["fields_cleared"] == []
-        # Order is stable and defined by _CHECKPOINT_OPTIONAL_FIELDS.
+        # Order is stable and defined by _CHECKPOINT_SESSION_FIELDS.
         assert result["fields_skipped"] == [
             "current_phase",
             "current_task",
