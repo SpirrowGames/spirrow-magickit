@@ -119,6 +119,26 @@ UTID は `{project_uid}:{phase_slug}:{local_task_id}` (例 `1AbC2dEf3GhI:phase2:
 **checkpoint / resume の前に `list_context_authors` を見ること** — 表記揺れによる重複を防ぎ、
 自分の author のコンテキスト有無を確認するため。抽出された knowledge には `author:{name}` タグが付く。
 
+### checkpoint の必須フィールド (D2a)
+
+*(chatroom T-checkpoint-silent-partial-write msg-1063 §3 / msg-1065 §1–§2 / msg-1105 §2 / msg-1108 §3)*
+
+`checkpoint` は **`next_action` と `blockers` を毎回必ず渡す**こと (どちらも既定値なし)。
+以前は欠落・空値が黙って捨てられ、旧値が残ったまま `success:true` が返っていた (silent partial write)。
+
+| 渡し方 | 意味 |
+|---|---|
+| `next_action` / `blockers` を省略 | スキーマ `isError` (欠けたフィールド名が出る)。何も書かれない |
+| `next_action="..."` | 書き込み |
+| `next_action=null` | `next_action` を**クリア** (クリアする唯一の方法) |
+| `next_action=""` / 空白のみ | `isError`。何も書かれない |
+| `blockers=["..."]` | 書き込み |
+| `blockers=[]` | blocker なし (保存済みの blockers をクリア) |
+| `blockers` に `""` / 空白のみの要素 | `isError`。何も書かれない |
+
+クリアは応答の `fields_cleared` に、書き込みは `fields_written` に出る。
+`current_phase` / `current_task` / `embodiment` は従来どおり任意で、**省略 = 保存値を維持**が契約。
+
 ## identity と role / embodiment 検証の所在
 
 *(ADR-2026-05-27-09 + ADR-2026-05-29-12 / T-magickit-identity-extension)*
