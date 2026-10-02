@@ -194,6 +194,9 @@ async def _put_material(db_path, *, project="p", thread_id="T-1", head="msg-9", 
         signature=kw.get("signature"),
         question=kw.get("question", "どちらにしますか"),
         stop_reason=kw.get("stop_reason"),
+        parked_lane=kw.get("parked_lane"),
+        operator_task=kw.get("operator_task"),
+        protocol_violation=kw.get("protocol_violation"),
         options=kw.get("options"),
         recommendation=kw.get("recommendation"),
         recommendation_reason=None,
@@ -1253,3 +1256,159 @@ def test_the_board_does_not_parse_the_signature_for_a_reason():
     """
     assert board._stop_reason_label({"signature": "human:msg-9"}) == ""
     assert board._stop_reason_label({"stop_reason": "human"}) == "人の判断で停止"
+
+
+# --- parked lane (spec S5 §2.1.2, thread T-board-parked-lane-from-stop-marker)
+# 分類は mindwire が行い、板は受け取って表示するだけ。D7 の不変条件
+# (Tier-C は必ず「判断」) は受け取る側でも守る。
+
+
+async def _one_card(temp_db_path, monkeypatch, **material):
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9", **material)
+    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
+    context = await _collect(adapter, _settings(temp_db_path))
+    (card,) = _cards(context)
+    return card
+
+
+@pytest.mark.asyncio
+async def test_misroute_gets_its_own_badge_and_a_chatroom_link(
+    temp_db_path, monkeypatch
+):
+    """テスト 1a: 宛先誤りは「判断」ではない。次の一手は宛先の付け直し。"""
+    card = await _one_card(temp_db_path, monkeypatch, parked_lane="misroute")
+
+    assert card.kind == "decision"  # key / lane 行 / 完了列は共有のまま
+    assert card.key == "decision:p:T-1"
+    assert card.kind_label == "宛先誤り"
+    assert card.note == "どちらにしますか"
+    assert any(
+        link.href == "/ui/projects/p/threads/T-1" for link in card.links
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_work_shows_the_task_as_its_note(temp_db_path, monkeypatch):
+    """テスト 1b: operator 作業のバッジは「作業」、note は operator_task。"""
+    card = await _one_card(
+        temp_db_path,
+        monkeypatch,
+        parked_lane="operator_work",
+        operator_task="merge 済み PR のブランチを消す",
+    )
+
+    assert card.kind_label == "作業"
+    assert card.note == "merge 済み PR のブランチを消す"
+    assert card.note_full == "merge 済み PR のブランチを消す"
+
+
+@pytest.mark.asyncio
+async def test_operator_work_without_a_task_falls_back_to_the_question(
+    temp_db_path, monkeypatch
+):
+    card = await _one_card(temp_db_path, monkeypatch, parked_lane="operator_work")
+
+    assert card.kind_label == "作業"
+    assert card.note == "どちらにしますか"
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_violation_is_a_decision_whatever_the_lane_says(
+    temp_db_path, monkeypatch
+):
+    """テスト 2 (D7 の不変条件): protocol_violation=true は lane より強い。
+
+    Tier-C を ``NEXT: operator`` に渡そうとした駐機は、宛先がどう書かれて
+    いても判断を待っている。lane を先に見ると Tier-C が判断の外に漏れる。
+    """
+    for lane in ("misroute", "operator_work"):
+        card = await _one_card(
+            temp_db_path, monkeypatch, parked_lane=lane, protocol_violation=True
+        )
+        assert card.kind_label == "判断", lane
+        assert card.ask == board.ASK_DECISION
+        assert "protocol 違反" in card.detail
+
+
+@pytest.mark.asyncio
+async def test_no_lane_reads_as_a_decision_with_nothing_added(
+    temp_db_path, monkeypatch
+):
+    """テスト 3a: lane の無い材料 (land 前に保存された行) は今と同じ「判断」。"""
+    card = await _one_card(temp_db_path, monkeypatch)
+
+    assert card.kind_label == "判断"
+    assert card.detail == ""
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_lane_is_a_decision_and_shown_verbatim(
+    temp_db_path, monkeypatch
+):
+    """テスト 3b: 知らない値は「判断」に倒し、token をそのまま副題に出す。"""
+    card = await _one_card(
+        temp_db_path, monkeypatch, parked_lane="brand_new", stop_reason="human"
+    )
+
+    assert card.kind_label == "判断"
+    assert card.detail == "人の判断で停止 · brand_new"
+
+
+def test_decision_ask_is_fail_closed_on_a_non_boolean_violation():
+    """``is True`` で見る: 真偽値以外は lane に従うが、違反扱いにも外しにもしない。
+
+    PUT は JSON boolean 以外を 400 で弾くのでここには来ない。来たとしても
+    lane が decision / 未知なら判断のまま。
+    """
+    assert board._decision_ask({"parked_lane": None, "protocol_violation": False}) == (
+        board.ASK_DECISION,
+        "",
+    )
+    assert board._decision_ask({"parked_lane": "decision"}) == (board.ASK_DECISION, "")
+
+
+def test_asks_sort_decision_then_merge_then_work_then_loop_then_misroute():
+    """並び順: 判断は deploy の次、作業はマージの下、宛先誤りは一番下。"""
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    def card(key, kind, ask=None):
+        return board.Card(key=key, kind=kind, title=key, href="/", since=t, ask=ask)
+
+    cards = [
+        card("misroute", "decision", board.ASK_MISROUTE),
+        card("loop", "loop"),
+        card("work", "decision", board.ASK_OPERATOR_WORK),
+        card("merge", "merge"),
+        card("decision", "decision", board.ASK_DECISION),
+        card("deploy", "deploy"),
+    ]
+    cards.sort(key=board._sort_key)
+
+    assert [c.key for c in cards] == [
+        "deploy", "decision", "merge", "work", "loop", "misroute",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_ask_badge_is_what_the_board_page_prints(
+    temp_db_path, monkeypatch
+):
+    """テンプレートが ``kind`` ではなく ask のバッジを出していること。"""
+    _no_deploys(monkeypatch)
+    await _put_material(temp_db_path, head="msg-9", parked_lane="misroute")
+    adapter = _adapter(threads={"p": [_thread(last_msg_id="msg-9")]})
+
+    settings = _settings(temp_db_path)
+
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with patch.object(board, "get_settings", return_value=settings), \
+         patch.object(board, "ChatroomAdapter", return_value=adapter):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            html = (await client.get("/dashboard/decisions/_board")).text
+
+    assert "board-ask-misroute" in html
+    assert ">宛先誤り<" in html

@@ -1582,6 +1582,34 @@ async def put_decision_material(
             "InvalidMaterialPayload",
             "stop_reason must be a string when present",
         )
+    # The parked lane, as mindwire's own ``parked_lane.classify_parked``
+    # decided it for the same head as ``head_msg_id`` (spec §1.1). Stored
+    # verbatim, like ``stop_reason``: the classification is mindwire's, and
+    # magickit re-deriving it from the stop marker would be a second
+    # implementation of ``handoff.resolve_handoff`` that drifts silently.
+    parked_lane = body.get("parked_lane")
+    if parked_lane is not None and not isinstance(parked_lane, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "parked_lane must be a string when present",
+        )
+    operator_task = body.get("operator_task")
+    if operator_task is not None and not isinstance(operator_task, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "operator_task must be a string when present",
+        )
+    # Strict JSON boolean. ``isinstance(x, bool)`` -- not ``bool(x)``, and not
+    # a coercing schema type -- so ``"yes"`` / ``"true"`` / ``1`` are refused
+    # rather than read as True (msg-1071 advisory 1). Coercion here would be
+    # the one place a malformed sender could silently move a Tier-C card;
+    # refusing is loud, and NULL already falls back to 判断 on the board.
+    protocol_violation = body.get("protocol_violation")
+    if protocol_violation is not None and not isinstance(protocol_violation, bool):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "protocol_violation must be a JSON boolean when present",
+        )
     question = body.get("question")
     if question is not None and not isinstance(question, str):
         return _bad_request(
@@ -1623,6 +1651,9 @@ async def put_decision_material(
             head_msg_id=head_msg_id,
             signature=signature,
             stop_reason=stop_reason,
+            parked_lane=parked_lane,
+            operator_task=operator_task,
+            protocol_violation=protocol_violation,
             question=question,
             options=options,
             recommendation=recommendation,

@@ -60,6 +60,9 @@ Content-Type: application/json
 | `head_msg_id` | string | **必須** | 材料生成時の thread の head msg id (例 `"msg-2640"`)。**鮮度判定に使うキー** |
 | `signature` | string | 任意 | composer の署名。**Magickit は parse しない**。保存のみ |
 | `stop_reason` | string | 任意 | conductor が止まった理由 (mindwire の `StopReason` token、例 `"human"` / `"round_cap"`)。**verbatim で保存し parse しない**。語彙の持ち主は mindwire ∴ magickit は知らない値を捨てず、やること board がそのまま表示する |
+| `parked_lane` | string | 任意 | 駐機の分類 (mindwire `parked_lane.classify_parked` の lane 名、例 `"decision"` / `"operator_work"` / `"misroute"`)。composer が `head_msg_id` と**同じ head** について計算する。**verbatim で保存し読み替えない**。やること board はこれでカードのバッジと並び順を分ける (§2.1.2) |
+| `operator_task` | string | 任意 | `operator_work` のときの作業内容 (`OPERATOR-TASK:` 行)。board の note に出す |
+| `protocol_violation` | boolean | 任意 | Tier-C を `NEXT: operator` に渡そうとした駐機なら `true`。**JSON boolean のみ受理** (`"yes"` / `1` 等は 400、型を強制変換しない)。`true` のカードは `parked_lane` に関係なく「判断」 |
 | `composer_status` | string | 任意 | `"ok"` 以外はエラー (§1.3) |
 | `question` | string | 任意 | 判断の要旨 (散文) |
 | `options` | array | 任意 | 選択肢の配列。要素は `{"id": "A", "label": "…", "gain": "…", "loss": "…"}` |
@@ -112,6 +115,9 @@ CREATE TABLE IF NOT EXISTS decision_materials (
     head_msg_id    TEXT NOT NULL,
     signature      TEXT,
     stop_reason    TEXT,
+    parked_lane    TEXT,
+    operator_task  TEXT,
+    protocol_violation INTEGER,      -- 0 / 1 / NULL
     question       TEXT,
     options_json   TEXT,             -- JSON serialized list of option dicts
     recommendation TEXT,
@@ -128,6 +134,9 @@ CREATE TABLE IF NOT EXISTS decision_materials (
 `_create_tables` 内の冪等な 1 手で足りる形にしてある。**列ができる前に
 書かれた行は `NULL` で読み戻る** = 「この材料には理由が付いていない」。
 
+`parked_lane` / `operator_task` / `protocol_violation` も同じ手順で後から
+足した列で、列ができる前の行は `NULL` で読み戻る。
+
 ### 2.1.1 なぜ `signature` を割らずに列を足したか
 
 `signature` は実際には `<reason>:<msg_id>` という形で届いており、停止理由は
@@ -141,6 +150,22 @@ CREATE TABLE IF NOT EXISTS decision_materials (
   格納する必要が無い field を格納しない (YAGNI)。
 - `options_json` / `unknowns_json` は `TEXT` に JSON serialize して置く。
   `NULL` 可 (`options` が未提供のケース)。読み出し時に `json.loads` する。
+
+### 2.1.2 parked lane を board がどう使うか (D7 の不変条件)
+
+分類は mindwire が行い、magickit は `mindwire:stop v1` マーカーも `NEXT:`
+行も読み直さない (§2.1.1 と同じ理由)。board の判断カードは `key` と
+`kind="decision"` を保ったまま `ask` を持ち、バッジと並び順だけが変わる:
+
+| `ask` | 条件 | バッジ | 並び順 |
+|---|---|---|---|
+| 判断 | `protocol_violation=true` (**`parked_lane` に関係なく最優先**) / `decision` / NULL / 知らない値 | 判断 | deploy の次 (現行どおり) |
+| operator 作業 | `operator_work` | 作業 | マージの下 |
+| 宛先誤り | `misroute` | 宛先誤り | 一番下 |
+
+**受け取る側でも D7 の不変条件を守る**: `protocol_violation=true`・NULL・
+知らない値は必ず「判断」に倒す。知らない値は副題に token をそのまま出す。
+送る側が壊れても、Tier-C が判断の外に漏れる向きには壊れない。
 
 ### 2.2 UPSERT
 

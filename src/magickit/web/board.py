@@ -38,6 +38,18 @@
   並ぶと、板は「何を待たれているか」を答えなくなる。``signature`` にも
   同じ値が混ざっているが、**あれは parse してはいけない**
   (``spec/slices/S5-decision-materials.md`` §1.1: 保存のみ)。
+
+  **判断カードの「何を頼まれているか」(``ask``) も材料の field で受け取る**
+  (``parked_lane`` / ``operator_task`` / ``protocol_violation``)。分類する
+  のは mindwire の ``parked_lane.classify_parked`` で、magickit は
+  ``mindwire:stop v1`` マーカーも ``NEXT:`` 行も読み直さない ——— 読み直す
+  と ``handoff.resolve_handoff`` の 2 つ目の実装になり、mindwire が書式を
+  変えた日に板が黙って壊れる。``key`` と ``kind="decision"`` は変えない
+  (lane 行・fingerprint・``_gone_reason`` をそのまま使うため)。変わるのは
+  バッジと並び順だけ。**D7 の不変条件は受け取る側でも守る**:
+  ``protocol_violation=true`` は ``parked_lane`` に関係なく「判断」、NULL /
+  知らない値も「判断」。壊れるなら Tier-C が判断の外に漏れない向きに
+  壊れる (:func:`_decision_ask`)。
 - **deploy 承認待ち** — ``status == pending_approval`` の deploy request。
   ローカルの file store ∴ Conclair が落ちていても読める。
 - **止まったループ** — 稼働状況ページと **同じ** ``ops.classify`` で
@@ -146,6 +158,33 @@ KIND_LABELS = {
 #: 終わる状態が溜まっているかどうか」という別の質量。
 _KIND_ORDER = {"deploy": 0, "decision": 1, "merge": 2, "loop": 3}
 
+#: 判断カードが「何を頼んでいるか」。``kind`` は ``"decision"`` のまま
+#: (key / lane 行 / 完了列の理由づけを共有する) で、変わるのはバッジと
+#: 並び順だけ。値は mindwire ``parked_lane`` の lane 名と同じ綴りだが、
+#: mindwire の値はここに直接は入らない (:func:`_decision_ask` が写す)。
+ASK_DECISION = "decision"
+ASK_OPERATOR_WORK = "operator_work"
+ASK_MISROUTE = "misroute"
+
+#: ``ask`` ごとのバッジ。``decision`` は ``KIND_LABELS["decision"]`` と同じ語。
+ASK_LABELS = {
+    ASK_DECISION: KIND_LABELS["decision"],
+    ASK_OPERATOR_WORK: "作業",
+    ASK_MISROUTE: "宛先誤り",
+}
+
+#: 並び順。判断は現行のまま (deploy の次)、operator 作業はマージの下、
+#: 宛先誤りは一番下 (ループよりも下)。``_KIND_ORDER`` と同じ軸に載せる
+#: ので整数の間に入れる (merge=2 < 2.5 < loop=3 < 4)。
+_ASK_ORDER = {
+    ASK_DECISION: float(_KIND_ORDER["decision"]),
+    ASK_OPERATOR_WORK: 2.5,
+    ASK_MISROUTE: 4.0,
+}
+
+#: protocol 違反で判断に戻したカードの副題。
+_PROTOCOL_VIOLATION_LABEL = "protocol 違反：Tier-C を operator に渡そうとした"
+
 #: 判断カードに載せる問いの長さ。稼働状況ページの digest と同じ考え方で、
 #: 全文は ``title`` 属性に入れる。
 _QUESTION_CHARS = 140
@@ -188,6 +227,33 @@ def _stop_reason_label(material: dict[str, Any]) -> str:
     if not token:
         return ""
     return _STOP_REASON_LABELS.get(token, token)
+
+def _decision_ask(material: dict[str, Any]) -> tuple[str, str]:
+    """材料 → (``ask``, 副題に足す語)。**D7 の不変条件はここで守る**。
+
+    判定の順序がそのまま不変条件:
+
+    1. ``protocol_violation is True`` → **判断**。``parked_lane`` が何で
+       あっても。Tier-C を ``NEXT: operator`` に渡そうとした駐機は、宛先が
+       operator と書いてあっても判断を待っている。
+    2. ``parked_lane`` が ``operator_work`` / ``misroute`` → その ask。
+    3. それ以外 (``decision`` / NULL / **知らない値**) → **判断**。知らない
+       値は副題に token をそのまま出す (``_stop_reason_label`` と同じ作法:
+       mindwire が lane を足した日に、黙って判断に吸収しない)。
+
+    ``protocol_violation`` は ``is True`` で見る。PUT は JSON boolean 以外を
+    400 で弾くのでそれ以外はここまで来ないが、来たとしても判断に倒れる
+    向きにしか働かない。
+    """
+    if material.get("protocol_violation") is True:
+        return ASK_DECISION, _PROTOCOL_VIOLATION_LABEL
+    token = str(material.get("parked_lane") or "").strip()
+    if token in (ASK_OPERATOR_WORK, ASK_MISROUTE):
+        return token, ""
+    if token and token != ASK_DECISION:
+        return ASK_DECISION, token
+    return ASK_DECISION, ""
+
 
 def _actor(request: Request) -> str | None:
     """列を動かした人。名乗りが無ければ ``None`` で、``"unknown"`` とは書かない。
@@ -246,6 +312,9 @@ class Card:
     detail: str = ""
     #: 題名の飛び先とは別に添える脇道 (PR / chatroom など)。
     links: list[CardLink] = field(default_factory=list)
+    #: 判断カードだけが持つ「何を頼まれているか」(``ASK_*``)。他の種別は
+    #: ``None``。バッジと並び順だけを変え、``key`` / ``kind`` は変えない。
+    ask: str | None = None
 
     #: 移動時点の同一性。次の描画で変わっていたら「更新あり」。
     fingerprint: str = ""
@@ -258,6 +327,8 @@ class Card:
 
     @property
     def kind_label(self) -> str:
+        if self.ask is not None:
+            return ASK_LABELS.get(self.ask, KIND_LABELS.get(self.kind, self.kind))
         return KIND_LABELS.get(self.kind, self.kind)
 
     @property
@@ -410,6 +481,12 @@ async def _collect_decisions(
                 # 鮮度では絶対に落ちない (解決 msg が末尾になるため)。
                 continue
             question = str(material.get("question") or "")
+            ask, ask_detail = _decision_ask(material)
+            note_text = question
+            if ask == ASK_OPERATOR_WORK:
+                # operator 作業の「何をするか」は operator_task が答える。
+                # 無ければ question に戻る (空のカードにしない)。
+                note_text = str(material.get("operator_task") or "") or question
             # 材料 (question → recommendation) → スレッド題名 の順に見る。
             # 材料が先なのは、それが「今の問い」だから: 題名は古い PR を
             # 名指したまま残ることがあるが、材料は駐機のたびに書き直る。
@@ -418,21 +495,35 @@ async def _collect_decisions(
                 str(material.get("recommendation") or ""),
                 str(thread.get("title") or ""),
             )
+            links = [pr] if pr else []
+            if ask == ASK_MISROUTE:
+                # 宛先誤りで次にやるのは宛先の付け直し ∴ スレッドそのものへ。
+                links.append(
+                    CardLink(
+                        href=f"/ui/projects/{project}/threads/{thread_id}",
+                        label="チャットルーム",
+                        title=f"{project} / {thread_id}",
+                    )
+                )
             candidates.append(
                 Card(
                     key=f"decision:{project}:{thread_id}",
                     kind="decision",
+                    ask=ask,
                     title=str(thread.get("title") or thread_id),
                     href=f"/dashboard/decisions/{project}/{thread_id}",
-                    links=[pr] if pr else [],
+                    links=links,
                     since=parse_ts(material.get("stored_at")),
-                    note=_shorten(question, _QUESTION_CHARS),
-                    note_full=question,
+                    note=_shorten(note_text, _QUESTION_CHARS),
+                    note_full=note_text,
                     project=project,
                     thread_id=thread_id,
-                    # 副題は「project · 停止理由」。判断カードの title は
-                    # スレッドの題名なので、どちらも新しい情報になる。
-                    detail=_stop_reason_label(material),
+                    # 副題は「project · 停止理由 · (protocol 違反 / 知らない
+                    # lane)」。判断カードの title はスレッドの題名なので、
+                    # どれも新しい情報になる。
+                    detail=" · ".join(
+                        p for p in (_stop_reason_label(material), ask_detail) if p
+                    ),
                     fingerprint=str(head),
                 )
             )
@@ -1289,7 +1380,7 @@ def _gone_reason(row: dict[str, Any], live: _Live) -> str:
 # --- 収集 ------------------------------------------------------------------
 
 
-def _sort_key(card: Card) -> tuple[int, float]:
+def _sort_key(card: Card) -> tuple[float, float]:
     """種別の優先、その中は**待たせている順 (古いものが上)**。
 
     新着順ではない。板の目的は腐らせないことで、8 日前から待っている項目が
@@ -1299,7 +1390,11 @@ def _sort_key(card: Card) -> tuple[int, float]:
     ``since`` を持たないカードは末尾。時刻が読めないことを「たった今」とも
     「大昔」とも解釈しない。
     """
-    kind_rank = _KIND_ORDER.get(card.kind, len(_KIND_ORDER))
+    kind_rank: float = _KIND_ORDER.get(card.kind, len(_KIND_ORDER))
+    if card.ask is not None:
+        # 判断カードは ask で段を分ける (operator 作業はマージの下、
+        # 宛先誤りは一番下)。
+        kind_rank = _ASK_ORDER.get(card.ask, kind_rank)
     age = card.since.timestamp() if card.since else float("inf")
     return (kind_rank, age)
 

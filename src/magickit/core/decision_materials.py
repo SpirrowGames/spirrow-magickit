@@ -36,6 +36,22 @@ from magickit.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+#: Columns added after the table first shipped, in the order they were
+#: added. Names are literals here (never caller input), which is what makes
+#: the f-string ``ALTER TABLE`` below safe.
+_LATE_COLUMNS = (
+    ("stop_reason", "TEXT"),
+    ("parked_lane", "TEXT"),
+    ("operator_task", "TEXT"),
+    ("protocol_violation", "INTEGER"),
+)
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    """SQLite INTEGER 0/1/NULL → ``False`` / ``True`` / ``None``."""
+    return None if value is None else bool(value)
+
+
 class DecisionMaterialStore:
     """判断材料の SQLite storage (UPSERT).
 
@@ -72,6 +88,13 @@ class DecisionMaterialStore:
         ``ADD COLUMN`` below: it runs once, costs nothing after that, and
         every row written before it reads back as ``None`` -- which is
         exactly what "we did not record a reason for this one" means.
+
+        The same guarded ``ADD COLUMN`` later carried the three parked-lane
+        columns (``parked_lane`` / ``operator_task`` / ``protocol_violation``,
+        spec §1.1 / §2.1). They follow the ``stop_reason`` precedent exactly
+        and for the same reason: rows written before them read back as
+        ``None``, and the board treats ``None`` as "判断" -- which is what
+        every card showed before the classification was sent at all.
         """
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS decision_materials (
@@ -80,6 +103,9 @@ class DecisionMaterialStore:
                 head_msg_id    TEXT NOT NULL,
                 signature      TEXT,
                 stop_reason    TEXT,
+                parked_lane    TEXT,
+                operator_task  TEXT,
+                protocol_violation INTEGER,
                 question       TEXT,
                 options_json   TEXT,
                 recommendation TEXT,
@@ -95,10 +121,11 @@ class DecisionMaterialStore:
         # also swallow a genuinely broken table.
         cursor = await conn.execute("PRAGMA table_info(decision_materials)")
         columns = {row[1] for row in await cursor.fetchall()}
-        if "stop_reason" not in columns:
-            await conn.execute(
-                "ALTER TABLE decision_materials ADD COLUMN stop_reason TEXT"
-            )
+        for name, sql_type in _LATE_COLUMNS:
+            if name not in columns:
+                await conn.execute(
+                    f"ALTER TABLE decision_materials ADD COLUMN {name} {sql_type}"
+                )
         # No index on (project, thread_id) beyond UNIQUE -- SQLite creates an
         # implicit index for UNIQUE, and that is the only lookup pattern.
         await conn.commit()
@@ -112,6 +139,9 @@ class DecisionMaterialStore:
         signature: str | None,
         question: str | None,
         stop_reason: str | None = None,
+        parked_lane: str | None = None,
+        operator_task: str | None = None,
+        protocol_violation: bool | None = None,
         options: list[dict[str, Any]] | None,
         recommendation: str | None,
         recommendation_reason: str | None,
@@ -146,9 +176,10 @@ class DecisionMaterialStore:
                 """
                 INSERT OR REPLACE INTO decision_materials (
                     project, thread_id, head_msg_id, signature, stop_reason,
+                    parked_lane, operator_task, protocol_violation,
                     question, options_json, recommendation,
                     recommendation_reason, unknowns_json, stored_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
@@ -156,6 +187,9 @@ class DecisionMaterialStore:
                     head_msg_id,
                     signature,
                     stop_reason,
+                    parked_lane,
+                    operator_task,
+                    None if protocol_violation is None else int(protocol_violation),
                     question,
                     options_json,
                     recommendation,
@@ -191,6 +225,7 @@ class DecisionMaterialStore:
             cursor = await conn.execute(
                 """
                 SELECT project, thread_id, head_msg_id, signature, stop_reason,
+                       parked_lane, operator_task, protocol_violation,
                        question, options_json, recommendation,
                        recommendation_reason, unknowns_json, stored_at
                 FROM decision_materials
@@ -209,6 +244,9 @@ class DecisionMaterialStore:
             "head_msg_id": row["head_msg_id"],
             "signature": row["signature"],
             "stop_reason": row["stop_reason"],
+            "parked_lane": row["parked_lane"],
+            "operator_task": row["operator_task"],
+            "protocol_violation": _bool_or_none(row["protocol_violation"]),
             "question": row["question"],
             "options": (
                 json.loads(row["options_json"]) if row["options_json"] else None
@@ -244,14 +282,20 @@ class DecisionMaterialStore:
             await self._create_tables(conn)
             cursor = await conn.execute(
                 """
-                SELECT project, thread_id, head_msg_id, signature, stop_reason, question,
+                SELECT project, thread_id, head_msg_id, signature, stop_reason,
+                       parked_lane, operator_task, protocol_violation, question,
                        recommendation, stored_at
                 FROM decision_materials
                 ORDER BY stored_at DESC
                 """
             )
             rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        materials = [dict(row) for row in rows]
+        for material in materials:
+            material["protocol_violation"] = _bool_or_none(
+                material["protocol_violation"]
+            )
+        return materials
 
 
 __all__ = ["DecisionMaterialStore"]

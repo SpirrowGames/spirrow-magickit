@@ -302,3 +302,69 @@ async def test_a_non_string_stop_reason_is_rejected():
     )
     assert r.status_code == 400
     assert r.json()["error_type"] == "InvalidMaterialPayload"
+
+
+# --- parked lane (spec §1.1 / §2.1.2) ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parked_lane_fields_round_trip_including_false():
+    """``false`` は欠落せず ``false`` として保存される (NULL と別物)。"""
+    thread = "T-parked-lane-round-trip"
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/{thread}/material",
+        {
+            "head_msg_id": "msg-1",
+            "parked_lane": "a_lane_magickit_never_heard_of",
+            "operator_task": "PR のブランチを消す",
+            "protocol_violation": False,
+        },
+    )
+    assert r.status_code == 200
+
+    got = (await _get(f"/v1/decisions/{PROJECT}/{thread}/material")).json()
+    assert got["parked_lane"] == "a_lane_magickit_never_heard_of"
+    assert got["operator_task"] == "PR のブランチを消す"
+    assert got["protocol_violation"] is False
+
+
+@pytest.mark.asyncio
+async def test_parked_lane_fields_are_optional():
+    """land 順序 §3: magickit が先に出ても、今の mindwire の PUT は通る。"""
+    thread = "T-parked-lane-absent"
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/{thread}/material", {"head_msg_id": "msg-1"}
+    )
+    assert r.status_code == 200
+    got = (await _get(f"/v1/decisions/{PROJECT}/{thread}/material")).json()
+    assert got["parked_lane"] is None
+    assert got["operator_task"] is None
+    assert got["protocol_violation"] is None
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "1", 1, 0, [True], {"v": True}])
+@pytest.mark.asyncio
+async def test_a_non_boolean_protocol_violation_is_rejected(value):
+    """テスト 5 (msg-1071 advisory 1): 型を強制変換しない。
+
+    ``"yes"`` を True と読むと、壊れた送り手が Tier-C カードを黙って動かせる。
+    ``1`` / ``0`` も弾く (Python では ``bool`` が ``int`` の subclass だが、
+    逆は成り立たない ∴ ``isinstance(x, bool)`` で厳密になる)。
+    """
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/T-parked-lane-bad/material",
+        {"head_msg_id": "msg-1", "protocol_violation": value},
+    )
+    assert r.status_code == 400
+    assert r.json()["error_type"] == "InvalidMaterialPayload"
+
+
+@pytest.mark.parametrize("field", ["parked_lane", "operator_task"])
+@pytest.mark.asyncio
+async def test_a_non_string_lane_field_is_rejected(field):
+    r = await _put(
+        f"/v1/decisions/{PROJECT}/T-parked-lane-bad-str/material",
+        {"head_msg_id": "msg-1", field: ["misroute"]},
+    )
+    assert r.status_code == 400
+    assert r.json()["error_type"] == "InvalidMaterialPayload"

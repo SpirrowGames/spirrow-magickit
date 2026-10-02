@@ -205,3 +205,61 @@ async def test_stop_reason_column_is_added_to_a_pre_existing_table(tmp_path):
     )
     new = await store.get_material(project="p", thread_id="T-new")
     assert new is not None and new["stop_reason"] == "human"
+
+
+@pytest.mark.asyncio
+async def test_parked_lane_columns_are_added_to_a_pre_existing_table(tmp_path):
+    """テスト 4: stop_reason までのスキーマに parked lane の 3 列が足される。
+
+    既存行は 3 列とも NULL で読み戻り (board では「判断」のまま)、新しい
+    行は値が往復する。``protocol_violation`` は 0/1 ではなく bool で戻る。
+    """
+    import aiosqlite
+
+    db = str(tmp_path / "old.db")
+    async with aiosqlite.connect(db) as conn:
+        # parked lane の列が無い、stop_reason まで入った当時のスキーマ。
+        await conn.execute("""
+            CREATE TABLE decision_materials (
+                project TEXT NOT NULL, thread_id TEXT NOT NULL,
+                head_msg_id TEXT NOT NULL, signature TEXT, stop_reason TEXT,
+                question TEXT, options_json TEXT, recommendation TEXT,
+                recommendation_reason TEXT, unknowns_json TEXT,
+                stored_at TEXT NOT NULL, UNIQUE(project, thread_id)
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO decision_materials (project, thread_id, head_msg_id,"
+            " stop_reason, stored_at)"
+            " VALUES ('p', 'T-old', 'msg-1', 'human', '2026-09-01T00:00:00Z')"
+        )
+        await conn.commit()
+
+    store = DecisionMaterialStore(db_path=db)
+
+    old = await store.get_material(project="p", thread_id="T-old")
+    assert old is not None
+    assert old["stop_reason"] == "human"
+    assert old["parked_lane"] is None
+    assert old["operator_task"] is None
+    assert old["protocol_violation"] is None
+
+    for thread_id, violation in (("T-true", True), ("T-false", False)):
+        await store.put_material(
+            project="p", thread_id=thread_id, head_msg_id="msg-2",
+            signature=None, stop_reason="human", parked_lane="operator_work",
+            operator_task="branch を消す", protocol_violation=violation,
+            question=None, options=None, recommendation=None,
+            recommendation_reason=None, unknowns=None,
+        )
+        new = await store.get_material(project="p", thread_id=thread_id)
+        assert new is not None
+        assert new["parked_lane"] == "operator_work"
+        assert new["operator_task"] == "branch を消す"
+        assert new["protocol_violation"] is violation
+
+    listed = {m["thread_id"]: m for m in await store.list_materials()}
+    assert listed["T-old"]["protocol_violation"] is None
+    assert listed["T-true"]["protocol_violation"] is True
+    assert listed["T-false"]["protocol_violation"] is False
+    assert listed["T-true"]["parked_lane"] == "operator_work"
