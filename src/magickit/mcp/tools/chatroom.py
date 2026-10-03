@@ -498,6 +498,22 @@ def _assess_naysayer_review(
     }
 
 
+def _format_approved_close_note(author: str, review_msg_id: str, reason: str) -> str:
+    """Machine-readable line keeping a human's reason on an approved close.
+
+    W-6 D-4a: a fresh APPROVE means nothing was bypassed, so the close carries
+    no ``[naysayer-gate-override]`` note. The prose the human wrote must still
+    land somewhere durable; on a non-owner force-close it rides the
+    ``[owner-override-by-human]`` note and ``owner_override_reason``, and on
+    every other approved close (the owner closing their own gated thread) it
+    lands here, in the persisted decide body.
+    """
+    return (
+        f"\n\n---\n[naysayer-approved-close] author={author} "
+        f"review={review_msg_id} reason={reason.strip()}"
+    )
+
+
 def _format_owner_override_note(author: str, thread_owner: str | None, reason: str) -> str:
     """Machine-readable line recording a human force-close of a non-owned thread.
 
@@ -614,6 +630,8 @@ async def _enforce_close_policies(
     # 2) human owner-override (force-close of a non-owned thread).
     forwarded_reason: str | None = None
     close_sanction: dict[str, str] | None = None
+    # Whether the human's prose already landed in an audit note (step 2).
+    reason_recorded = False
     if is_human:
         thread_owner = thread.get("owner")
         # Only a *confirmed* force-close (owner known and not the author)
@@ -654,6 +672,21 @@ async def _enforce_close_policies(
             elif reason.strip():
                 close_sanction = {"kind": "human_override", "reason": reason.strip()}
             content = content + _format_owner_override_note(author, thread_owner, reason)
+            reason_recorded = bool(reason.strip())
+
+    # A human's naysayer_override_reason on an approved close that step 2 did
+    # not record (the owner closing their own gated thread) would otherwise
+    # vanish: ``allow`` carries no note. Keep it in the decide body (W-6 D-4a
+    # forbids only the *override* note here, not the prose).
+    if (
+        approved_review_msg_id is not None
+        and not reason_recorded
+        and naysayer_override_reason
+        and naysayer_override_reason.strip()
+    ):
+        content = content + _format_approved_close_note(
+            author, approved_review_msg_id, naysayer_override_reason
+        )
 
     # 3) PR-gate ledger carve-out (T-pr-gate-ledger-debt msg-1001 §2). Only for
     #    a non-human closing someone else's thread — the human already has (2),
@@ -2177,7 +2210,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             naysayer_override_reason: human-only override of the naysayer
                 gate. The review is evaluated first either way: with a fresh
                 APPROVE the close is allowed as ``naysayer_approved`` and this
-                text is forwarded only as prose (no override note); without
+                text is kept only as prose (no override note: on a non-owner
+                force-close in ``owner_override_reason`` and the
+                ``[owner-override-by-human]`` note, otherwise in a
+                ``[naysayer-approved-close]`` note); without
                 one, non-empty engages the override (reason mandatory).
                 Ignored on non-gated threads. A non-human author supplying
                 it is rejected with NaysayerOverrideForbiddenError.

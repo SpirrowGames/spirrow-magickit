@@ -334,6 +334,37 @@ async def test_w6_d7_2_gated_force_close_with_a_reason_is_still_naysayer_approve
     }
     assert kwargs["owner_override_reason"] == "closing on the naysayer's approval"
     assert "[naysayer-gate-override]" not in kwargs["summary_content"]
+    # The prose is recorded once, by the owner-override note -- not twice.
+    assert "[naysayer-approved-close]" not in kwargs["summary_content"]
+
+
+@pytest.mark.asyncio
+async def test_w6_owner_close_with_fresh_approve_keeps_the_reason(
+    settings: Settings,
+) -> None:
+    """PR-gate objection on #103 @414f4c1: an owner closing their own gated
+    thread with a fresh APPROVE and a naysayer_override_reason must not lose
+    the reason. D-4a still forbids the override note (nothing was bypassed),
+    so the prose lands in a ``[naysayer-approved-close]`` note. No sanction is
+    sent: an owner close is not a force-close."""
+    tools = _capture_tools(settings)
+    adapter = _adapter(owner="human", tags=[GATE_TAG], messages=_APPROVED_THREAD)
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter),          patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()):
+        result = await tools["chatroom_close_thread"](
+            project="p",
+            thread_id="T-pr-review-143",
+            summary_content="done",
+            author="human",
+            naysayer_override_reason="approved; shipping",
+        )
+
+    assert "error_type" not in result
+    kwargs = adapter.close_thread.await_args.kwargs
+    body = kwargs["summary_content"]
+    assert "[naysayer-gate-override]" not in body
+    assert "[naysayer-approved-close] author=human review=msg-002 reason=approved; shipping" in body
+    assert "[owner-override-by-human]" not in body
+    assert kwargs["close_sanction"] is None
 
 
 @pytest.mark.asyncio
