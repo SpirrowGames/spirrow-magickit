@@ -693,10 +693,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 resolution.  ``[]`` means "no blockers" and clears the stored
                 ones.  An element that is ``""`` or whitespace only is
                 rejected as an error before anything is written.  Omitting
-                the argument is a schema error: an optional ``blockers``
-                silently kept the old value when left out, which is the
-                msg-059 symptom (chatroom T-checkpoint-silent-partial-write
-                msg-1188 §2 D3d-2).
+                the argument is an error too, so stale blockers are never
+                kept by accident.
             save_insights: If True, extract and save session insights as knowledge.
             user: User identifier for multi-user support (empty for default user).
             author: Context author/role partition to hand off. The next session
@@ -707,7 +705,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             Dict containing:
             - success: ``True`` only when the downstream session store
               confirmed persistence (``persisted is True``).  Insight
-              failures do not flip it (msg-1188 §2 D3d-1).
+              failures do not flip it.
             - session_duration: Duration of the session (if available)
             - summary: Final session summary
             - saved_to: Storage locations that actually persisted.
@@ -722,9 +720,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         if _settings is None:
             raise RuntimeError("Settings not initialized")
 
-        # D3d-2 (msg-1188 §2 / msg-1190 §3): reject a broken blockers list
-        # loudly, before any I/O.  An absent blockers is already a schema
-        # error (the parameter has no default).
+        # D3d-2 (chatroom T-checkpoint-silent-partial-write msg-1188 §2 /
+        # msg-1190 §3): ``blockers`` is required because an optional one
+        # silently kept the old value when left out -- the msg-059 symptom.
+        # Reject a broken list loudly, before any I/O.  An absent blockers
+        # is already a schema error (the parameter has no default).
+        # D3d-1 (msg-1188 §2): ``success`` follows ``persisted`` only; the
+        # tracker notes live here, not in the docstring, because FastMCP
+        # ships the docstring to the calling agent (PR #104 gate advisory).
         _validate_blockers(blockers, tool="handoff")
 
         # Auto-detect user if not specified
