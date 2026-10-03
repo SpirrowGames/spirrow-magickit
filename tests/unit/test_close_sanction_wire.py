@@ -367,6 +367,39 @@ async def test_w6_gated_force_close_without_fresh_approve_stays_human_override(
 
 
 @pytest.mark.asyncio
+async def test_w6_d2b_iii_role_less_latest_approve_with_a_reason_is_human_override(
+    settings: Settings,
+) -> None:
+    """D-2b-iii (msg-1162): human + reason + latest APPROVE without the
+    naysayer role -> override, human_override; naysayer_approved is not
+    claimed and the earlier role-carrying APPROVE is not fallen back to."""
+    tools = _capture_tools(settings)
+    adapter = _adapter(
+        owner="Bohr",
+        tags=[GATE_TAG],
+        messages=[
+            _APPROVED_THREAD[0],
+            {"msg_id": "msg-002", "author": "Einstein", "type": "report",
+             "content": "", "tags": ["verdict:approve"], "role": "naysayer"},
+            {"msg_id": "msg-003", "author": "Einstein", "type": "report",
+             "content": "", "tags": ["verdict:approve"], "role": None},
+        ],
+    )
+    with patch.object(chatroom_tools, "_adapter", return_value=adapter),          patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()):
+        await tools["chatroom_close_thread"](
+            project="p",
+            thread_id="T-pr-review-143",
+            summary_content="force",
+            author="human",
+            naysayer_override_reason="ship and follow up",
+        )
+
+    kwargs = adapter.close_thread.await_args.kwargs
+    assert kwargs["close_sanction"] == {"kind": "human_override", "reason": "ship and follow up"}
+    assert "[naysayer-gate-override]" in kwargs["summary_content"]
+
+
+@pytest.mark.asyncio
 async def test_w6_d5_tag_without_an_enabled_gate_does_not_exempt_the_reason() -> None:
     """W-6 D-5 (W-6a): the tag alone no longer justifies an empty reason.
 

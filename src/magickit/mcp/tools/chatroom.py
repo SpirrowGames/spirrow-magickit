@@ -284,32 +284,30 @@ def _parse_msg_verdict(msg: dict[str, Any]) -> str | None:
     return None
 
 
-# The persisted role a naysayer verdict must carry to count as a review. Must
-# equal the role Conclair checks for kind="naysayer_approved" (W-6 D-2a/D-2b).
+# The persisted role the latest naysayer APPROVE must carry to authorize an
+# ``allow``. Must equal the role Conclair checks for kind="naysayer_approved"
+# (W-6 D-2a/D-2b-ii). Not used to find the latest verdict (D-2b-i).
 NAYSAYER_ROLE = "naysayer"
 
 
 def _latest_naysayer_review(
     messages: list[dict[str, Any]], naysayer_identities: tuple[str, ...]
 ) -> tuple[int, dict[str, Any], str] | None:
-    """Return (index, msg, verdict) of the latest reviewable naysayer msg.
+    """Return (index, msg, verdict) of the latest naysayer verdict msg.
 
-    A reviewable message is authored by an identity in ``naysayer_identities``
-    *and* persists ``role == "naysayer"`` *and* carries a parseable verdict.
-    None when no such message exists. Messages are assumed to be in
-    chronological (msg_id) order.
+    The latest message authored by an identity in ``naysayer_identities`` that
+    carries a parseable verdict; None when there is none. Messages are assumed
+    to be in chronological (msg_id) order.
 
-    The role clause (W-6 D-2b) makes this predicate a superset of the check
-    Conclair runs when it records ``kind="naysayer_approved"``: Conclair
-    refuses a ``review_msg_id`` whose persisted role is not ``naysayer``
-    (D-2a), and it checks only the role because it does not know the naysayer
-    identities. Were the gate to accept a message Conclair would refuse, an
-    ``allow`` here would become a 422 on the write and every gated close
-    would stop. The verdict, by contrast, is judged only here.
+    The persisted role is deliberately NOT part of this search (W-6 D-2b-i,
+    msg-1162): a later verdict must always shadow an earlier one, so a
+    role-less REQUEST_CHANGES still invalidates a prior APPROVE. The role is
+    checked only when the latest verdict would authorize an ``allow`` (D-2b-ii,
+    in :func:`_assess_naysayer_review`).
     """
     found: tuple[int, dict[str, Any], str] | None = None
     for idx, msg in enumerate(messages):
-        if msg.get("author") in naysayer_identities and msg.get("role") == NAYSAYER_ROLE:
+        if msg.get("author") in naysayer_identities:
             verdict = _parse_msg_verdict(msg)
             if verdict is not None:
                 found = (idx, msg, verdict)
@@ -462,6 +460,27 @@ def _assess_naysayer_review(
         }
 
     if verdict == _VERDICT_APPROVE:
+        # W-6 D-2b-ii/iii: an APPROVE authorizes ``allow`` only when the msg
+        # persists role == "naysayer" -- the same predicate Conclair checks on
+        # a kind="naysayer_approved" review_msg_id (D-2a), so an ``allow``
+        # here can never become a 422 on the write. A role-less latest
+        # APPROVE does not fall back to an earlier role-carrying one: the
+        # latest verdict decides.
+        if review_msg.get("role") != NAYSAYER_ROLE:
+            return {
+                "action": "block",
+                "envelope": _gate_error(
+                    "NaysayerReviewRequiredError",
+                    f"the latest naysayer verdict ({review_msg.get('msg_id')}) "
+                    f"is an APPROVE but does not carry role={NAYSAYER_ROLE!r} "
+                    f"(role={review_msg.get('role')!r}), so it cannot sanction "
+                    "the close. Have the naysayer re-post the review with its "
+                    "role, or pass naysayer_override_reason as a human identity.",
+                    gate_tag=gate_tag,
+                    review_msg_id=review_msg.get("msg_id"),
+                    naysayer_identities=list(naysayer_identities),
+                ),
+            }
         return {"action": "allow", "gated": True, "review_msg_id": review_msg.get("msg_id")}
 
     # Fresh review exists but requested changes.

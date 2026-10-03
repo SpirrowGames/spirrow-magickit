@@ -247,8 +247,9 @@ def test_d2b_naysayer_role_from_a_non_naysayer_identity_is_not_a_review() -> Non
     assert out["envelope"]["error_type"] == "NaysayerReviewRequiredError"
 
 
-def test_d2b_role_less_verdict_does_not_mask_an_earlier_valid_review() -> None:
-    """A later role-less naysayer msg is skipped, not treated as the latest."""
+def test_d2b_role_less_request_changes_still_shadows_an_earlier_approve() -> None:
+    """D-2b-i (msg-1162): the search ignores role, so a later role-less
+    REQUEST_CHANGES invalidates an earlier role-carrying APPROVE."""
     out = _assess(
         tags=[GATE_TAG],
         messages=[
@@ -258,7 +259,42 @@ def test_d2b_role_less_verdict_does_not_mask_an_earlier_valid_review() -> None:
                  role=None),
         ],
     )
-    assert out == {"action": "allow", "gated": True, "review_msg_id": "msg-002"}
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerChangesRequestedError"
+    assert out["envelope"]["details"]["review_msg_id"] == "msg-003"
+
+
+def test_d2b_role_less_latest_approve_does_not_fall_back_to_an_earlier_one() -> None:
+    """D-2b-iii: a role-less latest APPROVE blocks; it does not fall back to
+    the earlier role-carrying APPROVE."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+            _msg("msg-003", "Einstein", "report", tags=["verdict:approve"], role=None),
+        ],
+    )
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerReviewRequiredError"
+    assert out["envelope"]["details"]["review_msg_id"] == "msg-003"
+
+
+def test_d2b_human_reason_with_role_less_latest_approve_is_override() -> None:
+    """D-2b-iii: on the human-with-reason path a role-less latest APPROVE is
+    not a confirmed APPROVE, so the reason engages the override."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+            _msg("msg-003", "Einstein", "report", tags=["verdict:approve"], role=None),
+        ],
+        author="human",
+        override_reason="ship it",
+    )
+    assert out["action"] == "override"
+    assert "review_msg_id" not in out
 
 
 def test_override_by_non_human_is_rejected() -> None:
