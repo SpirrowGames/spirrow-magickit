@@ -284,14 +284,26 @@ def _parse_msg_verdict(msg: dict[str, Any]) -> str | None:
     return None
 
 
+# The persisted role the latest naysayer APPROVE must carry to authorize an
+# ``allow``. Must equal the role Conclair checks for kind="naysayer_approved"
+# (W-6 D-2a/D-2b-ii). Not used to find the latest verdict (D-2b-i).
+NAYSAYER_ROLE = "naysayer"
+
+
 def _latest_naysayer_review(
     messages: list[dict[str, Any]], naysayer_identities: tuple[str, ...]
 ) -> tuple[int, dict[str, Any], str] | None:
-    """Return (index, msg, verdict) of the latest reviewable naysayer msg.
+    """Return (index, msg, verdict) of the latest naysayer verdict msg.
 
-    A reviewable message is authored by an identity in ``naysayer_identities``
-    *and* carries a parseable verdict. None when no such message exists.
-    Messages are assumed to be in chronological (msg_id) order.
+    The latest message authored by an identity in ``naysayer_identities`` that
+    carries a parseable verdict; None when there is none. Messages are assumed
+    to be in chronological (msg_id) order.
+
+    The persisted role is deliberately NOT part of this search (W-6 D-2b-i,
+    msg-1162): a later verdict must always shadow an earlier one, so a
+    role-less REQUEST_CHANGES still invalidates a prior APPROVE. The role is
+    checked only when the latest verdict would authorize an ``allow`` (D-2b-ii,
+    in :func:`_assess_naysayer_review`).
     """
     found: tuple[int, dict[str, Any], str] | None = None
     for idx, msg in enumerate(messages):
@@ -355,16 +367,25 @@ def _assess_naysayer_gate(
     """Pure decision for the naysayer gate on a close/decide.
 
     Returns one of:
-    - ``{"action": "allow", "gated": bool, ...}`` — proceed unchanged.
+    - ``{"action": "allow", "gated": bool, ...}`` — proceed unchanged. When
+      ``gated`` is True the dict also carries ``review_msg_id``: the fresh
+      APPROVE that justified the close.
     - ``{"action": "override", "note": str}`` — human override engaged;
       caller appends ``note`` to the decide body, then proceeds.
     - ``{"action": "block", "envelope": {...}}`` — return the error envelope.
+
+    A human's override reason no longer short-circuits the review (W-6 D-4a).
+    The review is evaluated first; a fresh APPROVE yields ``allow`` with no
+    ``[naysayer-gate-override]`` note, because nothing was bypassed. Only when
+    there is no fresh APPROVE does the reason engage the override, so whether
+    prose was written no longer decides which evidence is looked at.
     """
     if gate_tag not in (thread.get("tags") or []):
         return {"action": "allow", "gated": False}
 
-    # Gated thread. A human override short-circuits the review requirement
-    # but must come from a human identity and carry a reason.
+    # Gated thread. An override must come from a human identity and carry a
+    # reason; a non-human passing one is refused first, as before (an agent
+    # cannot self-override, even when a review would pass).
     if override_reason and override_reason.strip():
         if author not in human_identities:
             return {
@@ -378,8 +399,32 @@ def _assess_naysayer_gate(
                     human_identities=list(human_identities),
                 ),
             }
+        assessed = _assess_naysayer_review(
+            messages=messages, naysayer_identities=naysayer_identities,
+            gate_tag=gate_tag, human_identities=human_identities,
+        )
+        if assessed["action"] == "allow":
+            return assessed
         return {"action": "override", "note": _format_override_note(author, override_reason)}
 
+    return _assess_naysayer_review(
+        messages=messages, naysayer_identities=naysayer_identities,
+        gate_tag=gate_tag, human_identities=human_identities,
+    )
+
+
+def _assess_naysayer_review(
+    *,
+    messages: list[dict[str, Any]],
+    naysayer_identities: tuple[str, ...],
+    gate_tag: str,
+    human_identities: tuple[str, ...],
+) -> dict[str, Any]:
+    """The review half of the gate: ``allow`` on a fresh APPROVE, else ``block``.
+
+    Split out so the override path (D-4a) runs exactly the same evaluation as
+    the no-override path rather than a second copy of it.
+    """
     review = _latest_naysayer_review(messages, naysayer_identities)
     if review is None:
         return {
@@ -415,6 +460,27 @@ def _assess_naysayer_gate(
         }
 
     if verdict == _VERDICT_APPROVE:
+        # W-6 D-2b-ii/iii: an APPROVE authorizes ``allow`` only when the msg
+        # persists role == "naysayer" -- the same predicate Conclair checks on
+        # a kind="naysayer_approved" review_msg_id (D-2a), so an ``allow``
+        # here can never become a 422 on the write. A role-less latest
+        # APPROVE does not fall back to an earlier role-carrying one: the
+        # latest verdict decides.
+        if review_msg.get("role") != NAYSAYER_ROLE:
+            return {
+                "action": "block",
+                "envelope": _gate_error(
+                    "NaysayerReviewRequiredError",
+                    f"the latest naysayer verdict ({review_msg.get('msg_id')}) "
+                    f"is an APPROVE but does not carry role={NAYSAYER_ROLE!r} "
+                    f"(role={review_msg.get('role')!r}), so it cannot sanction "
+                    "the close. Have the naysayer re-post the review with its "
+                    "role, or pass naysayer_override_reason as a human identity.",
+                    gate_tag=gate_tag,
+                    review_msg_id=review_msg.get("msg_id"),
+                    naysayer_identities=list(naysayer_identities),
+                ),
+            }
         return {"action": "allow", "gated": True, "review_msg_id": review_msg.get("msg_id")}
 
     # Fresh review exists but requested changes.
@@ -430,6 +496,22 @@ def _assess_naysayer_gate(
             verdict=verdict,
         ),
     }
+
+
+def _format_approved_close_note(author: str, review_msg_id: str, reason: str) -> str:
+    """Machine-readable line keeping a human's reason on an approved close.
+
+    W-6 D-4a: a fresh APPROVE means nothing was bypassed, so the close carries
+    no ``[naysayer-gate-override]`` note. The prose the human wrote must still
+    land somewhere durable; on a non-owner force-close it rides the
+    ``[owner-override-by-human]`` note and ``owner_override_reason``, and on
+    every other approved close (the owner closing their own gated thread) it
+    lands here, in the persisted decide body.
+    """
+    return (
+        f"\n\n---\n[naysayer-approved-close] author={author} "
+        f"review={review_msg_id} reason={reason.strip()}"
+    )
 
 
 def _format_owner_override_note(author: str, thread_owner: str | None, reason: str) -> str:
@@ -523,6 +605,11 @@ async def _enforce_close_policies(
     messages = view.get("messages") or []
     gate_tag = _settings.naysayer_gate_tag
     gated = gate_tag in (thread.get("tags") or [])
+    # The fresh APPROVE the gate confirmed, if it confirmed one. This -- not
+    # the tag -- is what exempts a human force-close from needing a reason
+    # (W-6 D-5) and what the close records as its sanction (D-4b). It stays
+    # None when the gate is disabled, so a tag alone never justifies a close.
+    approved_review_msg_id: str | None = None
 
     # 1) naysayer gate (ownership-independent; runs first so owner bypass
     #    never doubles as a gate bypass).
@@ -537,10 +624,14 @@ async def _enforce_close_policies(
             return {"action": "block", "envelope": gate["envelope"]}
         if gate["action"] == "override":
             content = content + gate["note"]
+        if gate["action"] == "allow" and gate.get("gated") and gate.get("review_msg_id"):
+            approved_review_msg_id = str(gate["review_msg_id"])
 
     # 2) human owner-override (force-close of a non-owned thread).
     forwarded_reason: str | None = None
     close_sanction: dict[str, str] | None = None
+    # Whether the human's prose already landed in an audit note (step 2).
+    reason_recorded = False
     if is_human:
         thread_owner = thread.get("owner")
         # Only a *confirmed* force-close (owner known and not the author)
@@ -549,7 +640,11 @@ async def _enforce_close_policies(
             # gated force-close reuses the naysayer override reason (D-5);
             # a non-gated force-close requires its own reason.
             reason = (naysayer_override_reason if gated else owner_override_reason) or ""
-            if not gated and not reason.strip():
+            # Exempt from a reason only when the gate actually confirmed a
+            # fresh APPROVE (D-5). Keying this on the tag let a deployment with
+            # the gate disabled pass an empty-reason force-close that no review
+            # had ever justified.
+            if approved_review_msg_id is None and not reason.strip():
                 return {
                     "action": "block",
                     "envelope": _gate_error(
@@ -560,14 +655,38 @@ async def _enforce_close_policies(
                     ),
                 }
             forwarded_reason = reason or None
-            # kind='human_override' requires a non-empty reason on the wire,
-            # and Conclair strips before validating. The gated branch above
-            # accepts an empty reason (a fresh APPROVE already justified the
-            # close), so a blank one is reachable and must claim nothing rather
-            # than assert a human_override the wire would refuse with 422.
-            if reason.strip():
+            # The sanction is the strongest evidence confirmed, not whether
+            # prose was written (D-4b). A confirmed fresh APPROVE records
+            # kind='naysayer_approved' with the review's msg_id -- re-derivable
+            # from the thread, the same shape as pr_gate_ledger -- and any
+            # prose rides the sibling owner_override_reason field, because the
+            # wire refuses a `reason` inside this kind. Without an APPROVE the
+            # reason is non-empty here (the blank case was blocked above), so
+            # it is a human_override. No human force-close claims nothing any
+            # more, which is what lets `unclassified_override` mean "defect".
+            if approved_review_msg_id is not None:
+                close_sanction = {
+                    "kind": "naysayer_approved",
+                    "review_msg_id": approved_review_msg_id,
+                }
+            elif reason.strip():
                 close_sanction = {"kind": "human_override", "reason": reason.strip()}
             content = content + _format_owner_override_note(author, thread_owner, reason)
+            reason_recorded = bool(reason.strip())
+
+    # A human's naysayer_override_reason on an approved close that step 2 did
+    # not record (the owner closing their own gated thread) would otherwise
+    # vanish: ``allow`` carries no note. Keep it in the decide body (W-6 D-4a
+    # forbids only the *override* note here, not the prose).
+    if (
+        approved_review_msg_id is not None
+        and not reason_recorded
+        and naysayer_override_reason
+        and naysayer_override_reason.strip()
+    ):
+        content = content + _format_approved_close_note(
+            author, approved_review_msg_id, naysayer_override_reason
+        )
 
     # 3) PR-gate ledger carve-out (T-pr-gate-ledger-debt msg-1001 §2). Only for
     #    a non-human closing someone else's thread — the human already has (2),
@@ -2089,13 +2208,21 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 with ``RoleNotAllowed``, and an unregistered author's
                 unvalidated role is recorded as null rather than as given.
             naysayer_override_reason: human-only override of the naysayer
-                gate. Non-empty engages the override (reason mandatory);
-                ignored on non-gated threads. A non-human author supplying
+                gate. The review is evaluated first either way: with a fresh
+                APPROVE the close is allowed as ``naysayer_approved`` and this
+                text is kept only as prose (no override note: on a non-owner
+                force-close in ``owner_override_reason`` and the
+                ``[owner-override-by-human]`` note, otherwise in a
+                ``[naysayer-approved-close]`` note); without
+                one, non-empty engages the override (reason mandatory).
+                Ignored on non-gated threads. A non-human author supplying
                 it is rejected with NaysayerOverrideForbiddenError.
             owner_override_reason: reason for a human Tier-C force-close of a
                 NON-owned thread (ADR-2026-06-04-19 D-5). Required when a
-                human closes a thread they do not own and it is NOT gated
-                (gated force-close reuses naysayer_override_reason). Recorded
+                human closes a thread they do not own, unless the naysayer
+                gate confirmed a fresh APPROVE (gated force-close reuses
+                naysayer_override_reason; a gated tag with the gate disabled
+                does not exempt the reason). Recorded
                 in the decide msg + Conclair audit event. Has no effect for
                 non-human authors — their only route past ownership is the
                 PR-gate ledger carve-out, which supplies its own machine-
