@@ -199,6 +199,31 @@ async def _begin_task_impl(
     return response
 
 
+def _validate_blockers(blockers: list[str], *, tool: str) -> None:
+    """Reject a ``blockers`` list that carries an empty / whitespace element.
+
+    Shared by ``checkpoint`` (D2a-2) and ``handoff`` (D3d-2, chatroom
+    T-checkpoint-silent-partial-write msg-1188 §2 / msg-1190 §3), so the
+    two tools cannot drift apart on what a broken ``blockers`` is.  ``[]``
+    is "no blockers" and passes.
+
+    The message starts ``<tool> rejected:`` and ends ``Nothing was
+    written.``: that pair is the marker the CLAUDE.md ``-REACT``
+    clarification (msg-1190 §2 (b)) tells agents they may fix-and-resend
+    on.  The rejection therefore MUST happen before any I/O; tests pin both
+    the marker and the "nothing was called" half.
+    """
+    bad = [
+        i for i, b in enumerate(blockers) if not isinstance(b, str) or not b.strip()
+    ]
+    if bad:
+        raise ToolError(
+            f"{tool} rejected: blockers contains empty or whitespace-only "
+            f"element(s) at index {bad}. Send [] for no blockers. "
+            "Nothing was written."
+        )
+
+
 def _validate_checkpoint_required_fields(
     next_action: str | None, blockers: list[str]
 ) -> None:
@@ -218,21 +243,16 @@ def _validate_checkpoint_required_fields(
       not a string, or is empty / whitespace only, is rejected: ``[""]``
       used to overwrite the stored blockers with garbage while returning
       success (msg-1055 extra variant, msg-1063 §1).
+
+    Every message carries the ``checkpoint rejected: ... Nothing was
+    written.`` marker (msg-1190 §2 (b)); see :func:`_validate_blockers`.
     """
     if next_action is not None and not next_action.strip():
         raise ToolError(
             "checkpoint rejected: next_action is empty or whitespace only. "
             "Send the next action, or null to clear it. Nothing was written."
         )
-    bad = [
-        i for i, b in enumerate(blockers) if not isinstance(b, str) or not b.strip()
-    ]
-    if bad:
-        raise ToolError(
-            "checkpoint rejected: blockers contains empty or whitespace-only "
-            f"element(s) at index {bad}. Send [] for no blockers. "
-            "Nothing was written."
-        )
+    _validate_blockers(blockers, tool="checkpoint")
 
 
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
@@ -644,10 +664,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
     @mcp.tool()
     async def handoff(
         next_action: str,
+        blockers: list[str],
         project: str = "",
         summary: str = "",
         notes: str = "",
-        blockers: list[str] | None = None,
         save_insights: bool = True,
         user: str = "",
         author: str = "",
@@ -669,7 +689,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             project: Project identifier for saving insights and session state.
             summary: Summary of work done in this session.
             notes: Additional notes or context to pass to the next session.
-            blockers: List of blockers that need resolution.
+            blockers: REQUIRED, no default.  List of blockers that need
+                resolution.  ``[]`` means "no blockers" and clears the stored
+                ones.  An element that is ``""`` or whitespace only is
+                rejected as an error before anything is written.  Omitting
+                the argument is a schema error: an optional ``blockers``
+                silently kept the old value when left out, which is the
+                msg-059 symptom (chatroom T-checkpoint-silent-partial-write
+                msg-1188 §2 D3d-2).
             save_insights: If True, extract and save session insights as knowledge.
             user: User identifier for multi-user support (empty for default user).
             author: Context author/role partition to hand off. The next session
@@ -678,15 +705,27 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Returns:
             Dict containing:
-            - success: Whether the handoff was completed
+            - success: ``True`` only when the downstream session store
+              confirmed persistence (``persisted is True``).  Insight
+              failures do not flip it (msg-1188 §2 D3d-1).
             - session_duration: Duration of the session (if available)
             - summary: Final session summary
-            - saved_to: List of storage locations used
+            - saved_to: Storage locations that actually persisted.
+              ``"session"`` appears only when ``persisted`` is ``True``.
             - insights_saved: Number of insight entries created
-            - message: Status message
+            - message: Status message; spells apart "store answered empty"
+              from "store did not answer".
+            - persisted: ``True`` if the downstream response reported a
+              non-empty ``saved_to``, ``False`` if it reported an empty one,
+              ``None`` if it did not report one (or ``end_session`` raised).
         """
         if _settings is None:
             raise RuntimeError("Settings not initialized")
+
+        # D3d-2 (msg-1188 §2 / msg-1190 §3): reject a broken blockers list
+        # loudly, before any I/O.  An absent blockers is already a schema
+        # error (the parameter has no default).
+        _validate_blockers(blockers, tool="handoff")
 
         # Auto-detect user if not specified
         effective_user = user or get_current_user()
@@ -734,8 +773,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             }
             if summary:
                 end_args["summary"] = summary
-            if blockers:
-                end_args["blockers"] = blockers
+            # D3d-2: always forwarded, ``[]`` included -- ``[]`` is the
+            # explicit "no blockers" clear and must reach the store.
+            end_args["blockers"] = blockers
             if project:
                 end_args["project"] = project
             end_args["user"] = effective_user
@@ -744,8 +784,6 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
             session_result = await prismind.end_session(**end_args)
             session_data = _parse_result(session_result)
-            saved_to.append("session")
-            logger.info("Session ended", project=project)
         except Exception as e:
             logger.error("Failed to end session", error=str(e))
             return {
@@ -755,7 +793,31 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "saved_to": saved_to,
                 "insights_saved": 0,
                 "message": f"Failed to end session: {e}",
+                "persisted": None,
             }
+
+        # D3d-1 (msg-1188 §2): the checkpoint D1 receipt (msg-264 §5 R1-R3)
+        # on handoff.  Transcribe the downstream ``saved_to`` instead of
+        # synthesising "session" from "no exception was raised": Prismind's
+        # end_session answers success even when its Memory save failed, and
+        # then reports ``saved_to=[]`` (msg-1188 §1).  As in checkpoint
+        # (R6), only non-emptiness is read, never the element names.
+        downstream_saved_to = session_data.get("saved_to")
+        persisted: bool | None
+        if isinstance(downstream_saved_to, list):
+            persisted = len(downstream_saved_to) > 0
+        else:
+            persisted = None
+
+        if persisted is True:
+            saved_to.append("session")
+            logger.info("Session ended", project=project)
+        elif persisted is False:
+            logger.warning("end_session returned an empty saved_to", project=project)
+        else:
+            logger.warning(
+                "end_session response did not include saved_to", project=project
+            )
 
         # Step 3: Extract and save insights if requested
         if save_insights and notes:
@@ -806,13 +868,29 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             session_duration = session_data.get("duration", "")
             summary = session_data.get("summary", f"Next: {next_action}")
 
+        # D3d-1 / R3: fail-closed on session persistence.  Insights write to
+        # a separate store, so they neither set nor depend on ``success``.
+        if persisted is True:
+            message = "Handoff completed successfully"
+        elif persisted is False:
+            message = (
+                "Handoff not saved: downstream session store answered "
+                "with an empty saved_to (nothing was persisted)."
+            )
+        else:
+            message = (
+                "Handoff not saved: downstream session store did not "
+                "confirm persistence (saved_to missing from response)."
+            )
+
         return {
-            "success": True,
+            "success": persisted is True,
             "session_duration": session_duration,
             "summary": summary or f"Session ended. Next action: {next_action}",
             "saved_to": saved_to,
             "insights_saved": insights_saved,
-            "message": "Handoff completed successfully",
+            "message": message,
+            "persisted": persisted,
         }
 
     @mcp.tool()

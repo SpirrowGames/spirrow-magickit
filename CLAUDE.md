@@ -139,6 +139,39 @@ UTID は `{project_uid}:{phase_slug}:{local_task_id}` (例 `1AbC2dEf3GhI:phase2:
 クリアは応答の `fields_cleared` に、書き込みは `fields_written` に出る。
 `current_phase` / `current_task` / `embodiment` は従来どおり任意で、**省略 = 保存値を維持**が契約。
 
+`handoff` の `blockers` も同じく **必須・既定値なし** (D3d-2, msg-1188 §2):
+
+| 渡し方 | 意味 |
+|---|---|
+| `handoff` の `blockers` を省略 | スキーマ `isError`。何も書かれない |
+| `blockers=["..."]` | 書き込み |
+| `blockers=[]` | blocker なし (保存済みの blockers をクリア) |
+| `blockers` に `""` / 空白のみの要素 | `isError` (`handoff rejected: ... Nothing was written.`)。何も書かれない |
+
+`handoff` も `checkpoint` と同じ受領証を返す (D3d-1): `persisted` (`true` / `false` / `null`) と、
+`success = (persisted が true)`。`saved_to` の `"session"` は `persisted: true` のときだけ入る。
+
+#### `checkpoint` / `handoff` が失敗を返したとき — (G2)-NORM-C-REACT
+
+*(規範本文 = chatroom T-checkpoint-silent-partial-write msg-517 §5 の逐語。変えたのは適用範囲の行に `handoff` を足したことだけ (msg-1188 §2)。置き場所 = msg-1108 §3)*
+
+> **(G2)-NORM-C-REACT（checkpoint。エージェント宛・無条件）**
+>
+> `checkpoint` **および `handoff`** が `success: false` を返した場合、または `persisted: false` を返した場合:
+>
+> 1. **引き渡しを行わない。** 次ロールを指名しない。
+> 2. **再試行しない。** 同一内容の再送を含む。
+> 3. **報告する。** 何を書こうとして書けなかったか（`fields_written` / `fields_skipped` / `saved_to`）を人に渡す。
+> 4. **stale な状態から作業を継続しない。** 直前の `resume` で得た文脈は、この時点で「次ロールに引き渡せない文脈」である。
+
+**-SEQ の前提 (msg-517 §5 `(G2)-NORM-C-SEQ`)**: -REACT の第 1 項は、checkpoint が引き渡しをまだ取り消せる位置で呼ばれることを前提とする。
+G1-static ではコードの caller は無く (msg-1108 §3)、caller は MCP 経由のエージェントで、`NEXT:` 行を checkpoint / handoff の後に書く ∴ 引き渡しはまだ取り消せる位置にあり、前提は成り立つ。
+
+**`isError` の扱い (msg-1190 §2)**: -REACT が発火せず、入力を直して再送してよいのは、**次の 2 つの場合だけ**である。
+(a) 欠けたフィールドまたは型違いを名指しするスキーマ検証エラー。
+(b) メッセージが `checkpoint rejected:` / `handoff rejected:` で始まり、`Nothing was written.` を含む `isError`。
+**それ以外の `isError` (実行時・ネットワーク・想定外の例外を含む) は「何かが書かれたかどうか不明」とみなし、`success: false` と同じく扱う: -REACT の 1–4 に従う。再試行しない。**
+
 ## identity と role / embodiment 検証の所在
 
 *(ADR-2026-05-27-09 + ADR-2026-05-29-12 / T-magickit-identity-extension)*

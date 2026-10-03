@@ -726,7 +726,10 @@ class PrismindAdapter(MCPBaseAdapter):
         Args:
             summary: Work summary for this session
             next_action: Recommended next action for next session
-            blockers: List of blockers
+            blockers: List of blockers.  ``None`` (the default) means "not
+                provided".  Any list -- ``[]`` included -- is sent, so ``[]``
+                reaches the store as "no blockers" instead of being dropped
+                (chatroom T-checkpoint-silent-partial-write msg-1188 §2 D3d-2).
             notes: Notes to pass to next session
             project: Project ID (uses current if empty)
             user: User identifier for multi-user support
@@ -741,7 +744,7 @@ class PrismindAdapter(MCPBaseAdapter):
             arguments["summary"] = summary
         if next_action:
             arguments["next_action"] = next_action
-        if blockers:
+        if blockers is not None:
             arguments["blockers"] = blockers
         if notes:
             arguments["notes"] = notes
