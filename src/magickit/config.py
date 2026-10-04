@@ -205,6 +205,11 @@ class Settings(BaseSettings):
     # and 0 would have every open tab re-render back to back.
     board_ui_poll_seconds: int = Field(default=20, ge=1)
     board_pr_refresh_seconds: int = Field(default=300)
+    # マージ lane on the board. Off by default (Takahito 2026-10-04): a merge into a protected
+    # branch is requested by opening the PR and is carried by the PR list (`/dashboard/prs`),
+    # so it is not a to-do item. Same rule as mindwire msg-4361 ("main へのマージは判断点から
+    # 外す"). The lane code stays; ``board.merge_lane: true`` turns it back on.
+    board_merge_lane_enabled: bool = Field(default=False)
 
     # PR 一覧 (`/dashboard/prs`) — every open PR in the org, not the
     # board's allowlist. Two tables: gate 済 (the next click is merge) and
@@ -558,6 +563,8 @@ class Settings(BaseSettings):
                 flat_config["board_pr_refresh_seconds"] = board.get(
                     "pr_refresh_seconds"
                 )
+            if "merge_lane" in board:
+                flat_config["board_merge_lane_enabled"] = board.get("merge_lane")
 
         # PR 一覧 settings. ``exclude_repos: []`` is a real answer (hide
         # nothing), so read the key rather than truth-testing the value.
