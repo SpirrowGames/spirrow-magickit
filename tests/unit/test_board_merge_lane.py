@@ -58,7 +58,10 @@ def _isolated_pr_watch_state(monkeypatch):
 
 
 def _settings(db_path: str, *, repos=("O/R",)) -> Settings:
-    return Settings(db_path=db_path, board_pr_repo_allowlist=list(repos))
+    # The lane is off by default (the PR list carries merge waits); these tests exercise it.
+    return Settings(
+        db_path=db_path, board_pr_repo_allowlist=list(repos), board_merge_lane_enabled=True
+    )
 
 
 def _snapshot(
@@ -927,6 +930,7 @@ async def test_zero_refresh_seconds_reads_every_render(
         db_path=temp_db_path,
         board_pr_repo_allowlist=["O/R"],
         board_pr_refresh_seconds=0,
+        board_merge_lane_enabled=True,
     )
 
     await _collect(_Adapter(), settings)
@@ -971,3 +975,9 @@ async def test_allowlist_change_is_not_served_the_old_read(
     await _collect(_Adapter(), _settings(temp_db_path, repos=("O/R", "O/S")))
 
     assert calls == [[("O", "R")], [("O", "R"), ("O", "S")]]
+
+
+@pytest.mark.asyncio
+async def test_merge_lane_is_off_by_default(tmp_path) -> None:
+    """Takahito 2026-10-04: merge waits live on the PR list, not the to-do board."""
+    assert Settings(db_path=str(tmp_path / "m.db")).board_merge_lane_enabled is False
