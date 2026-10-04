@@ -25,19 +25,30 @@ NAYSAYERS = ("Einstein",)
 HUMANS = chatroom_tools.HUMAN_IDENTITY_NAMES  # ("human",)
 
 
+_ROLE_FROM_IDENTITY = object()
+
+
 def _msg(
     msg_id: str,
     author: str,
     msg_type: str = "report",
     content: str = "",
     tags: list[str] | None = None,
+    role: Any = _ROLE_FROM_IDENTITY,
 ) -> dict[str, Any]:
+    # A naysayer identity's post persists role="naysayer" by default, because
+    # that is what production holds (W-6 C-1, measured 2026-10-02 on every
+    # Einstein msg of T-close-sanction-unspecified-kind-cannot-be-decomposed and
+    # T-integrity-flags-sanctioned-force-close). Pass `role=` to override.
+    if role is _ROLE_FROM_IDENTITY:
+        role = "naysayer" if author in NAYSAYERS else None
     return {
         "msg_id": msg_id,
         "author": author,
         "type": msg_type,
         "content": content,
         "tags": tags or [],
+        "role": role,
     }
 
 
@@ -143,6 +154,147 @@ def test_gated_request_changes_with_human_override_is_allowed() -> None:
     assert "[naysayer-gate-override]" in out["note"]
     assert "author=human" in out["note"]
     assert "T31" in out["note"]
+
+
+def test_d4a_human_override_with_fresh_approve_is_allow_not_override() -> None:
+    """W-6 D-4a: a reason no longer short-circuits the review.
+
+    With a fresh APPROVE the gate is satisfied, so nothing is bypassed: the
+    result is ``allow`` carrying the review, and no ``[naysayer-gate-override]``
+    note is produced.
+    """
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+        ],
+        author="human",
+        override_reason="closing on the naysayer's approval",
+    )
+    assert out == {"action": "allow", "gated": True, "review_msg_id": "msg-002"}
+
+
+def test_d4a_human_override_with_stale_approve_still_overrides() -> None:
+    """D-4a: no *fresh* APPROVE -> the reason still engages the override."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+            _msg("msg-003", "Bohr", "answer", content="changed X"),
+        ],
+        author="human",
+        override_reason="ship it",
+    )
+    assert out["action"] == "override"
+    assert "[naysayer-gate-override]" in out["note"]
+
+
+def test_d4a_human_override_with_no_review_still_overrides() -> None:
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[_msg("msg-001", "Bohr", "propose")],
+        author="human",
+        override_reason="ship it",
+    )
+    assert out["action"] == "override"
+
+
+def test_d4a_non_human_reason_is_refused_even_with_fresh_approve() -> None:
+    """An agent passing an override reason is refused, as before D-4a."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+        ],
+        author="Bohr",
+        override_reason="it was approved",
+    )
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerOverrideForbiddenError"
+
+
+@pytest.mark.parametrize("role", [None, "", "proposer", "Naysayer"])
+def test_d2b_naysayer_identity_without_naysayer_role_is_not_a_review(role: Any) -> None:
+    """W-6 D-2b / D-7 (4): the predicate is identity AND persisted role.
+
+    Conclair refuses a review_msg_id whose role is not "naysayer" (D-2a), so
+    the gate must not allow on one either, or the close would 422.
+    """
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"], role=role),
+        ],
+    )
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerReviewRequiredError"
+
+
+def test_d2b_naysayer_role_from_a_non_naysayer_identity_is_not_a_review() -> None:
+    """The role alone is not enough either: identity is still required."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Bohr", "report", tags=["verdict:approve"], role="naysayer"),
+        ],
+    )
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerReviewRequiredError"
+
+
+def test_d2b_role_less_request_changes_still_shadows_an_earlier_approve() -> None:
+    """D-2b-i (msg-1162): the search ignores role, so a later role-less
+    REQUEST_CHANGES invalidates an earlier role-carrying APPROVE."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+            _msg("msg-003", "Einstein", "report", tags=["verdict:request_changes"],
+                 role=None),
+        ],
+    )
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerChangesRequestedError"
+    assert out["envelope"]["details"]["review_msg_id"] == "msg-003"
+
+
+def test_d2b_role_less_latest_approve_does_not_fall_back_to_an_earlier_one() -> None:
+    """D-2b-iii: a role-less latest APPROVE blocks; it does not fall back to
+    the earlier role-carrying APPROVE."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+            _msg("msg-003", "Einstein", "report", tags=["verdict:approve"], role=None),
+        ],
+    )
+    assert out["action"] == "block"
+    assert out["envelope"]["error_type"] == "NaysayerReviewRequiredError"
+    assert out["envelope"]["details"]["review_msg_id"] == "msg-003"
+
+
+def test_d2b_human_reason_with_role_less_latest_approve_is_override() -> None:
+    """D-2b-iii: on the human-with-reason path a role-less latest APPROVE is
+    not a confirmed APPROVE, so the reason engages the override."""
+    out = _assess(
+        tags=[GATE_TAG],
+        messages=[
+            _msg("msg-001", "Bohr", "propose"),
+            _msg("msg-002", "Einstein", "report", tags=["verdict:approve"]),
+            _msg("msg-003", "Einstein", "report", tags=["verdict:approve"], role=None),
+        ],
+        author="human",
+        override_reason="ship it",
+    )
+    assert out["action"] == "override"
+    assert "review_msg_id" not in out
 
 
 def test_override_by_non_human_is_rejected() -> None:

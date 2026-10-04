@@ -22,8 +22,10 @@ GATE_TAG = "gate:naysayer"
 
 def _msg(msg_id: str, author: str, msg_type: str = "report",
          content: str = "", tags: list[str] | None = None) -> dict[str, Any]:
+    # A naysayer identity's post persists role="naysayer" (W-6 C-1 / D-2b).
     return {"msg_id": msg_id, "author": author, "type": msg_type,
-            "content": content, "tags": tags or []}
+            "content": content, "tags": tags or [],
+            "role": "naysayer" if author == "Einstein" else None}
 
 
 def _capture_tools(settings: Settings) -> dict[str, Any]:
