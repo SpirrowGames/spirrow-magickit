@@ -1456,8 +1456,10 @@ async def collect(
         # threads decisions already listed (avoids re-fetching per project).
         # A separate try/except so a GitHub outage does not blank the
         # decision / loop lanes that had already succeeded.
+        # Off by default: the PR list carries merge waits (``board_merge_lane_enabled``).
         try:
-            await _collect_merges(adapter, live, settings=settings, now=now)
+            if settings.board_merge_lane_enabled:
+                await _collect_merges(adapter, live, settings=settings, now=now)
         except Exception as e:  # noqa: BLE001 - lane を落とすだけ
             logger.warning("board: merge lane failed", error=str(e))
             live.notices.append(f"マージ待ち PR が読めません ({e})")
