@@ -19,6 +19,7 @@ from magickit.mcp.tools import (
     document,
     document_maintenance,
     execution,
+    executor,
     generation,
     health,
     lifecycle,
@@ -160,6 +161,10 @@ rather than calling individual services separately.""",
     # -- is registered only where the caller had to authenticate. On the
     # tailnet instance the approval tool simply does not exist.
     deploy.register_tools(mcp, settings, allow_approval=not auth_disabled())
+
+    # ADR-2026-10-09-23 unit 4 (Magickit side). INV-0: registers nothing
+    # unless settings.executor_pool_enabled is true.
+    executor.register_tools(mcp, settings)
 
     # Expose github-mcp via passthrough dispatcher (no-op unless PAT set)
     _install_github(mcp)

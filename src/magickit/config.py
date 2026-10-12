@@ -261,6 +261,21 @@ class Settings(BaseSettings):
     # development loop has no user login and so can never appear here.
     deploy_approver_logins: list[str] = Field(default_factory=list)
 
+    # ADR-2026-10-09-23 unit 4, Magickit side (D10 tag path, D12 switch
+    # reports, D13 reservations). One switch for all of it. OFF by default,
+    # and OFF means INV-0: the executor tools are *not registered* (not
+    # registered-and-refusing), so the MCP tool list is exactly what it was
+    # before this unit existed. See magickit/mcp/tools/executor.py.
+    executor_pool_enabled: bool = Field(default=False)
+    # The repository whose `executor/vX.Y.Z` tags the executors follow
+    # (D10/D11). Read only when executor_pool_enabled is true.
+    executor_tag_repo: str = Field(default="SpirrowGames/spirrow-mindwire")
+    # Name of the environment variable holding the token that creates the
+    # tags. That identity must be the bypass actor of
+    # config/github/executor-tags-create.ruleset.json, or GitHub refuses
+    # the ref. Read only when executor_pool_enabled is true.
+    executor_tag_pat_env: str = Field(default="GITHUB_MCP_PAT_IMPLEMENTER")
+
     digest_on_demand_enabled: bool = Field(default=True)
     # The only thing in Magickit that would start consuming the local GPU
     # with nobody asking, on the same card as the loop that writes code.

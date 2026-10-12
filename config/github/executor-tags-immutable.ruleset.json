@@ -1,0 +1,16 @@
+{
+  "name": "executor-tags-immutable",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/executor/*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "update" }
+  ],
+  "bypass_actors": []
+}

@@ -1,0 +1,21 @@
+{
+  "name": "executor-tags-create-via-magickit",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/executor/*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "creation" }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": null,
+      "actor_type": "Integration",
+      "bypass_mode": "always"
+    }
+  ]
+}
