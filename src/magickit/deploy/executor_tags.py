@@ -178,24 +178,44 @@ async def create_executor_tag(
 
 
 class HttpxTagApi:
-    """:class:`TagApi` over GitHub's REST API (``api.github.com``)."""
+    """:class:`TagApi` over GitHub's REST API (``api.github.com``).
 
-    def __init__(self, token: str, *, timeout: float = 30.0) -> None:
+    Use as ``async with HttpxTagApi(token) as api:``. One client (one
+    connection pool) serves all four calls of a :func:`create_executor_tag`
+    run, so they share a TLS connection instead of handshaking four times.
+    Calling outside the ``async with`` block raises ``RuntimeError``.
+    """
+
+    def __init__(self, token: str, *, timeout: float = 30.0, transport: Any = None) -> None:
         self._token = token
         self._timeout = timeout
+        self._transport = transport  # tests pass an httpx.MockTransport
+        self._client: Any = None
 
-    async def _call(self, method: str, path: str, json: Any = None) -> ApiResponse:
+    async def __aenter__(self) -> HttpxTagApi:
         import httpx  # noqa: PLC0415 -- keep the import off module load
 
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.request(
-                method, f"https://api.github.com/repos/{path}", headers=headers, json=json
-            )
+        self._client = httpx.AsyncClient(
+            base_url="https://api.github.com/repos/",
+            timeout=self._timeout,
+            transport=self._transport,
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def _call(self, method: str, path: str, json: Any = None) -> ApiResponse:
+        if self._client is None:
+            raise RuntimeError("HttpxTagApi used outside 'async with'")
+        resp = await self._client.request(method, path, json=json)
         try:
             body = resp.json()
         except ValueError:

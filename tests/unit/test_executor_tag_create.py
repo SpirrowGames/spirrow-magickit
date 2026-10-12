@@ -44,11 +44,20 @@ class FakeApi:
         ref_create_status: int = 201,
     ) -> None:
         self.calls: list[tuple] = []
+        self.entered = 0
+        self.exited = 0
         self.ref_status = ref_status
         self.compare_status = compare_status
         self.compare_body = {"status": "ahead"} if compare_body == "default" else compare_body
         self.tag_status = tag_status
         self.ref_create_status = ref_create_status
+
+    async def __aenter__(self):
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, *exc):
+        self.exited += 1
 
     @property
     def writes(self) -> list[tuple]:
@@ -363,3 +372,57 @@ def test_pat_env_default_and_unset_token_is_not_configured(monkeypatch):
     )
     out = asyncio.run(registered["executor_tag_create"]("1.0.0", SHA, "m", "x"))
     assert out["error_type"] == "not_configured"
+
+
+def test_tool_runs_inside_one_api_session(monkeypatch):
+    api = FakeApi()
+    monkeypatch.setattr(executor_tools, "_make_api", lambda pat_env: api)
+    registered, _ = _capture(Settings(executor_pool_enabled=True))
+    out = asyncio.run(registered["executor_tag_create"]("1.0.0", SHA, "m", "x"))
+    assert out["ok"] is True
+    assert (api.entered, api.exited) == (1, 1)
+
+
+def test_httpx_api_uses_one_client_for_all_calls():
+    """PR-gate advisory @ 9391dd8: the four calls of one run share a client."""
+    import httpx
+
+    seen: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers["Authorization"]))
+        path = request.url.path
+        if "/git/ref/" in path:
+            return httpx.Response(404, json={})
+        if "/compare/" in path:
+            return httpx.Response(200, json={"status": "ahead"})
+        if path.endswith("/git/tags"):
+            return httpx.Response(201, json={"sha": TAG_OBJ})
+        return httpx.Response(201, json={"ref": "x"})
+
+    api = executor_tags.HttpxTagApi("tok", transport=httpx.MockTransport(handler))
+    clients: list[Any] = []
+
+    async def run():
+        async with api:
+            clients.append(api._client)
+            out = await executor_tags.create_executor_tag(
+                api, repo=REPO, version="1.2.3", sha=SHA, message="m", requested_by="x"
+            )
+            clients.append(api._client)
+        return out
+
+    out = asyncio.run(run())
+    assert out["ok"] is True
+    assert clients[0] is clients[1] and clients[0] is not None
+    assert api._client is None  # closed on exit
+    assert [m for m, _, _ in seen] == ["GET", "GET", "POST", "POST"]
+    assert seen[0][1] == f"/repos/{REPO}/git/ref/tags/executor/v1.2.3"
+    assert seen[1][1] == f"/repos/{REPO}/compare/{SHA}...main"
+    assert {a for _, _, a in seen} == {"Bearer tok"}
+
+
+def test_httpx_api_refuses_use_outside_session():
+    api = executor_tags.HttpxTagApi("tok")
+    with pytest.raises(RuntimeError):
+        asyncio.run(api.get_ref(REPO, "tags/executor/v1.0.0"))

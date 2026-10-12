@@ -22,7 +22,7 @@ from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-def _make_api(pat_env: str) -> executor_tags.TagApi:
+def _make_api(pat_env: str) -> executor_tags.HttpxTagApi:
     """Token from ``settings.executor_tag_pat_env``; that identity must be the
     bypass actor of config/github/executor-tags-create.ruleset.json."""
     from magickit.mcp.github_dispatch import _resolve_pat  # noqa: PLC0415
@@ -68,14 +68,15 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         except Exception as exc:  # the PAT is unset
             return {"ok": False, "error_type": "not_configured", "message": str(exc)}
         try:
-            return await executor_tags.create_executor_tag(
-                api,
-                repo=repo,
-                version=version,
-                sha=sha,
-                message=message,
-                requested_by=requested_by,
-            )
+            async with api:  # one connection pool for the whole run
+                return await executor_tags.create_executor_tag(
+                    api,
+                    repo=repo,
+                    version=version,
+                    sha=sha,
+                    message=message,
+                    requested_by=requested_by,
+                )
         except executor_tags.ExecutorTagError as exc:
             return {"ok": False, "error_type": exc.error_type, "message": exc.message}
 
