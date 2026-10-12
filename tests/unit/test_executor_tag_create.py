@@ -148,7 +148,7 @@ def test_on_registers_executor_tag_create():
 
 def test_tool_reports_refusal_as_error_dict(monkeypatch):
     api = FakeApi(ref_status=200)
-    monkeypatch.setattr(executor_tools, "_make_api", lambda: api)
+    monkeypatch.setattr(executor_tools, "_make_api", lambda pat_env: api)
     registered, _ = _capture(Settings(executor_pool_enabled=True))
     out = asyncio.run(
         registered["executor_tag_create"]("1.2.3", SHA, "m", "Heisenberg")
@@ -167,7 +167,7 @@ def test_tool_without_pat_is_not_configured(monkeypatch):
 
 def test_tool_targets_configured_repo(monkeypatch):
     api = FakeApi()
-    monkeypatch.setattr(executor_tools, "_make_api", lambda: api)
+    monkeypatch.setattr(executor_tools, "_make_api", lambda pat_env: api)
     registered, _ = _capture(
         Settings(executor_pool_enabled=True, executor_tag_repo="o/r")
     )
@@ -324,7 +324,8 @@ def test_immutable_ruleset_has_no_bypass():
     rs = _ruleset("executor-tags-immutable.ruleset.json")
     assert rs["target"] == "tag" and rs["enforcement"] == "active"
     assert rs["conditions"]["ref_name"]["include"] == ["refs/tags/executor/*"]
-    assert {r["type"] for r in rs["rules"]} == {"deletion", "update", "non_fast_forward"}
+    # non_fast_forward is a branch rule; on a tag, moving the ref is `update`.
+    assert {r["type"] for r in rs["rules"]} == {"deletion", "update"}
     assert rs["bypass_actors"] == []
 
 
@@ -334,3 +335,31 @@ def test_create_ruleset_restricts_creation_with_one_bypass_actor():
     assert rs["conditions"]["ref_name"]["include"] == ["refs/tags/executor/*"]
     assert [r["type"] for r in rs["rules"]] == ["creation"]
     assert len(rs["bypass_actors"]) == 1
+
+
+def test_pat_env_comes_from_settings(monkeypatch):
+    seen: list[str] = []
+    api = FakeApi()
+
+    def make(pat_env):
+        seen.append(pat_env)
+        return api
+
+    monkeypatch.setattr(executor_tools, "_make_api", make)
+    registered, _ = _capture(
+        Settings(executor_pool_enabled=True, executor_tag_pat_env="MAGICKIT_TAGGER_PAT")
+    )
+    out = asyncio.run(registered["executor_tag_create"]("1.0.0", SHA, "m", "x"))
+    assert out["ok"] is True
+    assert seen == ["MAGICKIT_TAGGER_PAT"]
+
+
+def test_pat_env_default_and_unset_token_is_not_configured(monkeypatch):
+    assert Settings().executor_tag_pat_env == "GITHUB_MCP_PAT_IMPLEMENTER"
+    monkeypatch.delenv("MAGICKIT_TAGGER_PAT", raising=False)
+    monkeypatch.delenv("GITHUB_MCP_PAT", raising=False)
+    registered, _ = _capture(
+        Settings(executor_pool_enabled=True, executor_tag_pat_env="MAGICKIT_TAGGER_PAT")
+    )
+    out = asyncio.run(registered["executor_tag_create"]("1.0.0", SHA, "m", "x"))
+    assert out["error_type"] == "not_configured"

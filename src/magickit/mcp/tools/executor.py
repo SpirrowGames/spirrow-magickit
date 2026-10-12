@@ -22,15 +22,12 @@ from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: The identity that creates executor tags. It must be the bypass actor of
-#: config/github/executor-tags-ruleset.json, or GitHub refuses the ref.
-_PAT_ENV = "GITHUB_MCP_PAT_IMPLEMENTER"
-
-
-def _make_api() -> executor_tags.TagApi:
+def _make_api(pat_env: str) -> executor_tags.TagApi:
+    """Token from ``settings.executor_tag_pat_env``; that identity must be the
+    bypass actor of config/github/executor-tags-create.ruleset.json."""
     from magickit.mcp.github_dispatch import _resolve_pat  # noqa: PLC0415
 
-    return executor_tags.HttpxTagApi(_resolve_pat(_PAT_ENV))
+    return executor_tags.HttpxTagApi(_resolve_pat(pat_env))
 
 
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
@@ -38,6 +35,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         return
 
     repo = settings.executor_tag_repo
+    pat_env = settings.executor_tag_pat_env
 
     @mcp.tool()
     async def executor_tag_create(
@@ -66,7 +64,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             re-pointed.
         """
         try:
-            api = _make_api()
+            api = _make_api(pat_env)
         except Exception as exc:  # the PAT is unset
             return {"ok": False, "error_type": "not_configured", "message": str(exc)}
         try:

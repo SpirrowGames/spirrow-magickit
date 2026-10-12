@@ -265,6 +265,11 @@ class Settings(BaseSettings):
     # The repository whose `executor/vX.Y.Z` tags the executors follow
     # (D10/D11). Read only when executor_pool_enabled is true.
     executor_tag_repo: str = Field(default="SpirrowGames/spirrow-mindwire")
+    # Name of the environment variable holding the token that creates the
+    # tags. That identity must be the bypass actor of
+    # config/github/executor-tags-create.ruleset.json, or GitHub refuses
+    # the ref. Read only when executor_pool_enabled is true.
+    executor_tag_pat_env: str = Field(default="GITHUB_MCP_PAT_IMPLEMENTER")
 
     digest_on_demand_enabled: bool = Field(default=True)
     # The only thing in Magickit that would start consuming the local GPU
