@@ -98,7 +98,8 @@ def _refusal(store, api=None, **overrides: Any) -> ExecutorTagError:
 
 
 def _switches(store) -> list[dict[str, Any]]:
-    return [r for r in store.read_audit(limit=1000) if r["event"] == "executor_switch"]
+    return [r for r in store.read_audit(limit=1000, include_executor_switches=True)
+            if r["event"] == "executor_switch"]
 
 
 def _capture_executor(settings: Settings) -> dict[str, Any]:
@@ -159,21 +160,39 @@ def _seed_mixed_log(store) -> dict[str, Any]:
 
 
 def test_off_history_is_exactly_the_pre_pool_output(store):
+    """Switch records written while the pool was ON must not leak into the
+    OFF history -- not with a target, and not in the unfiltered feed."""
     seeded = _seed_mixed_log(store)
     history = asyncio.run(_capture_deploy(Settings())["deploy_history"](limit=50))
 
-    raw = store.read_audit(limit=50)
-    assert history == {
-        "ok": True,
-        "events": raw,
-        "requests": [r.to_dict() for r in store.list_requests(limit=50)],
-    }
+    assert [e["event"] for e in history["events"]] == ["requested"]
+    assert history["requests"] == [r.to_dict() for r in store.list_requests(limit=50)]
+    assert history["requests"][0]["request_id"] == seeded["request_id"]
     for item in history["events"] + history["requests"]:
         assert "kind" not in item
-    assert history["requests"][0]["request_id"] == seeded["request_id"]
-    # the deploy events carry no first_switch either
-    deploy_events = [e for e in history["events"] if e["event"] != "executor_switch"]
-    assert all("first_switch" not in e for e in deploy_events)
+        assert "first_switch" not in item
+        assert "executor" not in item
+
+
+def test_off_switch_records_do_not_take_limit_slots(store):
+    """Dropped before the limit: a burst of switch records cannot push the
+    deploy events out of an OFF history."""
+    _seed_mixed_log(store)
+    for _ in range(5):
+        store.audit("executor_switch", executor="ue-box-1", to_tag="executor/v1.0.0")
+    history = asyncio.run(_capture_deploy(Settings())["deploy_history"](limit=1))
+    assert [e["event"] for e in history["events"]] == ["requested"]
+
+
+def test_read_audit_hides_switch_records_by_default(store):
+    """Every pre-pool caller of read_audit (deploy_history OFF, the deploys
+    page) gets the deploy trail only."""
+    _seed_mixed_log(store)
+    assert [r["event"] for r in store.read_audit()] == ["requested"]
+    assert [r["event"] for r in store.read_audit(include_executor_switches=True)] == [
+        "requested",
+        "executor_switch",
+    ]
 
 
 def test_off_target_filter_does_not_match_executor_names(store):

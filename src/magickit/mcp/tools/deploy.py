@@ -66,7 +66,7 @@ def _history_with_executor_switches(
         "ok": True,
         "events": [
             with_kind(e)
-            for e in store.read_audit(limit=limit, target=target, match_executor=True)
+            for e in store.read_audit(limit=limit, target=target, include_executor_switches=True)
         ],
         "requests": [
             {**r.to_dict(), "kind": "deploy"}

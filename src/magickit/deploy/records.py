@@ -348,25 +348,30 @@ class DeployStore:
         *,
         limit: int = 50,
         target: str | None = None,
-        match_executor: bool = False,
+        include_executor_switches: bool = False,
     ) -> list[dict[str, Any]]:
         """Most recent last -- the order the file is written in.
 
         Args:
-            match_executor: when true, ``target`` also matches the
-                ``executor`` field of ``executor_switch`` records
-                (ADR-2026-10-09-23 D12). False keeps the filter exactly as
-                it was before the executor pool existed (INV-0).
+            include_executor_switches: ``executor_switch`` records
+                (ADR-2026-10-09-23 D12) share this file but are returned
+                only when this is true; ``target`` then also matches their
+                ``executor``. False -- the default, and every caller from
+                before the executor pool -- drops them *before* ``target``
+                and ``limit`` are applied, so those callers see exactly the
+                deploy trail they always saw, with or without a target
+                (INV-0).
         """
         records = self._audit_records()
+        if not include_executor_switches:
+            records = [r for r in records if r.get("event") != EVENT_EXECUTOR_SWITCH]
         if target is not None:
             records = [
                 r
                 for r in records
                 if r.get("target") == target
                 or (
-                    match_executor
-                    and r.get("event") == EVENT_EXECUTOR_SWITCH
+                    r.get("event") == EVENT_EXECUTOR_SWITCH
                     and r.get("executor") == target
                 )
             ]
