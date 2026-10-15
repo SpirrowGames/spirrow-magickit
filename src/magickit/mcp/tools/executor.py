@@ -129,9 +129,17 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         name, and every item there carries `kind`.
         """
         try:
-            # Local checks first: a malformed report never reaches GitHub.
-            executor_switch.validate_executor_name(executor)
-            executor_tags.parse_executor_tag(to_tag)
+            # Every local check before the token is needed: a malformed
+            # report is reported as malformed, never as not_configured.
+            report = executor_switch.validate_report(
+                executor=executor,
+                to_tag=to_tag,
+                switched_at=switched_at,
+                reported_by=reported_by,
+                reason=reason,
+                reservation_id=reservation_id,
+                first_switch=first_switch,
+            )
         except executor_tags.ExecutorTagError as exc:
             return {"ok": False, "error_type": exc.error_type, "message": exc.message}
         try:
@@ -140,17 +148,8 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             return {"ok": False, "error_type": "not_configured", "message": str(exc)}
         try:
             async with api:
-                return await executor_switch.report_executor_switch(
-                    api,
-                    records.get_store(),
-                    repo=repo,
-                    executor=executor,
-                    to_tag=to_tag,
-                    switched_at=switched_at,
-                    reported_by=reported_by,
-                    reason=reason,
-                    reservation_id=reservation_id,
-                    first_switch=first_switch,
+                return await executor_switch.record_switch(
+                    api, records.get_store(), repo=repo, report=report
                 )
         except executor_tags.ExecutorTagError as exc:
             return {"ok": False, "error_type": exc.error_type, "message": exc.message}

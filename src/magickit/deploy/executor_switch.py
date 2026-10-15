@@ -48,6 +48,7 @@ record's ``at`` is when Magickit accepted it. The two are never merged.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -91,11 +92,21 @@ def _require_text(name: str, value: str) -> str:
     return value.strip()
 
 
-async def report_executor_switch(
-    api: TagApi,
-    store: records.DeployStore,
+@dataclass(frozen=True)
+class SwitchReport:
+    """A switch report that has passed every check that needs no network."""
+
+    executor: str
+    to_tag: str
+    switched_at: str
+    reported_by: str
+    reason: str
+    reservation_id: str
+    first_switch: bool
+
+
+def validate_report(
     *,
-    repo: str,
     executor: str,
     to_tag: str,
     switched_at: str,
@@ -103,13 +114,13 @@ async def report_executor_switch(
     reason: str,
     reservation_id: str = "",
     first_switch: bool = False,
-) -> dict[str, Any]:
-    """Validate a switch report and append it. See the module docstring.
+) -> SwitchReport:
+    """Every local check, name first. The one place they are defined.
 
     Raises:
-        ExecutorTagError: on any refusal; nothing has been written.
+        ExecutorTagError: ``invalid_executor``, ``invalid_tag`` or
+            ``invalid_argument``.
     """
-    # 1. the name (form only), then everything else that needs no network.
     executor = validate_executor_name(executor)
     to_tag = executor_tags.parse_executor_tag(to_tag)
     switched_at = _validate_switched_at(switched_at)
@@ -119,6 +130,51 @@ async def report_executor_switch(
         raise ExecutorTagError("invalid_argument", "reservation_id must be a string")
     if not isinstance(first_switch, bool):
         raise ExecutorTagError("invalid_argument", "first_switch must be true or false")
+    return SwitchReport(
+        executor=executor,
+        to_tag=to_tag,
+        switched_at=switched_at,
+        reported_by=reported_by,
+        reason=reason,
+        reservation_id=reservation_id,
+        first_switch=first_switch,
+    )
+
+
+async def report_executor_switch(
+    api: TagApi,
+    store: records.DeployStore,
+    *,
+    repo: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    """:func:`validate_report`, then :func:`record_switch`.
+
+    Raises:
+        ExecutorTagError: on any refusal; nothing has been written.
+    """
+    return await record_switch(api, store, repo=repo, report=validate_report(**fields))
+
+
+async def record_switch(
+    api: TagApi,
+    store: records.DeployStore,
+    *,
+    repo: str,
+    report: SwitchReport,
+) -> dict[str, Any]:
+    """Check the tag, then apply the four-case table and append.
+
+    Raises:
+        ExecutorTagError: on any refusal; nothing has been written.
+    """
+    executor = report.executor
+    to_tag = report.to_tag
+    switched_at = report.switched_at
+    reported_by = report.reported_by
+    reason = report.reason
+    reservation_id = report.reservation_id
+    first_switch = report.first_switch
 
     # 2. the tag exists, annotated.
     await executor_tags.verify_annotated_tag(api, repo=repo, tag=to_tag)

@@ -438,14 +438,35 @@ def test_tool_refusal_is_an_error_dict(monkeypatch, store):
     assert out["ok"] is False and out["error_type"] == "no_prior_switch"
 
 
-def test_tool_refuses_malformed_input_before_needing_a_token(monkeypatch, store):
-    tool, made = _tool(monkeypatch, FakeApi())
-    out = asyncio.run(
-        tool(executor="bad name", to_tag="executor/v1.2.3", switched_at=AT,
-             reported_by="m", reason="r", first_switch=True)
-    )
-    assert out["error_type"] == "invalid_executor"
-    assert made == []
+@pytest.mark.parametrize(
+    "field, value, error_type",
+    [
+        ("executor", "bad name", "invalid_executor"),
+        ("to_tag", "v1.2.3", "invalid_tag"),
+        ("switched_at", "yesterday", "invalid_argument"),
+        ("reported_by", "", "invalid_argument"),
+        ("reason", " ", "invalid_argument"),
+        ("reservation_id", None, "invalid_argument"),
+    ],
+)
+def test_tool_runs_every_local_check_before_needing_a_token(
+    monkeypatch, store, field, value, error_type
+):
+    """A malformed report is reported as malformed even with no token set:
+    every local check runs before the API is built (PR-gate advisory, #107)."""
+
+    def no_pat(pat_env):
+        raise AssertionError("the token must not be needed for a malformed report")
+
+    monkeypatch.setattr(executor_tools, "_make_api", no_pat)
+    tool = _capture_executor(Settings(executor_pool_enabled=True))[
+        "deploy_report_executor_switch"
+    ]
+    args = {"executor": "ue-box-1", "to_tag": "executor/v1.2.3", "switched_at": AT,
+            "reported_by": "m", "reason": "r", "first_switch": True, field: value}
+    out = asyncio.run(tool(**args))
+    assert out["error_type"] == error_type
+    assert _switches(store) == []
 
 
 def test_tool_without_token_is_not_configured(monkeypatch, store):
