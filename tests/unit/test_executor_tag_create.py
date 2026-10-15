@@ -152,7 +152,7 @@ def test_server_wires_executor_tools_only_through_register_tools():
 
 def test_on_registers_executor_tag_create():
     registered, _ = _capture(Settings(executor_pool_enabled=True))
-    assert set(registered) == {"executor_tag_create"}
+    assert set(registered) == {"executor_tag_create", "deploy_report_executor_switch"}
 
 
 def test_tool_reports_refusal_as_error_dict(monkeypatch):
@@ -283,8 +283,12 @@ def test_sha_not_reachable_from_main_refused(status):
 
 def test_unknown_sha_refused():
     api = FakeApi(compare_status=404, compare_body={})
-    assert _refusal(api).error_type == "sha_not_on_main"
+    err = _refusal(api)
+    assert err.error_type == "sha_not_on_main"
     assert api.writes == []
+    # GitHub's 404 does not say which side is missing; the message must not
+    # blame the sha alone when the base branch may be the one absent.
+    assert SHA in err.message and "branch main" in err.message
 
 
 @pytest.mark.parametrize("body", [{}, None, {"status": None}])

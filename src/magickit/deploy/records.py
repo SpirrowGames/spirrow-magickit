@@ -61,6 +61,11 @@ STATUS_INTERRUPTED = "interrupted"
 
 TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_INTERRUPTED})
 
+#: Audit event for an executor switch report (ADR-2026-10-09-23 D12). It
+#: shares audit.jsonl with the deploy events and, like them, is only ever
+#: appended -- see :mod:`magickit.deploy.executor_switch`.
+EVENT_EXECUTOR_SWITCH = "executor_switch"
+
 # ── what is actually running afterwards (R-7) ────────────────────
 #
 # "The deploy failed" and "the service is down" are different facts and
@@ -324,8 +329,7 @@ class DeployStore:
         with self.audit_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def read_audit(self, *, limit: int = 50, target: str | None = None) -> list[dict[str, Any]]:
-        """Most recent last -- the order the file is written in."""
+    def _audit_records(self) -> list[dict[str, Any]]:
         if not self.audit_path.exists():
             return []
         records = []
@@ -337,9 +341,48 @@ class DeployStore:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+        return records
+
+    def read_audit(
+        self,
+        *,
+        limit: int = 50,
+        target: str | None = None,
+        match_executor: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Most recent last -- the order the file is written in.
+
+        Args:
+            match_executor: when true, ``target`` also matches the
+                ``executor`` field of ``executor_switch`` records
+                (ADR-2026-10-09-23 D12). False keeps the filter exactly as
+                it was before the executor pool existed (INV-0).
+        """
+        records = self._audit_records()
         if target is not None:
-            records = [r for r in records if r.get("target") == target]
+            records = [
+                r
+                for r in records
+                if r.get("target") == target
+                or (
+                    match_executor
+                    and r.get("event") == EVENT_EXECUTOR_SWITCH
+                    and r.get("executor") == target
+                )
+            ]
         return records[-limit:]
+
+    def latest_executor_switch(self, executor: str) -> dict[str, Any] | None:
+        """The last ``executor_switch`` record for ``executor``, or None.
+
+        Reads the whole log: the previous switch may be arbitrarily old,
+        and the answer decides whether a report is a first switch.
+        """
+        latest = None
+        for record in self._audit_records():
+            if record.get("event") == EVENT_EXECUTOR_SWITCH and record.get("executor") == executor:
+                latest = record
+        return latest
 
     # ── lock (R-9) ───────────────────────────────────────────────
 
