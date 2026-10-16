@@ -42,21 +42,55 @@ def _error(error_type: str, message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error_type": error_type, "message": message, **extra}
 
 
+def _history_with_executor_switches(
+    store: records.DeployStore, limit: int, target: str | None
+) -> dict[str, Any]:
+    """``deploy_history`` with the executor pool on (ADR-2026-10-09-23 D12).
+
+    Every item gains ``kind`` -- ``"executor_switch"`` for a switch report,
+    ``"deploy"`` for everything else -- and switch items carry
+    ``first_switch`` (recorded with them). ``target`` also matches the
+    executor name of switch items.
+    """
+
+    def with_kind(event: dict[str, Any]) -> dict[str, Any]:
+        if event.get("event") == records.EVENT_EXECUTOR_SWITCH:
+            return {
+                **event,
+                "kind": "executor_switch",
+                "first_switch": bool(event.get("first_switch")),
+            }
+        return {**event, "kind": "deploy"}
+
+    return {
+        "ok": True,
+        "events": [
+            with_kind(e)
+            for e in store.read_audit(limit=limit, target=target, include_executor_switches=True)
+        ],
+        "requests": [
+            {**r.to_dict(), "kind": "deploy"}
+            for r in store.list_requests(limit=limit, target=target)
+        ],
+    }
+
+
 def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) -> None:
     """Register the deploy tools.
 
     Args:
         mcp: the FastMCP server.
-        settings: magickit settings (unused today; kept for symmetry
-            with the other tool modules and so a future target table
-            driven by config has somewhere to read from).
+        settings: magickit settings. Only ``executor_pool_enabled`` is
+            read: it decides whether ``deploy_history`` shows executor
+            switch records (ADR-2026-10-09-23 D12). Off, it is exactly
+            what it was before (INV-0).
         allow_approval: whether this instance may approve deploys. False
             on the unauthenticated tailnet instance -- and it means the
             tool is *not registered*, not that it is registered and
             refuses. A caller cannot distinguish "denied" from "no such
             tool", and there is nothing to probe.
     """
-    del settings  # see docstring
+    pool_enabled = settings.executor_pool_enabled
 
     @mcp.tool()
     async def deploy_targets() -> dict[str, Any]:
@@ -327,6 +361,8 @@ def register_tools(mcp: FastMCP, settings: Settings, *, allow_approval: bool) ->
         limit = max(1, min(int(limit), 500))
         store = records.get_store()
         filter_target = target or None
+        if pool_enabled:
+            return _history_with_executor_switches(store, limit, filter_target)
         return {
             "ok": True,
             "events": store.read_audit(limit=limit, target=filter_target),

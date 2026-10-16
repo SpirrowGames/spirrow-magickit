@@ -139,7 +139,13 @@ async def create_executor_tag(
 
     cmp = await api.compare(repo, sha, base_branch)
     if cmp.status == 404:
-        raise ExecutorTagError("sha_not_on_main", f"commit {sha} is unknown in {repo}")
+        # GitHub answers 404 when *either* side of the compare is missing, and
+        # does not say which -- so the message names both rather than guess.
+        raise ExecutorTagError(
+            "sha_not_on_main",
+            f"GitHub could not compare {sha} with {base_branch} in {repo} (HTTP 404): "
+            f"either commit {sha} or branch {base_branch} does not exist there",
+        )
     if cmp.status != 200:
         raise ExecutorTagError(
             "github_error", f"could not compare {sha} with {base_branch} (HTTP {cmp.status})"
@@ -175,6 +181,50 @@ async def create_executor_tag(
         "tag_object": tag_sha,
         "requested_by": requested_by,
     }
+
+
+def parse_executor_tag(tag: str) -> str:
+    """Accept exactly ``executor/vX.Y.Z`` (same strictness as :func:`tag_name`).
+
+    Returns the tag unchanged. Raises ``ExecutorTagError("invalid_tag")``.
+    """
+    if (
+        not isinstance(tag, str)
+        or not tag.startswith(TAG_PREFIX)
+        or not _SEMVER.fullmatch(tag[len(TAG_PREFIX):])
+    ):
+        raise ExecutorTagError(
+            "invalid_tag",
+            f"tag must be executor/vX.Y.Z (no leading zeros, no suffix); got {tag!r}",
+        )
+    return tag
+
+
+async def verify_annotated_tag(api: TagApi, *, repo: str, tag: str) -> None:
+    """Confirm ``tag`` exists in ``repo`` as an *annotated* tag. Read-only.
+
+    A lightweight tag points the ref straight at a commit; an annotated one
+    points it at a tag object (``object.type == "tag"``). D10 makes the
+    executor version an annotated tag, and only :func:`create_executor_tag`
+    makes those, so a lightweight ``executor/*`` tag did not come through
+    the sole path and is refused.
+
+    Raises:
+        ExecutorTagError: ``tag_not_found``, ``tag_not_annotated`` or
+            ``github_error``.
+    """
+    resp = await api.get_ref(repo, f"tags/{tag}")
+    if resp.status == 404:
+        raise ExecutorTagError("tag_not_found", f"{tag} does not exist in {repo}")
+    if resp.status != 200:
+        raise ExecutorTagError("github_error", f"could not read {tag} (HTTP {resp.status})")
+    obj = resp.body.get("object") if isinstance(resp.body, dict) else None
+    obj_type = obj.get("type") if isinstance(obj, dict) else None
+    if obj_type != "tag":
+        raise ExecutorTagError(
+            "tag_not_annotated",
+            f"{tag} in {repo} is not an annotated tag (ref points at {obj_type!r})",
+        )
 
 
 class HttpxTagApi:

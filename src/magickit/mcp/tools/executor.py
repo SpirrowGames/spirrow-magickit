@@ -5,9 +5,9 @@ registers nothing. Not registered-and-refusing -- absent -- so the MCP
 tool list is identical to the one before this unit existed, and no
 GitHub call can be made from here.
 
-Today the module carries D10's tag path only (``executor_tag_create``).
-The switch report (D12) and the reservation tools (D13) land here behind
-the same setting.
+Today the module carries D10's tag path (``executor_tag_create``) and
+D12's switch report (``deploy_report_executor_switch``). The reservation
+tools (D13) land here behind the same setting.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from magickit.config import Settings
-from magickit.deploy import executor_tags
+from magickit.deploy import executor_switch, executor_tags, records
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -76,6 +76,80 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                     sha=sha,
                     message=message,
                     requested_by=requested_by,
+                )
+        except executor_tags.ExecutorTagError as exc:
+            return {"ok": False, "error_type": exc.error_type, "message": exc.message}
+
+    @mcp.tool()
+    async def deploy_report_executor_switch(
+        executor: str,
+        to_tag: str,
+        switched_at: str,
+        reported_by: str,
+        reason: str,
+        reservation_id: str = "",
+        first_switch: bool = False,
+    ) -> dict[str, Any]:
+        """Record that an executor switched to `to_tag` (D12). Append-only.
+
+        USE THIS WHEN: an executor (mindwire) has moved to a new
+        `executor/vX.Y.Z` tag and reports when. deploy_history is the only
+        place the switch history is kept, so a record is never edited or
+        deleted -- there is no tool for either.
+
+        Args:
+            executor: the executor's name, as in the Conductor's
+                `[executors.<name>]`. Checked for form only (letters,
+                digits, `_`, `-`); Magickit does not hold the ledger.
+                Take it from the same setting the dynamic report uses.
+            to_tag: `executor/vX.Y.Z`; must exist as an annotated tag.
+            switched_at: when the switch happened, ISO 8601 with offset.
+                Kept as given; the time Magickit accepted the report is
+                recorded separately.
+            reported_by: who reports.
+            reason: why it switched.
+            reservation_id: optional, kept with the record.
+            first_switch: true only for an executor with no switch
+                recorded yet. Required then, refused otherwise.
+
+        Returns:
+            {"ok": true, "executor", "from_tag", "to_tag", "first_switch",
+             "switched_at", "received_at"} -- `from_tag` is derived from
+            the previous record and is null only on a first switch.
+            On refusal (nothing written): {"ok": false, "error_type",
+            "message"} with `error_type` in {"invalid_executor",
+            "invalid_tag", "invalid_argument", "tag_not_found",
+            "tag_not_annotated", "github_error", "no_prior_switch",
+            "already_bootstrapped", "switch_in_progress",
+            "not_configured"}.
+
+        The record then appears in `deploy_history` with `kind:
+        "executor_switch"` and `first_switch`; with the executor pool
+        enabled, `deploy_history`'s `target` also matches the executor
+        name, and every item there carries `kind`.
+        """
+        try:
+            # Every local check before the token is needed: a malformed
+            # report is reported as malformed, never as not_configured.
+            report = executor_switch.validate_report(
+                executor=executor,
+                to_tag=to_tag,
+                switched_at=switched_at,
+                reported_by=reported_by,
+                reason=reason,
+                reservation_id=reservation_id,
+                first_switch=first_switch,
+            )
+        except executor_tags.ExecutorTagError as exc:
+            return {"ok": False, "error_type": exc.error_type, "message": exc.message}
+        try:
+            api = _make_api(pat_env)
+        except Exception as exc:  # the PAT is unset
+            return {"ok": False, "error_type": "not_configured", "message": str(exc)}
+        try:
+            async with api:
+                return await executor_switch.record_switch(
+                    api, records.get_store(), repo=repo, report=report
                 )
         except executor_tags.ExecutorTagError as exc:
             return {"ok": False, "error_type": exc.error_type, "message": exc.message}
