@@ -358,3 +358,35 @@ async def test_conclair_error_envelope_is_passed_through_unaudited(wired) -> Non
     assert report == envelope
     chat.list_threads.assert_not_awaited()
     prismind.get_identity.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_each_page_is_audited_before_the_next_is_fetched(wired) -> None:
+    """PR-gate on #108 @b960ab4: pages are processed as they arrive, so the
+    thread dicts of earlier pages are not held while later ones are fetched."""
+    tools, chat, prismind = wired
+    seen_before_page2: list[str] = []
+    page1 = {"items": [{"thread_id": "T-1", "owner": "ghost"}], "total": 2}
+    page2 = {"items": [{"thread_id": "T-2", "owner": "Bohr"}], "total": 2}
+
+    async def _list(**kwargs: Any) -> dict:
+        if kwargs["offset"] == 0:
+            return page1
+        seen_before_page2.extend(_looked_up(prismind))
+        return page2
+
+    chat.list_threads = AsyncMock(side_effect=_list)
+    report = await tools["chatroom_check_integrity"](project=PROJECT)
+    assert "ghost" in seen_before_page2
+    assert report["owner_audit"]["threads_checked"] == 2
+    assert [i["thread_id"] for i in report["issues"]] == ["T-1"]
+
+
+@pytest.mark.asyncio
+async def test_failure_on_a_later_page_drops_partial_findings(wired) -> None:
+    tools, chat, _ = wired
+    page1 = {"items": [{"thread_id": "T-1", "owner": "ghost"}], "total": 2}
+    chat.list_threads = AsyncMock(side_effect=[page1, httpx.ReadTimeout("slow")])
+    report = await tools["chatroom_check_integrity"](project=PROJECT)
+    assert report["issue_count"] == 0
+    assert report["owner_audit"] == {"status": "unavailable", "reason": "slow"}

@@ -1870,8 +1870,18 @@ async def _audit_thread_owners(adapter: ChatroomAdapter, project: str) -> dict[s
 
     Returns ``{"issues": [...], "audit": {...}}``. Each owner name is looked
     up once per call, however many threads carry it.
+
+    Threads are processed one page at a time and only the findings are kept,
+    so memory held across pages is bounded by the distinct owners and the
+    issues found, not by the project's thread count (PR-gate on #108
+    @b960ab4). If a later page cannot be listed, the findings so far are
+    dropped and the audit reports ``unavailable``: a partial list would read
+    as a complete one.
     """
-    threads: list[dict[str, Any]] = []
+    verdicts: dict[str, _IdentityLookup] = {}
+    issues: list[dict[str, Any]] = []
+    unverified: list[dict[str, Any]] = []
+    threads_checked = 0
     offset = 0
     while True:
         try:
@@ -1897,51 +1907,50 @@ async def _audit_thread_owners(adapter: ChatroomAdapter, project: str) -> dict[s
                 "issues": [],
                 "audit": {"status": "unavailable", "reason": reason},
             }
-        threads.extend(t for t in items if isinstance(t, dict))
+        for thread in items:
+            if not isinstance(thread, dict):
+                continue
+            threads_checked += 1
+            thread_id = thread.get("thread_id")
+            owner = thread.get("owner")
+            owner = owner.strip() if isinstance(owner, str) else ""
+            if not owner:
+                issues.append({
+                    "type": OWNER_UNRESOLVED_ISSUE,
+                    "thread_id": thread_id,
+                    "msg_id": None,
+                    "details": "thread has no owner; an empty owner is not an identity",
+                })
+                continue
+            if owner not in verdicts:
+                verdicts[owner] = await _lookup_identity_normalized(owner)
+            lookup = verdicts[owner]
+            if lookup.is_unavailable:
+                unverified.append({
+                    "thread_id": thread_id,
+                    "owner": owner,
+                    "reason": lookup.reason_or_raise(),
+                })
+            elif not lookup.found:
+                issues.append({
+                    "type": OWNER_UNRESOLVED_ISSUE,
+                    "thread_id": thread_id,
+                    "msg_id": None,
+                    "details": (
+                        f"owner {owner!r} is not a registered identity (checked as "
+                        "given and by its ADR-11 key)"
+                    ),
+                })
         total = page.get("total")
         offset += len(items)
         if not items or not isinstance(total, int) or offset >= total:
             break
 
-    verdicts: dict[str, _IdentityLookup] = {}
-    issues: list[dict[str, Any]] = []
-    unverified: list[dict[str, Any]] = []
-    for thread in threads:
-        thread_id = thread.get("thread_id")
-        owner = thread.get("owner")
-        owner = owner.strip() if isinstance(owner, str) else ""
-        if not owner:
-            issues.append({
-                "type": OWNER_UNRESOLVED_ISSUE,
-                "thread_id": thread_id,
-                "msg_id": None,
-                "details": "thread has no owner; an empty owner is not an identity",
-            })
-            continue
-        if owner not in verdicts:
-            verdicts[owner] = await _lookup_identity_normalized(owner)
-        lookup = verdicts[owner]
-        if lookup.is_unavailable:
-            unverified.append({
-                "thread_id": thread_id,
-                "owner": owner,
-                "reason": lookup.reason_or_raise(),
-            })
-        elif not lookup.found:
-            issues.append({
-                "type": OWNER_UNRESOLVED_ISSUE,
-                "thread_id": thread_id,
-                "msg_id": None,
-                "details": (
-                    f"owner {owner!r} is not a registered identity (checked as "
-                    "given and by its ADR-11 key)"
-                ),
-            })
     return {
         "issues": issues,
         "audit": {
             "status": "complete",
-            "threads_checked": len(threads),
+            "threads_checked": threads_checked,
             "owners_checked": len(verdicts),
             "unresolved": len(issues),
             "unverified": unverified,
