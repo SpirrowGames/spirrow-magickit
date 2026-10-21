@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
+import httpx
 from fastmcp import FastMCP
 
 from magickit.adapters.chatroom import ChatroomAdapter
@@ -1558,6 +1559,43 @@ def _embodiment_required_error(*, msg_kind: str) -> dict[str, Any]:
     }
 
 
+# --- one identity-existence lookup (T-conclair-persist-disposition-and-d8-readback) ---
+#
+# Bohr msg-1300 §2 B-1 / msg-1302 §2, endorsed by Einstein. Every gate that
+# asks "does this name resolve to a registered identity?" (next_participant,
+# disposition wake, the D-8 (2) owner audit, and later the D-8 (1) owner check
+# and the D-8 (3) done rewrite) goes through this one function, so ADR-11
+# normalisation is applied the same way on every path (Einstein msg-2145
+# ADVISORY on spirrow-mindwire T-next-line-carries-who-not-why).
+#
+# Why two lookups and not "normalise, then look up once": Prismind's
+# ``get_identity`` reads the record at ``prismind:identity:{user}:{name}``
+# with the name verbatim (spirrow-prismind ``memory_client.get_identity`` @
+# ``00e5e9f``), and the registry holds display names (``Einstein``,
+# ``Heisenberg``). Looking up only the ADR-11 key (``einstein``) would report
+# every registered identity as unknown and refuse every handoff. So the name
+# is tried as given and, only on a confirmed "not registered", by its ADR-11
+# key. The two-step is an external constraint of the registry, kept inside
+# this function so callers see one path (msg-1302 §2, "exact match only"
+# branch). Teaching the registry to resolve by key is Prismind work.
+
+
+async def _lookup_identity_normalized(name: str) -> _IdentityLookup:
+    """Registry lookup for ``name``: as given, then by its ADR-11 key.
+
+    The second lookup only runs when the first one confirms "not registered"
+    and the key differs from the spelling given. An unusable first answer is
+    returned as is, so callers stay fail-closed on an outage.
+    """
+    lookup = await _lookup_identity(name)
+    if lookup.is_unavailable or lookup.found:
+        return lookup
+    key = normalize_identity_key(name)
+    if not key or key == name:
+        return lookup
+    return await _lookup_identity(key)
+
+
 # --- next_participant gate (T-handoff-target-structured-field) ---------
 #
 # msg-068 §4-1 and the review chain that shaped it (msg-069 / msg-070 /
@@ -1656,15 +1694,17 @@ async def _check_next_participant(name: str) -> dict[str, Any] | None:
     what keeps ordinary posts off the identity service's critical path
     (the same shape as the role gate's opt-out branch).
 
-    Reuses ``_lookup_identity`` -- see the section comment above for why the
-    lookup is not reimplemented. Only the ``found`` / ``unavailable_reason``
+    Reuses ``_lookup_identity`` through ``_lookup_identity_normalized`` (so
+    an ADR-11 key spelling of a registered name resolves too; acceptance only
+    widens) -- see the section comment above for why the lookup is not
+    reimplemented. Only the ``found`` / ``unavailable_reason``
     verdicts are read here; ``allowed_roles`` is deliberately ignored
     (msg-072 §3 "validate existence only", so the target is not required to
     carry any particular role capability).
     """
     if not name:
         return None
-    lookup = await _lookup_identity(name)
+    lookup = await _lookup_identity_normalized(name)
     if lookup.is_unavailable:
         return _next_participant_unavailable_error(
             name=name, reason=lookup.reason_or_raise()
@@ -1753,22 +1793,6 @@ def _disposition_wake_unknown_error(*, wake: str) -> dict[str, Any]:
     }
 
 
-async def _lookup_wake(wake: str) -> _IdentityLookup:
-    """Registry lookup for ``wake``: as given, then by its ADR-11 key.
-
-    The second lookup only runs when the first one confirms "not registered"
-    and the key differs from the spelling given; an unusable first answer is
-    returned as is (fail-closed).
-    """
-    lookup = await _lookup_identity(wake)
-    if lookup.is_unavailable or lookup.found:
-        return lookup
-    key = normalize_identity_key(wake)
-    if not key or key == wake:
-        return lookup
-    return await _lookup_identity(key)
-
-
 class _DispositionDecision(NamedTuple):
     error: dict[str, Any] | None
     wire: dict[str, Any] | None
@@ -1793,7 +1817,7 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
     # @62bb567: ``wake="Takahito"`` passed).
     wake_is_human = False
     if disposition.wake is not None:
-        wake_lookup = await _lookup_wake(disposition.wake)
+        wake_lookup = await _lookup_identity_normalized(disposition.wake)
         if wake_lookup.is_unavailable:
             return _DispositionDecision(
                 _disposition_validation_unavailable_error(
@@ -1821,6 +1845,117 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
     if lookup.found and _HUMAN_ROLE in lookup.allowed_roles:
         return _DispositionDecision(None, disposition.wire)
     return _DispositionDecision(_disposition_human_not_allowed_error(author=author), None)
+
+
+# --- D-8 (2): owner audit for chatroom_check_integrity --------------
+#
+# spirrow-mindwire T-next-line-carries-who-not-why msg-2144 D-8 (2): add the
+# issue class "owner does not resolve as an identity" to
+# ``chatroom_check_integrity`` so the existing debt shows up once, as a finite
+# list, instead of as a write-time crash. Conclair does no identity lookups
+# (D-3), so the audit runs here and its findings are appended to Conclair's
+# report (Bohr msg-1300 §2).
+#
+# An owner the registry could not answer for is NOT counted as unresolved:
+# that would put an outage into the debt list. It is reported separately in
+# ``owner_audit.unverified``. This is a report endpoint, so neither an outage
+# nor a failed thread listing turns into an error envelope.
+
+OWNER_UNRESOLVED_ISSUE = "owner_unresolved_identity"
+_OWNER_AUDIT_PAGE = 1000  # Conclair's ``limit`` ceiling for list_threads
+
+
+async def _audit_thread_owners(adapter: ChatroomAdapter, project: str) -> dict[str, Any]:
+    """Check every thread owner of ``project`` against the registry.
+
+    Returns ``{"issues": [...], "audit": {...}}``. Each owner name is looked
+    up once per call, however many threads carry it.
+
+    Threads are processed one page at a time and only the findings are kept,
+    so memory held across pages is bounded by the distinct owners and the
+    issues found, not by the project's thread count (PR-gate on #108
+    @b960ab4). If a later page cannot be listed, the findings so far are
+    dropped and the audit reports ``unavailable``: a partial list would read
+    as a complete one.
+    """
+    verdicts: dict[str, _IdentityLookup] = {}
+    issues: list[dict[str, Any]] = []
+    unverified: list[dict[str, Any]] = []
+    threads_checked = 0
+    offset = 0
+    while True:
+        try:
+            page = await adapter.list_threads(
+                project=project, limit=_OWNER_AUDIT_PAGE, offset=offset
+            )
+        except httpx.HTTPError as e:
+            reason = str(e).strip() or type(e).__name__
+            return {
+                "issues": [],
+                "audit": {"status": "unavailable", "reason": reason},
+            }
+        if not isinstance(page, dict):
+            page = {}
+        items = page.get("items")
+        if "error_type" in page or not isinstance(items, list):
+            reason = (
+                f"{page.get('error_type')}: {page.get('error', '')}"
+                if "error_type" in page
+                else "unexpected list_threads response"
+            )
+            return {
+                "issues": [],
+                "audit": {"status": "unavailable", "reason": reason},
+            }
+        for thread in items:
+            if not isinstance(thread, dict):
+                continue
+            threads_checked += 1
+            thread_id = thread.get("thread_id")
+            owner = thread.get("owner")
+            owner = owner.strip() if isinstance(owner, str) else ""
+            if not owner:
+                issues.append({
+                    "type": OWNER_UNRESOLVED_ISSUE,
+                    "thread_id": thread_id,
+                    "msg_id": None,
+                    "details": "thread has no owner; an empty owner is not an identity",
+                })
+                continue
+            if owner not in verdicts:
+                verdicts[owner] = await _lookup_identity_normalized(owner)
+            lookup = verdicts[owner]
+            if lookup.is_unavailable:
+                unverified.append({
+                    "thread_id": thread_id,
+                    "owner": owner,
+                    "reason": lookup.reason_or_raise(),
+                })
+            elif not lookup.found:
+                issues.append({
+                    "type": OWNER_UNRESOLVED_ISSUE,
+                    "thread_id": thread_id,
+                    "msg_id": None,
+                    "details": (
+                        f"owner {owner!r} is not a registered identity (checked as "
+                        "given and by its ADR-11 key)"
+                    ),
+                })
+        total = page.get("total")
+        offset += len(items)
+        if not items or not isinstance(total, int) or offset >= total:
+            break
+
+    return {
+        "issues": issues,
+        "audit": {
+            "status": "complete",
+            "threads_checked": threads_checked,
+            "owners_checked": len(verdicts),
+            "unresolved": len(issues),
+            "unverified": unverified,
+        },
+    }
 
 
 def configure(settings: Settings) -> None:
@@ -2521,12 +2656,29 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
 
         Returns:
             {"issues": [IntegrityIssue...], "issue_count": int,
-             "checked_at": ISO 8601 timestamp}. Always 200 even when
-             issues exist (this is a report endpoint, not enforcement).
+             "checked_at": ISO 8601 timestamp, "owner_audit": {...}}.
+             Always 200 even when issues exist (this is a report endpoint,
+             not enforcement).
+
+        Conclair's checks are extended here with D-8 (2): every thread
+        whose ``owner`` does not resolve to a registered identity is listed
+        as an ``owner_unresolved_identity`` issue. ``owner_audit`` says
+        whether that audit ran (``status``: ``complete`` / ``unavailable``)
+        and lists under ``unverified`` the owners the registry could not
+        answer for -- those are not counted as issues.
         """
         adapter = _adapter()
         try:
-            return await adapter.check_integrity(project=project)
+            report = await adapter.check_integrity(project=project)
+            if not isinstance(report, dict) or "error_type" in report:
+                return report
+            owner_audit = await _audit_thread_owners(adapter, project)
+            issues = list(report.get("issues") or [])
+            issues.extend(owner_audit["issues"])
+            report["issues"] = issues
+            report["issue_count"] = len(issues)
+            report["owner_audit"] = owner_audit["audit"]
+            return report
         finally:
             await adapter.close()
 
