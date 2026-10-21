@@ -586,6 +586,13 @@
         {# J-fresh のみ. recommendation / unknowns も material が渡っている
            ときだけ描画 (J-stale/absent では material=None ∴ ここも出ない
            = I-14 の担保). #}
+        {# Jev (2e-2b-1): one fixed, display-only line. p is printed as
+           received -- choosing a rounding would be a new interpretation.
+           Nothing else on the page reads jev: no sorting, hiding, or change
+           to the choices / default target. #}
+        {% if material.jev %}
+          <div class="decision-jev">Jev: should_ask_human={{ material.jev.should_ask_human }}（未検証、AUC 未確立）— {{ material.jev.rule }}</div>
+        {% endif %}
         {% if material.recommendation or material.recommendation_reason %}
           {# Every meaningful line is written as ONE physical line so no
              template indentation leaks into the box. The ``{%- -%}``
