@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import math
 import re
 import time
 from typing import Annotated, Any, Literal
@@ -1643,6 +1644,44 @@ async def put_decision_material(
             "unknowns must be a list when present",
         )
 
+    # Jev (2e-2b-1): an *unverified* should-ask-human estimate. Absent or
+    # null = the material means exactly what it meant before jev existed, and
+    # nothing here runs. Present = strict, like ``protocol_violation``: a p
+    # that is not a finite non-bool number in [0, 1] would be shown on the
+    # judgement page as a probability, so it is refused (400, nothing stored)
+    # rather than displayed. ``bool`` is excluded explicitly because
+    # ``isinstance(True, int)`` holds and True would otherwise render as p=1.
+    # Keys other than the three are dropped, not stored.
+    jev_raw = body.get("jev")
+    jev: dict[str, Any] | None = None
+    if jev_raw is not None:
+        if not isinstance(jev_raw, dict):
+            return _bad_request(
+                "InvalidMaterialPayload", "jev must be an object when present"
+            )
+        p = jev_raw.get("should_ask_human")
+        if (
+            isinstance(p, bool)
+            or not isinstance(p, (int, float))
+            or not math.isfinite(p)
+            or not 0 <= p <= 1
+        ):
+            return _bad_request(
+                "InvalidMaterialPayload",
+                "jev.should_ask_human must be a finite number in [0, 1]",
+            )
+        for key in ("rule", "model_version"):
+            if not isinstance(jev_raw.get(key), str):
+                return _bad_request(
+                    "InvalidMaterialPayload",
+                    f"jev.{key} is required and must be a string",
+                )
+        jev = {
+            "should_ask_human": p,
+            "rule": jev_raw["rule"],
+            "model_version": jev_raw["model_version"],
+        }
+
     store = _get_material_store()
     try:
         result = await store.put_material(
@@ -1654,6 +1693,7 @@ async def put_decision_material(
             parked_lane=parked_lane,
             operator_task=operator_task,
             protocol_violation=protocol_violation,
+            jev=jev,
             question=question,
             options=options,
             recommendation=recommendation,

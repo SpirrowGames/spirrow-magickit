@@ -63,6 +63,7 @@ Content-Type: application/json
 | `parked_lane` | string | 任意 | 駐機の分類 (mindwire `parked_lane.classify_parked` の lane 名、例 `"decision"` / `"operator_work"` / `"misroute"`)。composer が `head_msg_id` と**同じ head** について計算する。**verbatim で保存し読み替えない**。やること board はこれでカードのバッジと並び順を分ける (§2.1.2) |
 | `operator_task` | string | 任意 | `operator_work` のときの作業内容 (`OPERATOR-TASK:` 行)。board の note に出す |
 | `protocol_violation` | boolean | 任意 | Tier-C を `NEXT: operator` に渡そうとした駐機なら `true`。**JSON boolean のみ受理** (`"yes"` / `1` 等は 400、型を強制変換しない)。`true` のカードは `parked_lane` に関係なく「判断」 |
+| `jev` | object | 任意 | `{"should_ask_human": number, "rule": string, "model_version": string}` (2e-2b-1, mindwire `T-decider-conductor-hook` msg-6651)。**無い / `null` なら従来どおりの意味で 2xx**。有るときは厳格: `should_ask_human` は `bool` でない有限の数で `0 ≤ p ≤ 1`、`rule` / `model_version` は string — 満たさなければ `InvalidMaterialPayload` 400 (部分保存しない)。3 key 以外は捨てて保存しない。表示は §4.1 の 1 行だけ |
 | `composer_status` | string | 任意 | `"ok"` 以外はエラー (§1.3) |
 | `question` | string | 任意 | 判断の要旨 (散文) |
 | `options` | array | 任意 | 選択肢の配列。要素は `{"id": "A", "label": "…", "gain": "…", "loss": "…"}` |
@@ -118,6 +119,7 @@ CREATE TABLE IF NOT EXISTS decision_materials (
     parked_lane    TEXT,
     operator_task  TEXT,
     protocol_violation INTEGER,      -- 0 / 1 / NULL
+    jev_json       TEXT,             -- JSON {should_ask_human, rule, model_version} / NULL
     question       TEXT,
     options_json   TEXT,             -- JSON serialized list of option dicts
     recommendation TEXT,
@@ -136,6 +138,11 @@ CREATE TABLE IF NOT EXISTS decision_materials (
 
 `parked_lane` / `operator_task` / `protocol_violation` も同じ手順で後から
 足した列で、列ができる前の行は `NULL` で読み戻る。
+
+`jev_json` も同じ手順で後から足した列。`NULL` は「jev 無し」と同じ意味
+(`get_material` は `"jev": None` を返す)。`INSERT OR REPLACE` は行を丸ごと
+置き換える ∴ jev 無しの PUT は前の head の p を消す (別 head 向けの p を
+残して表示しない)。`list_materials` (board) は jev を読まない。
 
 ### 2.1.1 なぜ `signature` を割らずに列を足したか
 
@@ -257,11 +264,16 @@ ISO 8601 UTC 文字列 (末尾 `Z`)。**用途は診断のみ**。鮮度判定�
 1. `question` (最上部)
 2. 選択肢カード (`options` の各要素について `label` / `gain` / `loss` +
    `<button type="submit" name="content" value="{id}: {label}">`)
-3. `recommendation` + `recommendation_reason`
-4. `unknowns` (list)
-5. 自由記述 `<textarea>`
-6. `next_participant` `<select>`
-7. 送信ボタン群 (I-12 の「自由記述だけで送る」を含む)
+3. `jev` が有るときだけ固定の 1 行:
+   `Jev: should_ask_human=<p>（未検証、AUC 未確立）— <rule>` (`<p>` は受け取った
+   値をそのまま、丸めない)。**表示専用** — 並べ替え・非表示・選択肢・既定の宛先は
+   jev を読まない。無いときは何も出さない。J-stale / J-absent では `material`
+   が渡らない ∴ 出ない (I-14)
+4. `recommendation` + `recommendation_reason`
+5. `unknowns` (list)
+6. 自由記述 `<textarea>`
+7. `next_participant` `<select>`
+8. 送信ボタン群 (I-12 の「自由記述だけで送る」を含む)
 
 汎用 2 択 (`"A: そのまま進める"` / `"B: 一旦止める / 修正が要る"`) は**廃止**
 (msg-117 §5)。ボタンの `content` は composer の option から導出:

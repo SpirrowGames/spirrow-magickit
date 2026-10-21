@@ -44,6 +44,7 @@ _LATE_COLUMNS = (
     ("parked_lane", "TEXT"),
     ("operator_task", "TEXT"),
     ("protocol_violation", "INTEGER"),
+    ("jev_json", "TEXT"),
 )
 
 
@@ -106,6 +107,7 @@ class DecisionMaterialStore:
                 parked_lane    TEXT,
                 operator_task  TEXT,
                 protocol_violation INTEGER,
+                jev_json       TEXT,
                 question       TEXT,
                 options_json   TEXT,
                 recommendation TEXT,
@@ -142,6 +144,7 @@ class DecisionMaterialStore:
         parked_lane: str | None = None,
         operator_task: str | None = None,
         protocol_violation: bool | None = None,
+        jev: dict[str, Any] | None = None,
         options: list[dict[str, Any]] | None,
         recommendation: str | None,
         recommendation_reason: str | None,
@@ -161,6 +164,12 @@ class DecisionMaterialStore:
         stored_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         options_json = json.dumps(options) if options is not None else None
         unknowns_json = json.dumps(unknowns) if unknowns is not None else None
+        # ``jev`` arrives already normalised by the HTTP layer to exactly
+        # {should_ask_human, rule, model_version}. ``None`` = "this head has
+        # no Jev" -- and because the write is INSERT OR REPLACE, a PUT
+        # without jev clears a previous head's p rather than leaving it to be
+        # shown against a head it was not computed for.
+        jev_json = json.dumps(jev) if jev is not None else None
 
         async with aiosqlite.connect(self.db_path) as conn:
             await self._create_tables(conn)
@@ -176,10 +185,10 @@ class DecisionMaterialStore:
                 """
                 INSERT OR REPLACE INTO decision_materials (
                     project, thread_id, head_msg_id, signature, stop_reason,
-                    parked_lane, operator_task, protocol_violation,
+                    parked_lane, operator_task, protocol_violation, jev_json,
                     question, options_json, recommendation,
                     recommendation_reason, unknowns_json, stored_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
@@ -190,6 +199,7 @@ class DecisionMaterialStore:
                     parked_lane,
                     operator_task,
                     None if protocol_violation is None else int(protocol_violation),
+                    jev_json,
                     question,
                     options_json,
                     recommendation,
@@ -225,7 +235,7 @@ class DecisionMaterialStore:
             cursor = await conn.execute(
                 """
                 SELECT project, thread_id, head_msg_id, signature, stop_reason,
-                       parked_lane, operator_task, protocol_violation,
+                       parked_lane, operator_task, protocol_violation, jev_json,
                        question, options_json, recommendation,
                        recommendation_reason, unknowns_json, stored_at
                 FROM decision_materials
@@ -247,6 +257,9 @@ class DecisionMaterialStore:
             "parked_lane": row["parked_lane"],
             "operator_task": row["operator_task"],
             "protocol_violation": _bool_or_none(row["protocol_violation"]),
+            # NULL (rows written before jev existed, or PUTs without it)
+            # must not reach json.loads -- it would raise TypeError.
+            "jev": json.loads(row["jev_json"]) if row["jev_json"] else None,
             "question": row["question"],
             "options": (
                 json.loads(row["options_json"]) if row["options_json"] else None
