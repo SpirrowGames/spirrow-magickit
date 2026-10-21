@@ -70,7 +70,7 @@ def _store_kwargs(**over: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_put_without_jev_is_2xx_and_reads_back_none():
+async def test_put_without_jev_succeeds():
     r = await _request("PUT", MATERIAL, json={"head_msg_id": "msg-1"})
     assert r.status_code == 200
     g = await _request("GET", MATERIAL)
