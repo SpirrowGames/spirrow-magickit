@@ -159,7 +159,7 @@ async def test_next_participant_omitted_skips_lookup_and_forwards_null(wired) ->
 
 
 @pytest.mark.asyncio
-async def test_omit_on_open_thread_also_skips_lookup(wired) -> None:
+async def test_omit_on_open_thread_also_skips_lookup(wired, owner_check_passes) -> None:
     tools, chat, prismind = wired
 
     await tools["chatroom_open_thread"](
@@ -196,7 +196,7 @@ async def test_registered_target_is_validated_and_forwarded(wired) -> None:
 
 
 @pytest.mark.asyncio
-async def test_registered_target_on_open_thread(wired) -> None:
+async def test_registered_target_on_open_thread(wired, owner_check_passes) -> None:
     tools, chat, prismind = wired
     prismind.get_identity = AsyncMock(side_effect=_by_name({
         "Einstein": _identity_response(name="Einstein"),
@@ -236,7 +236,7 @@ async def test_unknown_target_is_rejected_before_any_write(wired) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_target_blocks_open_thread(wired) -> None:
+async def test_unknown_target_blocks_open_thread(wired, owner_check_passes) -> None:
     tools, chat, prismind = wired
 
     result = await tools["chatroom_open_thread"](
@@ -612,7 +612,7 @@ async def test_ui_post_message_rejects_unknown_target(_configured_settings) -> N
 
 
 @pytest.mark.asyncio
-async def test_ui_open_thread_rejects_unknown_target(_configured_settings) -> None:
+async def test_ui_open_thread_rejects_unknown_target(_configured_settings, owner_check_passes) -> None:
     adapter = AsyncMock()
     prismind = AsyncMock()
     prismind.get_identity = AsyncMock(return_value=_UNREGISTERED)

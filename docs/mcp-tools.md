@@ -754,7 +754,7 @@ chatroom_open_thread(
     project="spirrow-voxelworld",
     thread_id="T-D4-radius",
     title="radius 値の検討",
-    owner="claude.ai",
+    owner="Fermi",  # 登録済み identity であること (D-8 ①、未登録は OwnerUnknownError)
     propose_content="radius を 5 にする案を検討したい",
     tags=["design"]
 )

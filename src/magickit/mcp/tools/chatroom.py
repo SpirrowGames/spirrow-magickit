@@ -1714,6 +1714,66 @@ async def _check_next_participant(name: str) -> dict[str, Any] | None:
     return None
 
 
+# --- D-8 (1): owner existence on thread open ----------------------------
+#
+# spirrow-mindwire T-next-line-carries-who-not-why msg-2144 D-8 (1):
+# ``chatroom_open_thread`` puts ``owner`` through the SAME existence check as
+# ``next_participant`` -- the check already existed and was simply not applied
+# to ``owner``. Only threads opened from now on are affected (the D-6'
+# no-retroactivity rule): the existing debt is listed by the D-8 (2) audit
+# and parked at stop time by D-8 (3), not refused here. Sequenced after the
+# generators that write a service name as owner were registered (Bohr
+# msg-1300 / msg-1341 step 3; ``operator`` / ``claude-code`` registered in
+# msg-1355).
+#
+# Same lookup (``_lookup_identity_normalized``, so ADR-11 normalisation is
+# applied before the registry is consulted -- Einstein msg-2145 ADVISORY) and
+# the same policy: an unregistered owner is refused, and a registry that
+# cannot answer refuses too (fail-closed). Unlike ``next_participant`` there
+# is no "omit the field" escape -- ``owner`` is required -- so the remedy on
+# an outage is to retry.
+
+
+def _owner_unknown_error(*, owner: str) -> dict[str, Any]:
+    return {
+        "error_type": "OwnerUnknownError",
+        "error": (
+            f"owner {owner!r} is not a registered identity (checked as given "
+            "and by its ADR-11 key). Name a registered identity as owner, or "
+            "register the intended one with upsert_identity first."
+        ),
+        "details": {"owner": owner},
+    }
+
+
+def _owner_unavailable_error(*, owner: str, reason: str) -> dict[str, Any]:
+    return {
+        "error_type": "OwnerValidationUnavailableError",
+        "error": (
+            f"cannot validate owner {owner!r}: the identity lookup failed "
+            f"({reason}). The thread was not opened; retry."
+        ),
+        "details": {"owner": owner, "reason": reason},
+    }
+
+
+async def _check_owner_exists(owner: str) -> dict[str, Any] | None:
+    """Refuse a thread whose ``owner`` does not resolve to an identity.
+
+    Returns None to proceed, or an error envelope to refuse before the
+    write. A blank ``owner`` is left to Conclair, which refuses it on its
+    own validation; it is not a name this gate can look up.
+    """
+    if not owner or not owner.strip():
+        return None
+    lookup = await _lookup_identity_normalized(owner)
+    if lookup.is_unavailable:
+        return _owner_unavailable_error(owner=owner, reason=lookup.reason_or_raise())
+    if not lookup.found:
+        return _owner_unknown_error(owner=owner)
+    return None
+
+
 # --- disposition gate (T-magickit-stop-disposition-intake) ------------
 #
 # Bohr DESIGN v8 §2 (input table), endorsed by Einstein msg-1007. Of that
@@ -2000,8 +2060,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 (convention: "T-" prefix + descriptive slug, e.g.
                 "T-D4-radius").
             title: 1-line thread title.
-            owner: author string (e.g. "claude.ai" / "claude-code" /
+            owner: registered identity name (e.g. "Bohr" / "operator" /
                 "human"). The owner is the only one allowed to close.
+                Must resolve in the identity registry (D-8 (1), below).
             propose_content: markdown body of the propose message.
             tags: optional thread-level tags.
             commit_ref: optional git hash to record on the propose msg.
@@ -2013,10 +2074,10 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             role: role ``owner`` is acting under for the propose msg (e.g.
                 "proposer"). Optional. When supplied it is validated
                 against the identity's ``allowed_roles`` and recorded on
-                the msg; when omitted nothing is checked or recorded. An
-                unregistered ``owner`` still opens the thread, but the
-                unvalidated role is recorded as null rather than as given.
-                Validated against ``owner``, who authors the propose msg.
+                the msg; when omitted nothing is checked or recorded.
+                (An unregistered ``owner`` no longer opens a thread at all:
+                see the D-8 (1) owner check below.) Validated against
+                ``owner``, who authors the propose msg.
             next_participant: structured handoff target for the propose msg
                 (T-handoff-target-structured-field). Optional. When
                 supplied it must resolve to an identity Prismind knows;
@@ -2034,8 +2095,22 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             "RoleValidationUnavailableError" from the role gate, or
             "NextParticipantUnknownError" /
             "NextParticipantValidationUnavailableError" from the
-            next_participant gate.
+            next_participant gate, or "OwnerUnknownError" /
+            "OwnerValidationUnavailableError" from the owner check.
+
+        owner existence (D-8 (1)): ``owner`` must resolve to a registered
+        identity (as given, or by its ADR-11 key), the same check
+        ``next_participant`` takes. An unregistered owner is refused with
+        ``OwnerUnknownError`` before the thread is created; a registry that
+        cannot answer refuses with ``OwnerValidationUnavailableError``
+        (retry). Existing threads are not affected.
         """
+        # D-8 (1): first, because every later stage is about this thread and
+        # a thread with an unresolvable owner must not be created at all.
+        owner_error = await _check_owner_exists(owner)
+        if owner_error is not None:
+            return owner_error
+
         gate = await _check_role_allowed(author=owner, role=role)
         if gate.error is not None:
             return gate.error
