@@ -20,7 +20,13 @@ from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
 from magickit.core.identity_normalize import normalize_identity_key
-from magickit.mcp.disposition import HUMAN_ARM, DispositionError, parse_disposition
+from magickit.mcp.disposition import (
+    HUMAN_ARM,
+    KIND_DONE,
+    DispositionError,
+    owner_unresolved_fallback,
+    parse_disposition,
+)
 from magickit.mcp.pr_gate_ledger import (
     LedgerVerdict,
     fetch_ledger_verdict,
@@ -1740,7 +1746,9 @@ async def _check_next_participant(name: str) -> dict[str, Any] | None:
 # (fail-closed, like next_participant): a Prismind outage must not open the
 # bypass this gate exists to close. The remedy is to retry; omitting
 # ``disposition`` also lands the post, recorded as before this feature. A post
-# without ``disposition``, or with ``{kind: done}``, never consults Prismind.
+# without ``disposition`` never consults Prismind. ``{kind: done}`` passes this
+# gate without a lookup, then takes the D-8 (3) owner check below
+# (``_apply_owner_fallback``), which does one.
 #
 # Which ``NEXT:`` line a disposition belongs to, and the ``unclassified`` /
 # ``human_close`` classification of a stop without one, are NOT decided here
@@ -1845,6 +1853,133 @@ async def _check_disposition(*, author: str, raw: Any) -> _DispositionDecision:
     if lookup.found and _HUMAN_ROLE in lookup.allowed_roles:
         return _DispositionDecision(None, disposition.wire)
     return _DispositionDecision(_disposition_human_not_allowed_error(author=author), None)
+
+
+# --- D-8 (3): owner-unresolved ``done`` fallback ---------------------
+#
+# spirrow-mindwire T-next-line-carries-who-not-why msg-2144 D-8 (3), as
+# designed in this thread by Bohr msg-1337 / msg-1341 (Einstein msg-1342): a
+# ``done`` posted on a thread whose owner does not resolve to an identity is
+# stored as ``blocked_on(trigger: human, wake: human)`` with a ``fallback``
+# record of the original claim. No crash, no automatic close.
+#
+# The owner is looked up through ``_lookup_identity_normalized`` like every
+# other existence check. A registry (or thread read) that cannot answer does
+# NOT rewrite: the ``done`` is stored as sent and the response says the owner
+# was not verified -- the same split ``owner_audit.unverified`` makes, so an
+# outage never parks correctly-owned threads (Einstein msg-1338).
+#
+# A post that closes its thread is left alone: the close is the resolution
+# itself, not a claim waiting on an owner, and Conclair refuses any kind other
+# than ``done`` on a closing row (migration 0010
+# ``messages_disposition_close_check``), so rewriting it would turn a valid
+# close into a refused write.
+
+OWNER_CHECK_REWRITTEN = "rewritten"
+OWNER_CHECK_UNVERIFIED = "unverified"
+
+
+class _OwnerFallback(NamedTuple):
+    wire: dict[str, Any] | None
+    #: ``None`` when nothing needs reporting (no done, a close, or owned).
+    report: dict[str, Any] | None
+
+
+async def _apply_owner_fallback(
+    adapter: ChatroomAdapter,
+    *,
+    project: str,
+    thread_id: str,
+    wire: dict[str, Any] | None,
+    is_close: bool,
+) -> _OwnerFallback:
+    """Rewrite a non-closing ``done`` whose thread owner does not resolve."""
+    if wire is None or wire.get("kind") != KIND_DONE or is_close:
+        return _OwnerFallback(wire, None)
+    view = await adapter.get_thread(project=project, thread_id=thread_id, mode="summary")
+    if "error_type" in view:
+        return _OwnerFallback(
+            wire,
+            {
+                "status": OWNER_CHECK_UNVERIFIED,
+                "owner": None,
+                "reason": f"thread read failed: {view.get('error_type')}",
+            },
+        )
+    owner = (view.get("thread") or {}).get("owner")
+    if not isinstance(owner, str) or not owner.strip():
+        return _OwnerFallback(
+            wire,
+            {"status": OWNER_CHECK_UNVERIFIED, "owner": None, "reason": "thread has no owner"},
+        )
+    lookup = await _lookup_identity_normalized(owner)
+    if lookup.is_unavailable:
+        return _OwnerFallback(
+            wire,
+            {
+                "status": OWNER_CHECK_UNVERIFIED,
+                "owner": owner,
+                "reason": lookup.reason_or_raise(),
+            },
+        )
+    if lookup.found:
+        return _OwnerFallback(wire, None)
+    rewritten = owner_unresolved_fallback(owner=owner, thread_id=thread_id)
+    return _OwnerFallback(
+        rewritten,
+        {
+            "status": OWNER_CHECK_REWRITTEN,
+            "owner": owner,
+            "declared": wire,
+            "stored_as": rewritten,
+        },
+    )
+
+
+# --- C-1: disposition read-back after the write -----------------------
+#
+# Bohr msg-1337 / msg-1341 C-1: a post that carried a disposition is read
+# back after Conclair accepts it. A stored value that differs from what was
+# sent is reported as ``mismatch``; a read-back that cannot be done as
+# ``unverified``. Neither turns the (already written) post into an error. A
+# match adds nothing to the response. "Sent" is what Magickit forwarded --
+# after a D-8 (3) rewrite, the rewritten value.
+
+READBACK_MISMATCH = "mismatch"
+READBACK_UNVERIFIED = "unverified"
+
+
+async def _read_back_disposition(
+    adapter: ChatroomAdapter,
+    *,
+    project: str,
+    thread_id: str,
+    result: dict[str, Any],
+    sent: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Compare the stored disposition of the just-posted msg with ``sent``."""
+
+    def unverified(reason: str) -> dict[str, Any]:
+        return {"status": READBACK_UNVERIFIED, "sent": sent, "reason": reason}
+
+    msg_id = (result.get("msg") or {}).get("msg_id")
+    if not msg_id:
+        return unverified("post response has no msg_id")
+    try:
+        view = await adapter.get_thread(project=project, thread_id=thread_id, mode="full")
+    except Exception as e:  # noqa: BLE001 -- the post is written; never fail it here
+        return unverified(f"thread read raised {type(e).__name__}")
+    if "error_type" in view:
+        return unverified(f"thread read failed: {view.get('error_type')}")
+    stored_msg = next(
+        (m for m in (view.get("messages") or []) if m.get("msg_id") == msg_id), None
+    )
+    if stored_msg is None:
+        return unverified(f"msg {msg_id} not found on read-back")
+    stored = stored_msg.get("disposition")
+    if stored != sent:
+        return {"status": READBACK_MISMATCH, "sent": sent, "stored": stored}
+    return None
 
 
 # --- D-8 (2): owner audit for chatroom_check_integrity --------------
@@ -2165,6 +2300,24 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         answer either check, ``DispositionValidationUnavailableError``. Forwarded to Conclair as
         ``disposition`` (a Conclair that predates the field ignores it).
 
+        D-8 (3) owner fallback: a ``{"kind": "done"}`` on a post that does not
+        close the thread is checked against the thread owner. An owner that is
+        not a registered identity (as given or by its ADR-11 key) makes the
+        stored value ``{"kind": "blocked_on", "trigger": {"arm": "human",
+        "ref": <thread_id>}, "wake": "human", "fallback": {"reason":
+        "owner_unresolved", "owner": <owner>, "declared": "done"}}``, and the
+        response carries ``disposition_owner_check: {"status": "rewritten",
+        ...}``. If the owner cannot be checked (registry or thread read
+        unavailable) the ``done`` is stored as sent and the response carries
+        ``disposition_owner_check: {"status": "unverified", ...}``. Never an
+        error, never a close.
+
+        Read-back (C-1): after a post that carried a disposition, the stored
+        value is read back. A difference adds ``disposition_readback:
+        {"status": "mismatch", "sent", "stored"}``; a read-back that cannot be
+        done adds ``{"status": "unverified", "sent", "reason"}``. Neither
+        turns the post into an error.
+
         Returns:
             On success: {"msg": {...}, "thread_status_changed_to":
             null|"awaiting_reply"|"active"|"resolved"}.
@@ -2245,7 +2398,18 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 owner_override_reason_out = policy["owner_override_reason"]
                 close_sanction_out = policy["close_sanction"]
 
-            return await adapter.post_message(
+            # D-8 (3): a done on a thread whose owner does not resolve is
+            # parked for the human instead. After the close policies, so a
+            # blocked close never pays for the extra lookup.
+            fallback = await _apply_owner_fallback(
+                adapter,
+                project=project,
+                thread_id=thread_id,
+                wire=disposition_decision.wire,
+                is_close=closes.is_close,
+            )
+
+            result = await adapter.post_message(
                 project=project,
                 thread_id=thread_id,
                 type=msg_type,
@@ -2263,8 +2427,23 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 owner_override_reason=owner_override_reason_out,
                 close_sanction=close_sanction_out,
                 next_participant=next_participant or None,
-                disposition=disposition_decision.wire,
+                disposition=fallback.wire,
             )
+            if "error_type" in result or fallback.wire is None:
+                return result
+            if fallback.report is not None:
+                result["disposition_owner_check"] = fallback.report
+            # C-1: read the stored disposition back.
+            readback = await _read_back_disposition(
+                adapter,
+                project=project,
+                thread_id=thread_id,
+                result=result,
+                sent=fallback.wire,
+            )
+            if readback is not None:
+                result["disposition_readback"] = readback
+            return result
         finally:
             await adapter.close()
 

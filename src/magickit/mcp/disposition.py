@@ -16,6 +16,10 @@ Trigger arms. An agent may write ``thread`` / ``pr`` / ``deploy`` /
 ``role = human`` author may write it, and the gate refuses it from anyone
 else. ``{kind: malformed}`` is deliberately absent (DESIGN v9 §2: a malformed
 STOP line is a mindwire client error, not a thread lifecycle state).
+
+``fallback`` is not part of the caller's schema: ``parse_disposition``
+refuses it like any unknown key, so a caller cannot forge a system rewrite.
+It is only ever written by ``owner_unresolved_fallback`` below (D-8 (3)).
 """
 
 from __future__ import annotations
@@ -28,6 +32,12 @@ KIND_BLOCKED_ON = "blocked_on"
 HUMAN_ARM = "human"
 AGENT_ARMS = ("thread", "pr", "deploy", "queue-empty")
 TRIGGER_ARMS = (*AGENT_ARMS, HUMAN_ARM)
+
+#: ``disposition.fallback.reason`` -- spirrow-conclair
+#: ``schemas/disposition_vocab.py`` ``DispositionFallbackReason`` @ ``77a5aa7``.
+FALLBACK_REASON_OWNER_UNRESOLVED = "owner_unresolved"
+#: The wake D-8 (3) parks an owner-unresolved ``done`` on.
+HUMAN_WAKE = "human"
 
 
 class DispositionError(ValueError):
@@ -92,3 +102,28 @@ def parse_disposition(raw: Any) -> Disposition:
     ref = _require_str(trigger.get("ref"), "trigger.ref")
     wake = _require_str(raw.get("wake"), "wake")
     return Disposition(KIND_BLOCKED_ON, arm, ref, wake)
+
+
+def owner_unresolved_fallback(*, owner: str, thread_id: str) -> dict[str, Any]:
+    """The D-8 (3) rewrite of a ``done`` whose thread owner does not resolve.
+
+    spirrow-mindwire T-next-line-carries-who-not-why msg-2144 D-8 (3): such a
+    ``done`` is parked as ``blocked_on(trigger: human, wake: human)``; Bohr
+    msg-1337 / msg-1341 add the ``fallback`` record. Its keys are exactly
+    spirrow-conclair ``DispositionFallback`` @ ``77a5aa7`` (``reason`` /
+    ``owner`` / ``declared``), which forbids extras.
+
+    ``trigger.ref`` is the thread itself: Conclair's ``DispositionTrigger``
+    requires a non-empty ``ref`` and msg-1337 names only the arm, so the ref
+    points at what the human has to look at -- the thread claimed as done.
+    """
+    return {
+        "kind": KIND_BLOCKED_ON,
+        "trigger": {"arm": HUMAN_ARM, "ref": thread_id},
+        "wake": HUMAN_WAKE,
+        "fallback": {
+            "reason": FALLBACK_REASON_OWNER_UNRESOLVED,
+            "owner": owner,
+            "declared": KIND_DONE,
+        },
+    }

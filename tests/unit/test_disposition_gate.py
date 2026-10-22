@@ -75,6 +75,25 @@ def _registry(extra: dict[str, dict] | None = None):
     return _fn
 
 
+def _fake_conclair(*, owner: str) -> MagicMock:
+    """A Conclair that stores what it is sent and reads it back verbatim."""
+    chat = MagicMock()
+    stored: list[dict[str, Any]] = []
+
+    async def _post_message(**kwargs: Any) -> dict:
+        msg = {"msg_id": f"msg-{len(stored) + 1}", "disposition": kwargs.get("disposition")}
+        stored.append(msg)
+        return {"msg": dict(msg), "thread_status_changed_to": None}
+
+    async def _get_thread(**_: Any) -> dict:
+        return {"thread": {"owner": owner}, "messages": [dict(m) for m in stored]}
+
+    chat.post_message = AsyncMock(side_effect=_post_message)
+    chat.get_thread = AsyncMock(side_effect=_get_thread)
+    chat.close = AsyncMock()
+    return chat
+
+
 @pytest.fixture
 def wired():
     settings = Settings(
@@ -83,9 +102,7 @@ def wired():
         prismind_url="http://localhost:8002",
         prismind_timeout=5.0,
     )
-    chat = MagicMock()
-    chat.post_message = AsyncMock(return_value={"msg": {}, "thread_status_changed_to": None})
-    chat.close = AsyncMock()
+    chat = _fake_conclair(owner="Heisenberg")
     prismind = MagicMock()
     prismind.get_identity = AsyncMock(side_effect=_registry())
     tools = _capture_tools(settings)
@@ -126,11 +143,16 @@ async def test_post_without_disposition_is_unchanged(wired) -> None:
 
 @pytest.mark.asyncio
 async def test_done_is_forwarded(wired) -> None:
+    # The owner (Heisenberg) resolves, so the D-8 (3) check passes the done
+    # through and the read-back matches: nothing is added to the response.
     tools, chat, prismind = wired
     result = await _post(tools, disposition={"kind": "done"})
     assert "error_type" not in result
     assert chat.post_message.call_args.kwargs["disposition"] == {"kind": "done"}
-    prismind.get_identity.assert_not_awaited()
+    assert "disposition_owner_check" not in result
+    assert "disposition_readback" not in result
+    prismind.get_identity.assert_awaited_once()
+    assert prismind.get_identity.call_args.kwargs["identity_name"] == "Heisenberg"
 
 
 @pytest.mark.parametrize("arm", ["thread", "pr", "deploy", "queue-empty"])
@@ -279,8 +301,13 @@ async def test_registry_outage_fails_closed_for_blocked_on_only(wired) -> None:
         assert refused["details"]["reason"] == "prismind down"
     chat.post_message.assert_not_awaited()
 
-    # {kind: done} and no disposition never consult the registry.
-    assert "error_type" not in await _post(tools, disposition={"kind": "done"})
+    # {kind: done} is not refused: its D-8 (3) owner check fails open (the
+    # done is stored as sent, reported unverified). No disposition never
+    # consults the registry.
+    done = await _post(tools, disposition={"kind": "done"})
+    assert "error_type" not in done
+    assert done["disposition_owner_check"]["status"] == "unverified"
+    assert chat.post_message.call_args.kwargs["disposition"] == {"kind": "done"}
     assert "error_type" not in await _post(tools)
 
 
