@@ -75,7 +75,7 @@ async def test_role_gate_blocks_post_and_never_reaches_conclair():
 
 
 @pytest.mark.asyncio
-async def test_role_gate_blocks_open_thread():
+async def test_role_gate_blocks_open_thread(owner_check_passes):
     adapter = AsyncMock()
     envelope = {"error_type": "RoleNotAllowed", "error": "nope"}
 
@@ -368,7 +368,7 @@ async def test_conclair_error_envelope_is_rendered_not_swallowed():
 )
 async def test_every_write_route_is_claimed_by_the_gated_handler(
     path: str, form: dict[str, str]
-):
+, owner_check_passes):
     """A POST must be handled here, not forwarded to Conclair's ungated one.
 
     Proven by making the gate refuse and seeing its envelope come back: only

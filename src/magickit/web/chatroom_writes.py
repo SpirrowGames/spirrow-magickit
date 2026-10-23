@@ -255,7 +255,15 @@ async def open_thread(
     ``next_participant`` (T-handoff-target-structured-field) is validated
     against Prismind's identity registry just as in the MCP tool: an
     unknown name refuses the write with ``NextParticipantUnknownError``.
+
+    ``owner`` takes the same D-8 (1) existence check as the MCP tool
+    (``OwnerUnknownError`` / ``OwnerValidationUnavailableError``), so the
+    browser is not a way around it.
     """
+    owner_error = await chatroom_tools._check_owner_exists(owner)
+    if owner_error is not None:
+        return _error_flash(owner_error)
+
     gate = await chatroom_tools._check_role_allowed(author=owner, role=role)
     if gate.error is not None:
         return _error_flash(gate.error)

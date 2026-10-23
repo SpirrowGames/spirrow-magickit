@@ -157,3 +157,15 @@ def isolated_material_store(monkeypatch) -> Callable[[], DecisionMaterialStore]:
     # ``cache_clear`` -- which is exactly the silent no-op this line used to
     # be. Clear the reference captured at import time instead.
     _REAL_GET_MATERIAL_STORE.cache_clear()
+
+
+@pytest.fixture
+def owner_check_passes(monkeypatch):
+    """Let ``chatroom_open_thread`` past the D-8 (1) owner existence check.
+
+    For open-thread tests about something else (delegation, role gate,
+    next_participant, mojibake) whose fake registry does not carry the
+    owner. The owner check itself is tested in
+    ``tests/unit/test_open_thread_owner_check.py``.
+    """
+    monkeypatch.setattr(chatroom_tools, "_check_owner_exists", AsyncMock(return_value=None))

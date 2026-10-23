@@ -271,19 +271,20 @@ async def test_unregistered_identity_posts_but_its_role_is_not_recorded(wired) -
 
 
 @pytest.mark.asyncio
-async def test_unregistered_identity_role_is_not_recorded_on_open_thread(wired) -> None:
-    """Same rule on the open path: the thread opens, the role does not stick."""
+async def test_unregistered_owner_cannot_open_a_thread_at_all(wired) -> None:
+    """D-8 (1) supersedes the old open-path rule ("the thread opens, the role
+    does not stick"): an owner that is not a registered identity no longer
+    opens a thread, so there is no unvalidated role left to drop."""
     tools, chat, prismind = wired
     prismind.get_identity.return_value = _UNREGISTERED
 
     result = await tools["chatroom_open_thread"](
-        project="p", thread_id="T-1", title="t", owner="claude-code",
+        project="p", thread_id="T-1", title="t", owner="ghost-service",
         propose_content="hi", role="proposer",
     )
 
-    assert "error_type" not in result
-    chat.open_thread.assert_awaited_once()
-    assert chat.open_thread.call_args.kwargs["role"] is None
+    assert result["error_type"] == "OwnerUnknownError"
+    chat.open_thread.assert_not_awaited()
 
 
 @pytest.mark.asyncio
