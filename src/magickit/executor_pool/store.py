@@ -51,6 +51,7 @@ instance is ever constructed (see :mod:`magickit.executor_pool.api`).
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import uuid
@@ -105,6 +106,55 @@ _ACTIVE_RESERVATION = (
     "SELECT 1 FROM executor_reservations "
     "WHERE executor = :executor AND released_at IS NULL AND expires_at > :now"
 )
+
+
+#: Page size of ``list_turn_requests`` when none is asked for, and its cap.
+DEFAULT_LIST_LIMIT = 200
+MAX_LIST_LIMIT = 1000
+
+#: One index per list shape, keyed by (filters on executor, filters on state).
+_LIST_INDEX = {
+    (True, True): "ix_turn_requests_state_executor_order",
+    (False, True): "ix_turn_requests_state_order",
+    (True, False): "ix_turn_requests_executor_order",
+    (False, False): "ix_turn_requests_order",
+}
+_LIST_INDEX_COLUMNS = {
+    "ix_turn_requests_state_executor_order": "state, executor, created_at, id",
+    "ix_turn_requests_state_order": "state, created_at, id",
+    "ix_turn_requests_executor_order": "executor, created_at, id",
+    "ix_turn_requests_order": "created_at, id",
+}
+
+
+def encode_cursor(created_at: str, request_id: str) -> str:
+    """Opaque page cursor: the last row's ``(created_at, id)`` as base64url
+    JSON. ``created_at`` is written once at insert and never changes, and
+    ``id`` breaks ties between rows of the same instant, so the key is a
+    total, stable order."""
+    raw = json.dumps([created_at, request_id], separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[str, str]:
+    """Inverse of :func:`encode_cursor`; ``ValueError`` on anything else."""
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("malformed cursor") from exc
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not all(isinstance(v, str) for v in value)
+        or not value[1]
+    ):
+        raise ValueError("malformed cursor")
+    created_at, request_id = value
+    parse_ts(created_at)  # ValueError unless it is the one format
+    if format_ts(parse_ts(created_at)) != created_at:
+        raise ValueError("malformed cursor")
+    return created_at, request_id
 
 
 class ExecutorPoolStore:
@@ -191,15 +241,19 @@ class ExecutorPoolStore:
                 WHERE state IN ('queued', 'claimed')
         """)
         # Terminal rows are kept for good (no sweep: they are the record), so
-        # the hot paths must not scan them: the Conductor's ``state=claimed``
-        # sweep, an executor polling ``executor=&state=queued``, and the
-        # reservation's bulk ``executor AND state='queued'`` rejection. A full
-        # index, not a partial one: the list query binds ``state`` as a
-        # parameter, which SQLite cannot prove satisfies a partial WHERE.
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS ix_turn_requests_state_executor
-                ON turn_requests (state, executor)
-        """)
+        # no read may scan or sort them all. Every list shape -- filter on
+        # state and executor, state only, executor only, none -- has its own
+        # index whose equality columns come first and whose tail is the sort
+        # key ``(created_at, id)``: ORDER BY + LIMIT then walk the index and
+        # never build a temp B-tree. The queries name their index with
+        # ``INDEXED BY`` (see ``_LIST_INDEX``), so the planner cannot drift to
+        # a sort for want of statistics, and a missing index is an error, not
+        # a silent slowdown. Full indexes, not partial: ``state`` is bound as
+        # a parameter, which SQLite cannot prove satisfies a partial WHERE.
+        for name, columns in _LIST_INDEX_COLUMNS.items():
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {name} ON turn_requests ({columns})"
+            )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS executor_reservations (
                 executor       TEXT PRIMARY KEY,
@@ -301,10 +355,24 @@ class ExecutorPoolStore:
         return _request_dict(row)
 
     async def list_turn_requests(
-        self, *, executor: str | None = None, state: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Both filters optional: the Conductor sweeps ``state=claimed``
-        across the whole pool."""
+        self,
+        *,
+        executor: str | None = None,
+        state: str | None = None,
+        limit: int = DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """One page, oldest first: ``{"turn_requests": [...], "next_cursor":
+        str | None}``. Both filters optional (the Conductor sweeps
+        ``state=claimed`` across the whole pool); the limit always applies.
+        Paging is by cursor only -- no offset, which would cost O(N) on a
+        table that only grows. ``ValueError`` on a bad limit or cursor."""
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_LIST_LIMIT
+        ):
+            raise ValueError(f"limit must be 1..{MAX_LIST_LIMIT}")
         clauses: list[str] = []
         params: list[Any] = []
         if executor is not None:
@@ -313,14 +381,25 @@ class ExecutorPoolStore:
         if state is not None:
             clauses.append("state = ?")
             params.append(state)
+        if cursor is not None:
+            clauses.append("(created_at, id) > (?, ?)")
+            params.extend(decode_cursor(cursor))
+        index = _LIST_INDEX[(executor is not None, state is not None)]
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         async with self._connect() as conn:
             cur = await conn.execute(
-                f"SELECT * FROM turn_requests{where} ORDER BY created_at, id",
-                params,
+                f"SELECT * FROM turn_requests INDEXED BY {index}{where}"
+                " ORDER BY created_at, id LIMIT ?",
+                [*params, limit + 1],
             )
             rows = await cur.fetchall()
-        return [_request_dict(r) for r in rows]
+        page = [_request_dict(r) for r in rows[:limit]]
+        next_cursor = (
+            encode_cursor(page[-1]["created_at"], page[-1]["id"])
+            if len(rows) > limit
+            else None
+        )
+        return {"turn_requests": page, "next_cursor": next_cursor}
 
     async def _transition(
         self, sql: str, params: dict[str, Any]
@@ -427,7 +506,8 @@ class ExecutorPoolStore:
             row = await cur.fetchone()
             await cur.close()
             cur = await conn.execute(
-                "UPDATE turn_requests SET state = 'rejected',"
+                "UPDATE turn_requests INDEXED BY"
+                f" {_LIST_INDEX[(True, True)]} SET state = 'rejected',"
                 " reject_reason = :reason, finished_at = :now"
                 " WHERE executor = :executor AND state = 'queued' RETURNING id",
                 {"reason": EXECUTOR_RESERVED, "now": now, "executor": executor},

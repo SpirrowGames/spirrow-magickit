@@ -320,7 +320,7 @@ async def test_every_terminal_move_writes_finished_at(pool):
     victim = await pool.queued("T-res")
     await pool.reserve()
     for rid in rids + [victim]:
-        row = (await pool.store.list_turn_requests())
+        row = (await pool.store.list_turn_requests())["turn_requests"]
         got = {r["id"]: r for r in row}[rid]
         assert got["state"] in TERMINAL_STATES
         assert got["finished_at"] is not None and TS_RE.fullmatch(got["finished_at"])
@@ -419,7 +419,8 @@ async def test_reservation_rejects_that_executors_queued_requests(pool):
                            " heartbeat_at FROM turn_requests WHERE id=?", rid)
         assert row[:2] == ("rejected", EXECUTOR_RESERVED)
         assert row[2] is not None and row[3] is None and row[4] is None
-    states = {r["id"]: r["state"] for r in await pool.store.list_turn_requests()}
+    states = {r["id"]: r["state"]
+              for r in (await pool.store.list_turn_requests())["turn_requests"]}
     assert states[claimed] == "claimed" and states[other] == "queued"
 
 
@@ -515,7 +516,8 @@ async def test_invariant_no_queued_row_for_a_reserved_executor(pool):
         elif op == "tick":
             pool.clock.advance(minutes=rng.randint(1, 20))
         else:
-            queued = await pool.store.list_turn_requests(executor=ex, state="queued")
+            queued = (await pool.store.list_turn_requests(
+                executor=ex, state="queued"))["turn_requests"]
             if queued:
                 await pool.claim(queued[0]["id"], executor=ex)
         now = format_ts(pool.clock.now)
@@ -570,14 +572,162 @@ def test_runtime_sqlite_supports_returning():
     assert sqlite3.sqlite_version_info >= (3, 35, 0)
 
 
-@pytest.mark.parametrize("sql,params", [
-    ("SELECT * FROM turn_requests WHERE state = ? ORDER BY created_at, id", ("claimed",)),
-    ("SELECT * FROM turn_requests WHERE executor = ? AND state = ?"
-     " ORDER BY created_at, id", ("ex-a", "queued")),
-    ("UPDATE turn_requests SET state = 'rejected' WHERE executor = ?"
-     " AND state = 'queued'", ("ex-a",)),
-])
-async def test_hot_paths_use_the_state_executor_index(pool, sql, params):
+# --- listing: cursor paging and indexes ------------------------------------
+
+_EXPECTED_INDEX = {
+    (True, True): "ix_turn_requests_state_executor_order",
+    (False, True): "ix_turn_requests_state_order",
+    (True, False): "ix_turn_requests_executor_order",
+    (False, False): "ix_turn_requests_order",
+}
+
+
+class _SqlSpy:
+    """Records the SQL the store sends, so the plan test checks the real query."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import aiosqlite
+        self.seen: list[tuple[str, list[Any]]] = []
+        real = aiosqlite.Connection.execute
+        spy = self
+
+        async def execute(conn, sql, parameters=None):
+            spy.seen.append((sql, parameters if isinstance(parameters, dict)
+                             else list(parameters or [])))
+            return await real(conn, sql, parameters)
+
+        monkeypatch.setattr(aiosqlite.Connection, "execute", execute)
+
+    def last_list_query(self) -> tuple[str, list[Any]]:
+        return [q for q in self.seen if q[0].startswith("SELECT * FROM turn_requests")][-1]
+
+
+@pytest.mark.parametrize("with_cursor", [False, True])
+@pytest.mark.parametrize("shape", list(_EXPECTED_INDEX))
+async def test_every_list_shape_walks_its_index_without_a_sort(
+    pool, monkeypatch, shape, with_cursor
+):
+    from magickit.executor_pool.store import encode_cursor
     await pool.store.list_turn_requests()  # create tables
+    spy = _SqlSpy(monkeypatch)
+    executor, state = shape
+    await pool.store.list_turn_requests(
+        executor="ex-a" if executor else None,
+        state="queued" if state else None,
+        cursor=encode_cursor(format_ts(T0), "x") if with_cursor else None,
+    )
+    sql, params = spy.last_list_query()
+    assert f"INDEXED BY {_EXPECTED_INDEX[shape]}" in sql and "LIMIT ?" in sql, sql
     plan = " ".join(str(r) for r in pool.rows(f"EXPLAIN QUERY PLAN {sql}", *params))
-    assert "ix_turn_requests_state_executor" in plan, plan
+    assert _EXPECTED_INDEX[shape] in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
+
+
+async def test_bulk_reject_on_reservation_uses_the_index(pool, monkeypatch):
+    q1 = await pool.queued("T-1")
+    spy = _SqlSpy(monkeypatch)
+    r = await pool.reserve()
+    assert r.json()["rejected_request_ids"] == [q1]
+    (sql, params), = [q for q in spy.seen if q[0].startswith("UPDATE turn_requests")]
+    with sqlite3.connect(pool.db) as conn:
+        plan = " ".join(str(r) for r in conn.execute(
+            f"EXPLAIN QUERY PLAN {sql}", params).fetchall())
+    assert "ix_turn_requests_state_executor_order" in plan, plan
+
+
+async def _walk(pool, query: str) -> tuple[list[str], int]:
+    ids: list[str] = []
+    pages = 0
+    cursor = None
+    while True:
+        url = f"{BASE}/turn-requests?{query}" + (f"&cursor={cursor}" if cursor else "")
+        r = await pool.client.get(url)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids += [t["id"] for t in body["turn_requests"]]
+        pages += 1
+        cursor = body["next_cursor"]
+        if cursor is None:
+            return ids, pages
+        assert pages < 100
+
+
+async def test_cursor_walk_returns_every_row_once_in_order(pool):
+    made = []
+    for i in range(7):
+        pool.clock.advance(seconds=1)
+        made.append(await pool.queued(f"T-{i}", executor="ex-a" if i % 2 else "ex-b"))
+    ids, pages = await _walk(pool, "limit=3")
+    assert ids == made and pages == 3
+    ids, _ = await _walk(pool, "limit=2&executor=ex-a")
+    assert ids == made[1::2]
+    ids, pages = await _walk(pool, "limit=7&state=queued")
+    assert ids == made and pages == 1  # exactly full: no empty trailing page
+
+
+async def test_cursor_walk_across_rows_of_the_same_instant(pool):
+    made = [await pool.queued(f"T-{i}") for i in range(9)]  # clock fixed
+    assert len({r[0] for r in pool.rows("SELECT created_at FROM turn_requests")}) == 1
+    ids, pages = await _walk(pool, "limit=4")
+    assert ids == sorted(made) and len(set(ids)) == 9  # id breaks the tie
+    assert pages == 3
+
+
+async def test_default_limit_is_200(pool):
+    await pool.store.list_turn_requests()  # create tables
+    with sqlite3.connect(pool.db) as conn:
+        conn.executemany(
+            "INSERT INTO turn_requests (id, project, thread_id, executor, tag,"
+            " state, created_at, finished_at) VALUES (?, 'p', ?, 'ex-a', 'g',"
+            " 'done', ?, ?)",
+            [(f"r{i:04d}", f"T-{i}", format_ts(T0), format_ts(T0)) for i in range(201)],
+        )
+    body = (await pool.client.get(f"{BASE}/turn-requests")).json()
+    assert len(body["turn_requests"]) == 200 and body["next_cursor"] is not None
+    body = (await pool.client.get(
+        f"{BASE}/turn-requests?cursor={body['next_cursor']}")).json()
+    assert [t["id"] for t in body["turn_requests"]] == ["r0200"]
+    assert body["next_cursor"] is None
+    body = (await pool.client.get(f"{BASE}/turn-requests?limit=1000")).json()
+    assert len(body["turn_requests"]) == 201 and body["next_cursor"] is None
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=1001", "limit=x"])
+async def test_limit_out_of_bounds_is_422(pool, query):
+    assert (await pool.client.get(f"{BASE}/turn-requests?{query}")).status_code == 422
+
+
+def _b64(text: str) -> str:
+    import base64
+    return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+
+
+@pytest.mark.parametrize("cursor", [
+    "!!!",
+    _b64("not json"),
+    _b64("{}"),
+    _b64('["a","b"]'),  # created_at not the timestamp format
+    _b64('["2026-10-23T06:00:00Z","a"]'),  # not the fixed-width format
+    _b64('["2026-10-23T06:00:00.000000Z",""]'),  # empty id
+    _b64('["2026-10-23T06:00:00.000000Z"]'),  # one element
+    _b64('["2026-10-23T06:00:00.000000Z","a","b"]'),  # three elements
+    _b64('["2026-10-23T06:00:00.000000Z",1]'),  # id not a string
+])
+async def test_malformed_cursor_is_422(pool, cursor):
+    r = await pool.client.get(f"{BASE}/turn-requests?cursor={cursor}")
+    assert r.status_code == 422, r.text
+
+
+async def test_there_is_no_offset(pool):
+    for i in range(3):
+        await pool.queued(f"T-{i}")
+    plain = (await pool.client.get(f"{BASE}/turn-requests?limit=2")).json()
+    shifted = (await pool.client.get(f"{BASE}/turn-requests?limit=2&offset=1")).json()
+    assert shifted == plain
+
+
+async def test_store_refuses_bad_limit(pool):
+    for bad in (0, 1001, True, "5"):
+        with pytest.raises(ValueError):
+            await pool.store.list_turn_requests(limit=bad)
+

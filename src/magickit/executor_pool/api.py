@@ -36,6 +36,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from magickit.config import get_settings
 from magickit.executor_pool.store import (
+    DEFAULT_LIST_LIMIT,
+    MAX_LIST_LIMIT,
     MAX_TTL_MINUTES,
     ExecutorPoolStore,
     PoolConflictError,
@@ -164,12 +166,19 @@ async def create_turn_request(body: TurnRequestCreate) -> Any:
 async def list_turn_requests(
     executor: Annotated[str | None, Query(pattern=_NAME_PATTERN)] = None,
     state: State | None = None,
-) -> dict[str, Any]:
-    return {
-        "turn_requests": await _get_store().list_turn_requests(
-            executor=executor, state=state
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = DEFAULT_LIST_LIMIT,
+    cursor: Annotated[str | None, Query(min_length=1)] = None,
+) -> Any:
+    """One page, oldest first: ``{"turn_requests": [...], "next_cursor":
+    str | null}``. ``limit`` always applies, filters or not. Paging is by the
+    opaque ``cursor`` only; there is no ``offset``. A cursor that does not
+    decode is 422."""
+    try:
+        return await _get_store().list_turn_requests(
+            executor=executor, state=state, limit=limit, cursor=cursor
         )
-    }
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc)})
 
 
 @router.post("/turn-requests/{request_id}/claim")
@@ -247,4 +256,3 @@ async def release_reservation(name: ExecutorPath) -> Any:
         return await _get_store().release_reservation(name)
     except PoolConflictError as exc:
         return _conflict(exc)
-
