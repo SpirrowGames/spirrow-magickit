@@ -190,6 +190,16 @@ class ExecutorPoolStore:
                 ON turn_requests (project, thread_id)
                 WHERE state IN ('queued', 'claimed')
         """)
+        # Terminal rows are kept for good (no sweep: they are the record), so
+        # the hot paths must not scan them: the Conductor's ``state=claimed``
+        # sweep, an executor polling ``executor=&state=queued``, and the
+        # reservation's bulk ``executor AND state='queued'`` rejection. A full
+        # index, not a partial one: the list query binds ``state`` as a
+        # parameter, which SQLite cannot prove satisfies a partial WHERE.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS ix_turn_requests_state_executor
+                ON turn_requests (state, executor)
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS executor_reservations (
                 executor       TEXT PRIMARY KEY,

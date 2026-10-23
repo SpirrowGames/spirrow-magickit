@@ -568,3 +568,16 @@ async def test_every_stored_timestamp_has_the_one_format(pool):
 
 def test_runtime_sqlite_supports_returning():
     assert sqlite3.sqlite_version_info >= (3, 35, 0)
+
+
+@pytest.mark.parametrize("sql,params", [
+    ("SELECT * FROM turn_requests WHERE state = ? ORDER BY created_at, id", ("claimed",)),
+    ("SELECT * FROM turn_requests WHERE executor = ? AND state = ?"
+     " ORDER BY created_at, id", ("ex-a", "queued")),
+    ("UPDATE turn_requests SET state = 'rejected' WHERE executor = ?"
+     " AND state = 'queued'", ("ex-a",)),
+])
+async def test_hot_paths_use_the_state_executor_index(pool, sql, params):
+    await pool.store.list_turn_requests()  # create tables
+    plan = " ".join(str(r) for r in pool.rows(f"EXPLAIN QUERY PLAN {sql}", *params))
+    assert "ix_turn_requests_state_executor" in plan, plan
