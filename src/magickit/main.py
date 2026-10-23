@@ -307,6 +307,15 @@ def create_app() -> FastAPI:
     # reads an allowlist; this page reads the whole org (web/prs.py says why).
     app.include_router(prs_router)
 
+    # ADR-2026-10-09-23 unit 3: executor reports, turn requests, reservations.
+    # INV-0: off (the default) means the router is not included -- every
+    # /v1/executor-pool path is 404 and the store, and so its tables, are
+    # never created. Imported here so the module is not even loaded when off.
+    if settings.executor_pool_enabled:
+        from magickit.executor_pool.api import router as executor_pool_router
+
+        app.include_router(executor_pool_router)
+
     # Chatroom UI proxy. Registered BEFORE the /static mount on purpose:
     # Starlette matches routes in insertion order, and this router claims the
     # two Conclair assets (conclair.css / conclair.js) that would otherwise
