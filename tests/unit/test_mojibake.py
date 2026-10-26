@@ -179,7 +179,7 @@ async def test_a_clean_post_gets_no_warning():
 
 
 @pytest.mark.asyncio
-async def test_open_thread_checks_the_title_too():
+async def test_open_thread_checks_the_title_too(owner_check_passes):
     body = (
         await _post(
             "/ui/projects/p/threads",

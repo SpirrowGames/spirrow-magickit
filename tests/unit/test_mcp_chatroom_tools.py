@@ -135,7 +135,7 @@ def test_register_tools_attaches_nine_tools(
 
 
 @pytest.mark.asyncio
-async def test_open_thread_delegates(registered) -> None:
+async def test_open_thread_delegates(registered, owner_check_passes) -> None:
     tools, adapter = registered
     fn = tools["chatroom_open_thread"]
     await fn(
@@ -156,7 +156,7 @@ async def test_open_thread_delegates(registered) -> None:
 
 
 @pytest.mark.asyncio
-async def test_open_thread_empty_commit_ref_normalized_to_none(registered) -> None:
+async def test_open_thread_empty_commit_ref_normalized_to_none(registered, owner_check_passes) -> None:
     tools, adapter = registered
     fn = tools["chatroom_open_thread"]
     await fn(
@@ -168,7 +168,7 @@ async def test_open_thread_empty_commit_ref_normalized_to_none(registered) -> No
 
 
 @pytest.mark.asyncio
-async def test_open_thread_forwards_embodiment_when_supplied(registered) -> None:
+async def test_open_thread_forwards_embodiment_when_supplied(registered, owner_check_passes) -> None:
     tools, adapter = registered
     fn = tools["chatroom_open_thread"]
     await fn(
@@ -482,7 +482,7 @@ async def test_check_integrity_delegates(registered) -> None:
 
 
 @pytest.mark.asyncio
-async def test_adapter_error_envelope_passes_through(registered) -> None:
+async def test_adapter_error_envelope_passes_through(registered, owner_check_passes) -> None:
     """When adapter returns an error envelope, MCP tool returns it unchanged."""
     tools, adapter = registered
     adapter.open_thread = AsyncMock(
@@ -504,7 +504,7 @@ async def test_adapter_error_envelope_passes_through(registered) -> None:
 
 
 @pytest.mark.asyncio
-async def test_adapter_close_called_when_adapter_raises(registered) -> None:
+async def test_adapter_close_called_when_adapter_raises(registered, owner_check_passes) -> None:
     tools, adapter = registered
     adapter.open_thread = AsyncMock(side_effect=RuntimeError("boom"))
     fn = tools["chatroom_open_thread"]
