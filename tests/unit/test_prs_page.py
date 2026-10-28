@@ -372,6 +372,224 @@ async def test_rate_capped_unapproved_prs_are_named_as_possibly_missing():
     assert any("rate-cap" in n for n in overview.notices)
 
 
+# --- gate 済 only into a protected base ------------------------------------
+# T-prs-merge-ready-lists-develop-base-gate-approvals, msg-1465 D-5 #1-#8.
+
+
+async def _overview_from_snapshots(snapshots, items, **settings):
+    async def collect(repos, state):
+        return (snapshots, [], set())
+
+    return await prs.read_overview(
+        _settings(**settings),
+        search_page=_search_returning(items),
+        collect_snapshots=collect,
+        state=PrWatchState(),
+    )
+
+
+async def test_approved_into_develop_is_the_loops_merge_not_a_human_click(
+    client, monkeypatch
+):
+    # D-5 #1. SpirrowGames/Spirrow-VoxelWorld#359: base develop, gate APPROVE.
+    overview = await _overview_from_snapshots(
+        [_snapshot("Spirrow-VoxelWorld", 359, approved=True,
+                   head_ref="feature/x", base_ref="develop", head_in_base_repo=True)],
+        [_item("Spirrow-VoxelWorld", 359, updated=NOW - timedelta(hours=1))],
+    )
+    key = _key("Spirrow-VoxelWorld", 359)
+    assert overview.approved == set()
+    assert overview.loop_merge == {key}
+    assert not any("ループ" in n for n in overview.notices)
+
+    ctx = prs.build_context(overview, [], _settings(), now=NOW)
+    assert ctx["merge_ready"] == []
+    assert ctx["stale"] == []
+    assert all(isinstance(i, prs.LoopMergeItem) for i in ctx["loop_merge"])
+    assert [(i.row.key, i.stale) for i in ctx["loop_merge"]] == [(key, False)]
+
+    async def fake_get(settings):
+        return overview, []
+
+    monkeypatch.setattr(prs, "get_overview", fake_get)
+    html = client.get("/dashboard/prs/_tables").text
+    assert 'href="https://github.com/SpirrowGames/Spirrow-VoxelWorld/pull/359"' in html
+    assert "ループの merge 待ち 1 件" in html
+    assert ">gate 済</span>" not in html
+
+
+async def test_approved_into_main_is_still_gate_done():
+    # D-5 #2 (regression).
+    overview = await _overview_from_snapshots(
+        [_snapshot("r", 1, approved=True, head_ref="feature/x", base_ref="main",
+                   head_in_base_repo=True)],
+        [_item("r", 1)],
+    )
+    assert overview.approved == {_key("r", 1)}
+    assert overview.loop_merge == set()
+    ctx = prs.build_context(overview, [], _settings(), now=NOW)
+    assert [r.label for r in ctx["merge_reasons"][_key("r", 1)]] == ["gate 済"]
+    assert ctx["loop_merge"] == []
+
+
+async def test_approved_with_unknown_base_fails_closed_into_gate_done():
+    # D-5 #3. PrSnapshot.base_ref is "" when the payload carried no base
+    # ref (it is a str, not Optional). The dispatcher refuses to merge an
+    # unknown base, so a human still must.
+    overview = await _overview_from_snapshots(
+        [_snapshot("r", 1, approved=True, base_ref="")],
+        [_item("r", 1)],
+    )
+    assert overview.approved == {_key("r", 1)}
+    assert overview.loop_merge == set()
+    ctx = prs.build_context(overview, [], _settings(), now=NOW)
+    assert [r.label for r in ctx["merge_reasons"][_key("r", 1)]] == ["gate 済"]
+
+
+async def test_protected_set_is_the_dispatchers_env(monkeypatch):
+    # D-5 #4. One definition, shared with the dispatcher's merge refusal.
+    monkeypatch.setenv("GITHUB_PROTECTED_BASE_BRANCHES", "main,release")
+    overview = await _overview_from_snapshots(
+        [
+            _snapshot("r", 1, approved=True, base_ref="release"),
+            _snapshot("r", 2, approved=True, base_ref="develop"),
+        ],
+        [_item("r", 1), _item("r", 2)],
+    )
+    assert overview.approved == {_key("r", 1)}
+    assert overview.loop_merge == {_key("r", 2)}
+
+
+async def test_release_and_asked_rows_are_unchanged_by_the_base_rule():
+    # D-5 #5. release / 依頼 do not read the gate verdict, so a develop
+    # base -- even an approved one -- leaves them as they were.
+    overview = await _overview_from_snapshots(
+        [
+            _snapshot("p", 113, approved=False, head_ref="develop", base_ref="main",
+                      head_in_base_repo=True),
+            _snapshot("docs", 44, approved=False, head_ref="feature/y",
+                      base_ref="develop", head_in_base_repo=True),
+            _snapshot("docs", 45, approved=True, head_ref="feature/z",
+                      base_ref="develop", head_in_base_repo=True),
+        ],
+        [
+            _item("p", 113),
+            _item("docs", 44, assignees=("takayan0908",)),
+            _item("docs", 45, assignees=("takayan0908",)),
+        ],
+    )
+    ctx = prs.build_context(
+        overview, [], _settings(prs_merge_assignees=["takayan0908"]), now=NOW
+    )
+    labels = {key: [r.label for r in rs] for key, rs in ctx["merge_reasons"].items()}
+    assert labels == {
+        _key("p", 113): ["release develop → main"],
+        _key("docs", 44): ["依頼 → takayan0908"],
+        _key("docs", 45): ["依頼 → takayan0908"],
+    }
+
+
+def test_stale_loop_merge_says_investigate_and_stale_table_has_no_badge(
+    client, monkeypatch
+):
+    # D-5 #6.
+    overview = _overview(
+        [_item("r", 7, updated=NOW - timedelta(days=3))], loop_merge=[_key("r", 7)]
+    )
+    ctx = prs.build_context(overview, [], _settings(), now=NOW)
+    assert [i.stale for i in ctx["loop_merge"]] == [True]
+    assert [r.number for r in ctx["stale"]] == [7]
+
+    async def fake_get(settings):
+        return overview, []
+
+    monkeypatch.setattr(prs, "get_overview", fake_get)
+    html = client.get("/dashboard/prs/_tables").text
+    assert "1日以上止まっています — ループが merge できていません。要調査" in html
+    assert "prs-reason-loop" not in html
+    # Once in the alert, once as an ordinary 停滞 row.
+    assert html.count('href="https://github.com/SpirrowGames/r/pull/7"') == 2
+
+
+def test_no_loop_merge_renders_no_alert(client, monkeypatch):
+    # D-5 #7.
+    overview = _overview([_item("r", 1)], approved=[_key("r", 1)])
+    assert prs.build_context(overview, [], _settings(), now=NOW)["loop_merge"] == []
+
+    async def fake_get(settings):
+        return overview, []
+
+    monkeypatch.setattr(prs, "get_overview", fake_get)
+    html = client.get("/dashboard/prs/_tables").text
+    assert "ループの merge 待ち" not in html
+    assert "prs-loop-merge" not in html
+
+
+def test_fresh_loop_merge_does_not_say_investigate(client, monkeypatch):
+    # D-5 #8.
+    # The route renders with the real clock, not NOW.
+    now = datetime.now(timezone.utc)
+    overview = _overview(
+        [_item("r", 8, updated=now - timedelta(hours=2))], loop_merge=[_key("r", 8)]
+    )
+    ctx = prs.build_context(overview, [], _settings(), now=now)
+    assert [i.stale for i in ctx["loop_merge"]] == [False]
+
+    async def fake_get(settings):
+        return overview, []
+
+    monkeypatch.setattr(prs, "get_overview", fake_get)
+    html = client.get("/dashboard/prs/_tables").text
+    assert "ループの merge 待ち 1 件" in html
+    assert "要調査" not in html
+
+
+def test_unavailable_context_has_empty_loop_merge():
+    assert prs.build_context(None, ["down"], _settings(), now=NOW)["loop_merge"] == []
+
+
+def test_draft_into_develop_is_not_listed_as_the_loops_merge():
+    # An approved PR into develop later turned back into a draft: the loop
+    # must not merge it, so it is not the loop's merge to be waiting on —
+    # and once stale it must not say the loop failed (要調査).
+    overview = _overview(
+        [
+            _item("a", 1, updated=NOW - timedelta(days=5), draft=True),
+            _item("a", 2, updated=NOW - timedelta(days=5)),
+        ],
+        loop_merge=[_key("a", 1), _key("a", 2)],
+    )
+    ctx = prs.build_context(overview, [], _settings(), now=NOW)
+    assert [i.row.number for i in ctx["loop_merge"]] == [2]
+    assert ctx["merge_ready"] == []
+    # The draft is still a forgotten PR: the 停滞 table keeps it.
+    assert {r.number for r in ctx["stale"]} == {1, 2}
+
+
+async def test_loop_merge_heading_names_the_configured_protected_set(client, monkeypatch):
+    # With GITHUB_PROTECTED_BASE_BRANCHES=prod, an approved PR into main is
+    # the loop's merge. The heading must name the real protected set, not
+    # claim the PR targets "a base other than main".
+    monkeypatch.setenv("GITHUB_PROTECTED_BASE_BRANCHES", "prod")
+    now = datetime.now(timezone.utc)
+    overview = await _overview_from_snapshots(
+        [_snapshot("r", 9, approved=True, base_ref="main")],
+        [_item("r", 9, updated=now - timedelta(hours=1))],
+    )
+    assert overview.loop_merge == {_key("r", 9)}
+    ctx = prs.build_context(overview, [], _settings(), now=now)
+    assert ctx["protected_label"] == "prod"
+
+    async def fake_get(settings):
+        return overview, []
+
+    monkeypatch.setattr(prs, "get_overview", fake_get)
+    html = client.get("/dashboard/prs/_tables").text
+    assert "ループの merge 待ち 1 件" in html
+    assert "protected（<code>prod</code>）以外の base 宛てで gate 済" in html
+    assert "main 以外" not in html
+
+
 async def test_search_failure_raises_rather_than_returning_empty():
     async def search_page(query: str, page: int) -> Any:
         return None
@@ -384,7 +602,7 @@ async def test_search_failure_raises_rather_than_returning_empty():
 
 
 def _overview(
-    rows_items: list[dict[str, Any]], approved=(), mergeable=(), release=None
+    rows_items: list[dict[str, Any]], approved=(), mergeable=(), release=None, loop_merge=()
 ) -> prs.Overview:
     rows = [prs._row_from_item(i) for i in rows_items]
     return prs.Overview(
@@ -392,8 +610,9 @@ def _overview(
         rows=[r for r in rows if r],
         approved=set(approved),
         notices=[],
-        mergeable=set(mergeable) | set(approved),
+        mergeable=set(mergeable) | set(approved) | set(loop_merge),
         release=dict(release or {}),
+        loop_merge=set(loop_merge),
     )
 
 

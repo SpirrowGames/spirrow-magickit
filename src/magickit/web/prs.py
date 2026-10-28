@@ -6,7 +6,9 @@ Two tables, each row linking to the PR on GitHub:
   neither conflicting nor a draft, and at least one of these holds:
 
   - *gate 済*: the independent naysayer's APPROVE stands at the current
-    head;
+    head **and** the base is a protected branch
+    (``GITHUB_PROTECTED_BASE_BRANCHES``, default ``main``) or unknown —
+    see "gate 済 into an unprotected base" below;
   - *release*: its head is a release branch (``prs_release_heads``) of
     the same repository, e.g. ``develop`` → ``main``;
   - *依頼*: it is assigned to a login in ``prs_merge_assignees``.
@@ -67,6 +69,28 @@ request. Nothing assigns a PR on its own.
 Neither signal says the gate passed. The row names its reason so that
 "listed because somebody asked" is never read as "gate 済".
 
+gate 済 into an unprotected base
+--------------------------------
+
+An APPROVE on a PR into ``develop`` is not a human's merge click: the
+loop merges into unprotected bases itself. Listing it as gate 済 put
+SpirrowGames/Spirrow-VoxelWorld#359 (base ``develop``) on the human's
+merge list (2026-10-28). So gate 済 is given only when the base is in
+:func:`magickit.mcp.github_dispatch.protected_base_branches` — the same
+set the dispatcher refuses AI merges into, so "the AI may not merge
+this" and "a human merges this" cannot disagree. An unknown base is
+fail-closed into gate 済: the dispatcher refuses to merge it too, so it
+stays a human's job.
+
+An approved PR into an unprotected base that is still open means the
+loop has not merged it. It is not dropped: it is listed, with links, in
+one *ループの merge 待ち* alert above the tables (``loop_merge``; drafts
+excluded — the loop does not merge a draft either), from
+the moment it is approved — not only once it is 停滞. A row past
+``prs_stale_hours`` says "要調査" in that alert; the 停滞 table shows it
+as an ordinary row, without a badge, so the two never say different
+things about one PR.
+
 Cost is bounded by caching the whole result for ``prs_refresh_seconds``.
 The page polls more often than that; a poll inside the window re-renders
 the cached result, so ages keep moving without spending API calls.
@@ -85,6 +109,11 @@ from fastapi.responses import HTMLResponse
 
 from magickit.config import Settings, get_settings
 from magickit.core import pr_watch
+# The dispatcher's protected set, read here so "what the AI cannot merge"
+# and "what a human must merge" are one fact (module docstring). Imported
+# at module level so the web -> mcp dependency is visible; github_dispatch
+# imports nothing from magickit.web, so there is no cycle.
+from magickit.mcp.github_dispatch import protected_base_branches
 from magickit.utils.logging import get_logger
 from magickit.web.deps import parse_ts, templates
 
@@ -152,6 +181,23 @@ class Overview:
     mergeable: set[tuple[str, str, int]] = field(default_factory=set)
     #: Release PRs among ``mergeable``, with their ``head → base`` text.
     release: dict[tuple[str, str, int], str] = field(default_factory=dict)
+    #: Approved PRs into a known, unprotected base (e.g. ``develop``):
+    #: the loop's merge to make, not a human's. Never in ``approved``.
+    loop_merge: set[tuple[str, str, int]] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class LoopMergeItem:
+    """One row of the ループの merge 待ち alert (view-only).
+
+    ``stale`` is judged in :func:`build_context` with the 停滞 table's own
+    cutoff, so the template only reads it. Kept off :class:`PrRow` on
+    purpose: a row is what the search returned, and the gate state is
+    not part of that.
+    """
+
+    row: PrRow
+    stale: bool
 
 
 def excluded_repo_names(org: str, entries: list[str]) -> list[str]:
@@ -291,6 +337,30 @@ def release_prs(
     }
 
 
+def split_approved(
+    snapshots: list[pr_watch.PrSnapshot],
+) -> tuple[set[tuple[str, str, int]], set[tuple[str, str, int]]]:
+    """``(approved, loop_merge)``: approved PRs split by who merges them.
+
+    ``approved`` (gate 済, a human's click): the base is protected, or the
+    snapshot does not say what it is — fail-closed, because the
+    dispatcher refuses to merge an unknown base too. ``loop_merge``: the
+    base is known and unprotected, so the loop merges it. The protected
+    set is the dispatcher's own (see module docstring).
+    """
+    protected = protected_base_branches()
+    approved: set[tuple[str, str, int]] = set()
+    loop_merge: set[tuple[str, str, int]] = set()
+    for s in snapshots:
+        if not s.artifact_approved:
+            continue
+        if s.base_ref and s.base_ref not in protected:
+            loop_merge.add(pr_watch.pr_key(s))
+        else:
+            approved.add(pr_watch.pr_key(s))
+    return approved, loop_merge
+
+
 class _SearchFailedError(Exception):
     """The search itself failed: there is no live set to show."""
 
@@ -325,6 +395,7 @@ async def read_overview(
 
     repos = sorted({(r.owner, r.repo) for r in rows if not r.draft})
     approved: set[tuple[str, str, int]] = set()
+    loop_merge: set[tuple[str, str, int]] = set()
     mergeable: set[tuple[str, str, int]] = set()
     release: dict[tuple[str, str, int], str] = {}
     if repos:
@@ -338,7 +409,7 @@ async def read_overview(
             notices.append(f"gate の判定を読めません。マージ待ちの表は空ではなく不明です ({exc})")
         else:
             notices.extend(watch_notices)
-            approved = {pr_watch.pr_key(s) for s in snapshots if s.artifact_approved}
+            approved, loop_merge = split_approved(snapshots)
             mergeable = {pr_watch.pr_key(s) for s in snapshots}
             release = release_prs(snapshots, settings.prs_release_heads)
             capped = sum(1 for s in snapshots if s.rate_capped and not s.artifact_approved)
@@ -355,6 +426,7 @@ async def read_overview(
         notices=notices,
         mergeable=mergeable,
         release=release,
+        loop_merge=loop_merge,
     )
 
 
@@ -382,6 +454,11 @@ def merge_reasons(
     row: PrRow, overview: Overview, merge_assignees: set[str]
 ) -> list[MergeReason]:
     """Every reason ``row`` is waiting for a merge click. Empty = it is not.
+
+    gate 済 reads ``overview.approved`` only, which holds approved PRs
+    whose base is protected (``GITHUB_PROTECTED_BASE_BRANCHES``, default
+    ``main``) or unknown. An approved PR into ``develop`` is the loop's
+    merge (``overview.loop_merge``) and gets no gate 済 here.
 
     ``merge_assignees`` is lower-cased: GitHub logins are
     case-insensitive.
@@ -413,12 +490,17 @@ def build_context(
         "excluded": excluded,
         "stale_hours": settings.prs_stale_hours,
         "stale_label": _hours_label(settings.prs_stale_hours),
+        # The protected bases as configured (GITHUB_PROTECTED_BASE_BRANCHES),
+        # so the loop-merge heading names the real set instead of assuming
+        # the default ``main``.
+        "protected_label": ", ".join(sorted(protected_base_branches())),
         "release_heads": [h for h in settings.prs_release_heads if str(h or "").strip()],
         "merge_assignees": [a for a in settings.prs_merge_assignees if str(a or "").strip()],
     }
     if overview is None:
         return {**base, "unavailable": True, "notices": failure_notices,
-                "merge_ready": [], "merge_reasons": {}, "stale": [], "total": 0,
+                "merge_ready": [], "merge_reasons": {}, "stale": [],
+                "loop_merge": [], "total": 0,
                 "checked_at": None}
 
     cutoff = now - timedelta(hours=settings.prs_stale_hours)
@@ -439,6 +521,18 @@ def build_context(
         ),
         key=lambda r: r.updated_at,
     )
+    loop_merge = [
+        LoopMergeItem(
+            row=r,
+            stale=(ts := parse_ts(r.updated_at)) is not None and ts <= cutoff,
+        )
+        for r in sorted(
+            # A draft is nobody's merge yet, the loop's included: listing
+            # it would blame the loop ("要調査") for a PR it must not merge.
+            (r for r in overview.rows if not r.draft and r.key in overview.loop_merge),
+            key=lambda r: r.updated_at,
+        )
+    ]
     return {
         **base,
         "unavailable": False,
@@ -446,6 +540,7 @@ def build_context(
         "merge_ready": merge_ready,
         "merge_reasons": reasons,
         "stale": stale,
+        "loop_merge": loop_merge,
         "total": len(overview.rows),
         "checked_at": overview.checked_at,
     }

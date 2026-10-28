@@ -500,7 +500,13 @@ URL の分割は**形**であって登録順ではない: 板は 1 セグメン�
 
 - **マージ待ちは gate 済だけではない**。draft でもコンフリクトでもなく、次のどれかに当たるもの。
   載っている理由は行ごとに出す (release / 依頼は「gate を通った」ではない ∴ 理由を混ぜて見せない):
-  - **gate 済** — 現在の head に naysayer の APPROVE
+  - **gate 済** — 現在の head に naysayer の APPROVE があり、**base が protected
+    (`GITHUB_PROTECTED_BASE_BRANCHES`、既定 `main`) か、base が分からない**もの。
+    protected の集合は dispatcher の `github_dispatch.protected_base_branches()` を共有する
+    (「AI が merge できない base」と「人の merge 作業として出す base」は同じ定義 ∴ 2 つ持たない)。
+    base 不明は fail-closed で gate 済側 (dispatcher も base 不明の merge を拒否する ∴ 人の作業)。
+    develop 宛ての APPROVE は自走範囲の merge で人の作業ではない
+    (実例 2026-10-28: Spirrow-VoxelWorld#359 が人のマージ待ちに載った)
   - **release** — head が `prs.release_heads` (既定 `develop`) で、**base と同じ repo** にある PR。
     develop → main の release PR は gate が付かない (中身は develop に入る時に PR 単位で gate 済) ∴
     gate 済だけを見ていると永久に載らない (実測 2026-09-30: 2026-08-25 以降の release PR 44 本中
@@ -514,6 +520,14 @@ URL の分割は**形**であって登録順ではない: 板は 1 セグメン�
   (実測: gate が REQUEST_CHANGES を返している mindwire#359 が一致した)。
   個人宛の request だけを読む手段も無い — github-mcp の `list_pull_requests` /
   `pull_request_read(get)` は `requested_reviewers` を返さない
+- **ループの merge 待ちは alert に一覧で出す**: base が分かっていて protected でない宛先で
+  gate 済のまま open の PR (`Overview.loop_merge`) は、マージ待ちに入れず、表の上の alert 1 つに
+  1 件ずつリンク付きで出す (承認された直後から、停滞の閾値と無関係に)。見出しの protected の集合は
+  `GITHUB_PROTECTED_BASE_BRANCHES` の実際の値を出す (`main` と決め打ちしない)。件数だけの notice にはしない
+  (リンクが無いと実体に辿り着けない)。行は view 用の `LoopMergeItem(row, stale)`。
+  **stale の閾値を超えたものは「要調査」として出す** (ループが merge できていない)。
+  停滞の表にはふつうの行として残し、バッジは付けない (同じ PR に食い違う文言を付けない)。
+  `pr_table()` マクロと `PrRow` は変えない
 
 - **board のマージ lane とは範囲が違う**: board は allowlist 6 repo (カードごとに ledger 照合が要る)、
   こちらは **org 全体を search 1 回**で取る。allowlist 外の PR (UeRestartCommand 等) を見落とさないため

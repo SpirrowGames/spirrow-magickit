@@ -22,7 +22,7 @@ from magickit.mcp.github_dispatch import (
     _merge_block_reason,
     _pat_for_operation,
     _pr_base_ref,
-    _protected_base_branches,
+    protected_base_branches,
     _resolve_pat,
     _UpstreamError,
 )
@@ -127,11 +127,11 @@ class TestPatForOperation:
 
 class TestProtectedBaseBranches:
     def test_default_is_main(self):
-        assert _protected_base_branches() == frozenset({"main"})
+        assert protected_base_branches() == frozenset({"main"})
 
     def test_env_override_comma_separated(self, monkeypatch):
         monkeypatch.setenv(_PROTECTED_BASE_ENV, "main, release ,prod")
-        assert _protected_base_branches() == frozenset({"main", "release", "prod"})
+        assert protected_base_branches() == frozenset({"main", "release", "prod"})
 
 
 class TestMergeBlockReason:

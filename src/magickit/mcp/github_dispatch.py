@@ -232,11 +232,16 @@ def _err(e: Exception) -> dict:
     }
 
 
-def _protected_base_branches() -> frozenset[str]:
+def protected_base_branches() -> frozenset[str]:
     """Branches a merge may not target via this dispatcher (human-GO only).
 
     Read from ``GITHUB_PROTECTED_BASE_BRANCHES`` (comma-separated) each call so
     it tracks env changes and stays testable; defaults to ``main``.
+
+    Public because ``/dashboard/prs`` (:mod:`magickit.web.prs`) reads the
+    same set: "a base the AI may not merge into" and "a base whose gate 済
+    PR is a human's merge click" are one definition, and two copies would
+    drift.
     """
     raw = os.environ.get(_PROTECTED_BASE_ENV, _DEFAULT_PROTECTED_BASE)
     return frozenset(b.strip() for b in raw.split(",") if b.strip())
@@ -290,14 +295,15 @@ async def _pr_base_ref(arguments: dict[str, Any], pat: str) -> str | None:
 
 def _merge_block_reason(base_ref: str | None) -> str | None:
     """Reason to refuse a merge into ``base_ref``, or None to allow it."""
-    protected = sorted(_protected_base_branches())
+    protected_set = protected_base_branches()
+    protected = sorted(protected_set)
     if base_ref is None:
         return (
             "merge_pull_request blocked: could not determine the PR's base "
             f"branch, and merges into protected branches {protected} require a "
             "human (fail-closed). Verify the PR or merge manually after approval."
         )
-    if base_ref in _protected_base_branches():
+    if base_ref in protected_set:
         return (
             f"merge_pull_request into '{base_ref}' is blocked by policy "
             f"(protected: {protected}). A human must merge to '{base_ref}'; "
