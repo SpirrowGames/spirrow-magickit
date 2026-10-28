@@ -295,14 +295,15 @@ async def _pr_base_ref(arguments: dict[str, Any], pat: str) -> str | None:
 
 def _merge_block_reason(base_ref: str | None) -> str | None:
     """Reason to refuse a merge into ``base_ref``, or None to allow it."""
-    protected = sorted(protected_base_branches())
+    protected_set = protected_base_branches()
+    protected = sorted(protected_set)
     if base_ref is None:
         return (
             "merge_pull_request blocked: could not determine the PR's base "
             f"branch, and merges into protected branches {protected} require a "
             "human (fail-closed). Verify the PR or merge manually after approval."
         )
-    if base_ref in protected_base_branches():
+    if base_ref in protected_set:
         return (
             f"merge_pull_request into '{base_ref}' is blocked by policy "
             f"(protected: {protected}). A human must merge to '{base_ref}'; "
