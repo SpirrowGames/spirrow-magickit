@@ -548,6 +548,24 @@ def test_unavailable_context_has_empty_loop_merge():
     assert prs.build_context(None, ["down"], _settings(), now=NOW)["loop_merge"] == []
 
 
+def test_draft_into_develop_is_not_listed_as_the_loops_merge():
+    # An approved PR into develop later turned back into a draft: the loop
+    # must not merge it, so it is not the loop's merge to be waiting on —
+    # and once stale it must not say the loop failed (要調査).
+    overview = _overview(
+        [
+            _item("a", 1, updated=NOW - timedelta(days=5), draft=True),
+            _item("a", 2, updated=NOW - timedelta(days=5)),
+        ],
+        loop_merge=[_key("a", 1), _key("a", 2)],
+    )
+    ctx = prs.build_context(overview, [], _settings(), now=NOW)
+    assert [i.row.number for i in ctx["loop_merge"]] == [2]
+    assert ctx["merge_ready"] == []
+    # The draft is still a forgotten PR: the 停滞 table keeps it.
+    assert {r.number for r in ctx["stale"]} == {1, 2}
+
+
 async def test_search_failure_raises_rather_than_returning_empty():
     async def search_page(query: str, page: int) -> Any:
         return None

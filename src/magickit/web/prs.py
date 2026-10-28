@@ -84,7 +84,8 @@ stays a human's job.
 
 An approved PR into an unprotected base that is still open means the
 loop has not merged it. It is not dropped: it is listed, with links, in
-one *ループの merge 待ち* alert above the tables (``loop_merge``), from
+one *ループの merge 待ち* alert above the tables (``loop_merge``; drafts
+excluded — the loop does not merge a draft either), from
 the moment it is approved — not only once it is 停滞. A row past
 ``prs_stale_hours`` says "要調査" in that alert; the 停滞 table shows it
 as an ordinary row, without a badge, so the two never say different
@@ -519,7 +520,9 @@ def build_context(
             stale=(ts := parse_ts(r.updated_at)) is not None and ts <= cutoff,
         )
         for r in sorted(
-            (r for r in overview.rows if r.key in overview.loop_merge),
+            # A draft is nobody's merge yet, the loop's included: listing
+            # it would blame the loop ("要調査") for a PR it must not merge.
+            (r for r in overview.rows if not r.draft and r.key in overview.loop_merge),
             key=lambda r: r.updated_at,
         )
     ]
