@@ -109,6 +109,11 @@ from fastapi.responses import HTMLResponse
 
 from magickit.config import Settings, get_settings
 from magickit.core import pr_watch
+# The dispatcher's protected set, read here so "what the AI cannot merge"
+# and "what a human must merge" are one fact (module docstring). Imported
+# at module level so the web -> mcp dependency is visible; github_dispatch
+# imports nothing from magickit.web, so there is no cycle.
+from magickit.mcp.github_dispatch import protected_base_branches
 from magickit.utils.logging import get_logger
 from magickit.web.deps import parse_ts, templates
 
@@ -343,8 +348,6 @@ def split_approved(
     base is known and unprotected, so the loop merges it. The protected
     set is the dispatcher's own (see module docstring).
     """
-    from magickit.mcp.github_dispatch import protected_base_branches  # noqa: PLC0415
-
     protected = protected_base_branches()
     approved: set[tuple[str, str, int]] = set()
     loop_merge: set[tuple[str, str, int]] = set()
@@ -487,6 +490,10 @@ def build_context(
         "excluded": excluded,
         "stale_hours": settings.prs_stale_hours,
         "stale_label": _hours_label(settings.prs_stale_hours),
+        # The protected bases as configured (GITHUB_PROTECTED_BASE_BRANCHES),
+        # so the loop-merge heading names the real set instead of assuming
+        # the default ``main``.
+        "protected_label": ", ".join(sorted(protected_base_branches())),
         "release_heads": [h for h in settings.prs_release_heads if str(h or "").strip()],
         "merge_assignees": [a for a in settings.prs_merge_assignees if str(a or "").strip()],
     }

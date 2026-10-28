@@ -566,6 +566,30 @@ def test_draft_into_develop_is_not_listed_as_the_loops_merge():
     assert {r.number for r in ctx["stale"]} == {1, 2}
 
 
+async def test_loop_merge_heading_names_the_configured_protected_set(client, monkeypatch):
+    # With GITHUB_PROTECTED_BASE_BRANCHES=prod, an approved PR into main is
+    # the loop's merge. The heading must name the real protected set, not
+    # claim the PR targets "a base other than main".
+    monkeypatch.setenv("GITHUB_PROTECTED_BASE_BRANCHES", "prod")
+    now = datetime.now(timezone.utc)
+    overview = await _overview_from_snapshots(
+        [_snapshot("r", 9, approved=True, base_ref="main")],
+        [_item("r", 9, updated=now - timedelta(hours=1))],
+    )
+    assert overview.loop_merge == {_key("r", 9)}
+    ctx = prs.build_context(overview, [], _settings(), now=now)
+    assert ctx["protected_label"] == "prod"
+
+    async def fake_get(settings):
+        return overview, []
+
+    monkeypatch.setattr(prs, "get_overview", fake_get)
+    html = client.get("/dashboard/prs/_tables").text
+    assert "ループの merge 待ち 1 件" in html
+    assert "protected（<code>prod</code>）以外の base 宛てで gate 済" in html
+    assert "main 以外" not in html
+
+
 async def test_search_failure_raises_rather_than_returning_empty():
     async def search_page(query: str, page: int) -> Any:
         return None

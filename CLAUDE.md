@@ -522,7 +522,8 @@ URL の分割は**形**であって登録順ではない: 板は 1 セグメン�
   `pull_request_read(get)` は `requested_reviewers` を返さない
 - **ループの merge 待ちは alert に一覧で出す**: base が分かっていて protected でない宛先で
   gate 済のまま open の PR (`Overview.loop_merge`) は、マージ待ちに入れず、表の上の alert 1 つに
-  1 件ずつリンク付きで出す (承認された直後から、停滞の閾値と無関係に)。件数だけの notice にはしない
+  1 件ずつリンク付きで出す (承認された直後から、停滞の閾値と無関係に)。見出しの protected の集合は
+  `GITHUB_PROTECTED_BASE_BRANCHES` の実際の値を出す (`main` と決め打ちしない)。件数だけの notice にはしない
   (リンクが無いと実体に辿り着けない)。行は view 用の `LoopMergeItem(row, stale)`。
   **stale の閾値を超えたものは「要調査」として出す** (ループが merge できていない)。
   停滞の表にはふつうの行として残し、バッジは付けない (同じ PR に食い違う文言を付けない)。

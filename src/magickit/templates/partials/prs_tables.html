@@ -10,14 +10,14 @@
 {% endfor %}
 
 {#
-  ループの merge 待ち: main 以外 (protected でない) の base 宛てで gate 済のまま
+  ループの merge 待ち: protected でない (GITHUB_PROTECTED_BASE_BRANCHES 以外の) base 宛てで gate 済のまま
   open の PR。人の merge 作業ではないのでマージ待ちには入れないが、承認された
   直後から 1 件ずつリンク付きで出す。停滞の閾値を超えたものだけ「要調査」。
   判定は build_context (LoopMergeItem.stale) が済ませ、ここは読むだけ。
 #}
 {% if loop_merge %}
 <div class="alert alert-warn prs-loop-merge">
-    ループの merge 待ち {{ loop_merge | length }} 件 — main 以外の base 宛てで gate 済。merge はループが行います
+    ループの merge 待ち {{ loop_merge | length }} 件 — protected（<code>{{ protected_label }}</code>）以外の base 宛てで gate 済。merge はループが行います
     <ul>
     {% for item in loop_merge %}
         <li>
