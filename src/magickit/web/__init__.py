@@ -13,6 +13,7 @@ from magickit.web.chatroom_writes import router as writes_router
 from magickit.web.decision_summary import router as decision_summary_router
 from magickit.web.decisions import router as decisions_router
 from magickit.web.deploys import router as deploys_router
+from magickit.web.escalation_labels import router as escalation_labels_router
 from magickit.web.ops import router as ops_router
 from magickit.web.prs import router as prs_router
 
@@ -23,6 +24,7 @@ __all__ = [
     "decision_summary_router",
     "decisions_router",
     "deploys_router",
+    "escalation_labels_router",
     "ops_router",
     "board_router",
     "prs_router",

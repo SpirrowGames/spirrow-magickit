@@ -1,0 +1,77 @@
+{#
+  「聞くべきだったか」ラベル欄 — 判断ページのフォームとラベル画面が共有する.
+  T-decision-page-escalation-feedback-label (msg-1407 §3.1 / §3.6, msg-1411 §2).
+
+  - 常に展開して置く (msg-1411: 折りたたまない. JS なし).
+  - 既定は「未ラベル」(`esc.none_value`) が checked ∴ 触らなければ手数 0.
+  - ワイヤ値はすべて context の定数から読む. この partial に値の literal を
+    書かない (test_label_wire_values_single_source が lint する).
+  - 「ラベルを取り消す」は current があるときだけ描画する (`esc.show_cleared`).
+  - 理由タグは 2 組を常に見せ, 見出しで区別する (JS で出し分けない).
+  - `|safe` は使わない.
+
+  context: `esc` (escalation_labels._field_context の dict).
+#}
+<style>
+  /* 判断ページの `.decision-form label` (block / 太字) を打ち消す. 390px で
+     横スクロールしないよう, 選択肢は折り返す. */
+  .esc-label { border: 1px solid #d0d7de; border-radius: 6px; padding: 0.5rem 0.75rem 0.75rem; margin: 1rem 0 0; }
+  .esc-label legend { font-weight: 600; color: #24292f; padding: 0 0.25rem; }
+  .esc-label .esc-label-target { margin: 0 0 0.5rem; font-size: 0.875rem; color: #57606a; overflow-wrap: anywhere; }
+  .esc-label .esc-label-choices { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+  .esc-label label.esc-label-choice,
+  .esc-label label.esc-label-tag { display: inline-flex; align-items: center; gap: 0.3rem; margin: 0.2rem 0; font-weight: 400; min-height: 2rem; }
+  .esc-label .esc-label-tags { display: flex; flex-wrap: wrap; gap: 0 1rem; margin-top: 0.5rem; }
+  .esc-label .esc-label-tags-heading { flex-basis: 100%; margin: 0.5rem 0 0; font-size: 0.875rem; color: #57606a; }
+  .esc-label label.esc-label-note-label { display: block; margin: 0.75rem 0 0.3rem; font-weight: 600; }
+  .esc-label .esc-label-note { width: 100%; padding: 0.5rem 0.6rem; font-size: 1rem; border: 1px solid #d0d7de; border-radius: 6px; box-sizing: border-box; }
+</style>
+<fieldset class="esc-label">
+  <legend>この件は人に聞くべきだったか (任意)</legend>
+  <input type="hidden" name="_esc_target" value="{{ esc.target_msg_id }}">
+  <p class="esc-label-target">
+    対象: <code>{{ esc.target_msg_id }}</code>{% if esc.escalated_by %} by <code>{{ esc.escalated_by }}</code>{% endif %}
+  </p>
+  <div class="esc-label-choices">
+    <label class="esc-label-choice">
+      <input type="radio" name="_esc_label" value="{{ esc.none_value }}"
+             {% if esc.selected_label == esc.none_value %}checked{% endif %}>
+      {{ esc.none_text }}
+    </label>
+    {% for value, text in esc.labels %}
+      <label class="esc-label-choice">
+        <input type="radio" name="_esc_label" value="{{ value }}"
+               {% if esc.selected_label == value %}checked{% endif %}>
+        {{ text }}
+      </label>
+    {% endfor %}
+    {% if esc.show_cleared %}
+      <label class="esc-label-choice">
+        <input type="radio" name="_esc_label" value="{{ esc.cleared_value }}"
+               {% if esc.selected_label == esc.cleared_value %}checked{% endif %}>
+        {{ esc.display[esc.cleared_value] }}
+      </label>
+    {% endif %}
+  </div>
+  <div class="esc-label-tags">
+    <p class="esc-label-tags-heading">「聞かなくてよかった」の理由</p>
+    {% for value, text in esc.tags_should_not_ask %}
+      <label class="esc-label-tag">
+        <input type="checkbox" name="_esc_tags" value="{{ value }}"
+               {% if value in esc.selected_tags %}checked{% endif %}>
+        {{ text }}
+      </label>
+    {% endfor %}
+    <p class="esc-label-tags-heading">「聞くべきだった」の当たる条</p>
+    {% for value, text in esc.tags_should_ask %}
+      <label class="esc-label-tag">
+        <input type="checkbox" name="_esc_tags" value="{{ value }}"
+               {% if value in esc.selected_tags %}checked{% endif %}>
+        {{ text }}
+      </label>
+    {% endfor %}
+  </div>
+  <label class="esc-label-note-label" for="esc-note">メモ (1 行, 任意)</label>
+  <input type="text" id="esc-note" name="_esc_note" class="esc-label-note"
+         maxlength="{{ esc.note_max }}" value="{{ esc.note }}">
+</fieldset>

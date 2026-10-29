@@ -662,6 +662,12 @@
       {# ★ D-35 (msg-146 §2): 送信は単一の primary ボタン. `name` 属性を
          持たせない (余分な field を送らない). ここを押すまで POST は起きない.
       #}
+      {# 「聞くべきだったか」ラベル欄 (T-decision-page-escalation-feedback-label
+         msg-1407 §3.1). 送信ボタンの直前に常に展開して置く (msg-1411).
+         対象が決まらない (`esc` が None) ときは欄を出さない. #}
+      {% if esc %}
+        {% include "partials/escalation_label_fields.html" %}
+      {% endif %}
       <button type="submit" class="decision-submit">送信</button>
     </form>
     {% elif thread_write_state == "closed" %}
@@ -760,6 +766,9 @@
 
     <div class="decision-links">
       <a href="{{ thread_ui_url }}">chatroom でスレッドを開く →</a>
+      {% if label_page_url %}
+        <br><a href="{{ label_page_url }}">この件のラベルを付ける／直す →</a>
+      {% endif %}
     </div>
 
     {# I-12: フォームは 3 状態すべてで残す (msg-136 §4). 回答済みでも「追加で

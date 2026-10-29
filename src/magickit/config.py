@@ -132,6 +132,23 @@ class Settings(BaseSettings):
         default_factory=lambda: ["Bohr", "Heisenberg", "Einstein", "Fermi", "human"]
     )
 
+    # 判断ページでラベルを付ける対象になる、エスカレーションの author
+    # (T-decision-page-escalation-feedback-label msg-1451)。
+    #
+    # **3 役の identity を増やしたら、ここにも足す。** 足し忘れると、その
+    # identity のエスカレーションにはラベル欄が出ない (欄が出ないだけで、
+    # データは汚れない — relay を拾う逆向きの外れより安全なので許容する)。
+    #
+    # Conclair には participant 一覧が無い (msg-1450 P-L5) ∴ relay / bot
+    # (`pr-gate-relay` / `conductor-relay` / `ci-window-state` …) と 3 役を
+    # 分けるのはこのリストだけ。``decision_next_participant_choices`` と
+    # 中身が今たまたま近くても共有しない: あちらは「回答で handoff できる
+    # 相手」で ``human`` を含む。共有すると handoff 先を変えただけでラベルの
+    # 母集団が黙って変わる。
+    escalation_label_authors: list[str] = Field(
+        default_factory=lambda: ["Bohr", "Einstein", "Heisenberg", "Fermi"]
+    )
+
     # 判断ページの「簡潔版」ボタン。人がボタンを押したときだけ走る ∴ 既定は
     # 有効 (digest の sweeper が既定 off なのは、誰も頼んでいないのに GPU を
     # 使い始める唯一のものだったから。こちらは押されるまで何もしない)。
@@ -533,6 +550,10 @@ class Settings(BaseSettings):
             if "next_participant_choices" in decisions_cfg:
                 flat_config["decision_next_participant_choices"] = list(
                     decisions_cfg.get("next_participant_choices") or []
+                )
+            if "escalation_label_authors" in decisions_cfg:
+                flat_config["escalation_label_authors"] = list(
+                    decisions_cfg.get("escalation_label_authors") or []
                 )
             for yaml_key, field in (
                 ("summary_enabled", "decision_summary_enabled"),

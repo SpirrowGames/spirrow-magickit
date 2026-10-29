@@ -47,6 +47,14 @@ from magickit.web.decisions import (
     _has_standalone_next_line,
     _maybe_append_next,
 )
+# 「聞くべきだったか」ラベル (T-decision-page-escalation-feedback-label)。
+# 判定はすべて escalation_labels 側にあり、ここは呼ぶだけ (上と同じ語彙制約)。
+from magickit.web.escalation_labels import (
+    commit_decision_label,
+    label_input_from_form,
+    label_page_url,
+    prepare_decision_label,
+)
 
 logger = get_logger(__name__)
 
@@ -117,6 +125,7 @@ async def _render_decision_error(
     freeform_value: str,
     next_participant_value: str,
     error_message: str,
+    label_input: Any = None,
 ) -> HTMLResponse:
     """D-31: 判断ページを入力保持のまま再描画する。
 
@@ -137,6 +146,7 @@ async def _render_decision_error(
         next_participant_value=next_participant_value,
         error_message=error_message,
         status_code=400,
+        label_input=label_input,
     )
 
 
@@ -351,6 +361,13 @@ async def post_message(
     # とき合成に使うデータであって、ここが `None` かどうかで opt-in を判定
     # しない (それが msg-102 の欠陥だった)。
     decision_freeform: Annotated[str | None, Form(alias="_freeform")] = None,
+    # 「聞くべきだったか」ラベル (T-decision-page-escalation-feedback-label
+    # msg-1407 §3.1)。すべて Optional で、``decision_form == "1"`` の分岐の
+    # 中でだけ読む (G-1: 既存 ``/ui`` フォームは今と同じ経路を通る)。
+    esc_label: Annotated[str | None, Form(alias="_esc_label")] = None,
+    esc_tags: Annotated[list[str] | None, Form(alias="_esc_tags")] = None,
+    esc_note: Annotated[str | None, Form(alias="_esc_note")] = None,
+    esc_target: Annotated[str | None, Form(alias="_esc_target")] = None,
 ) -> Response:
     """Post a message from the browser, through every gate that applies.
 
@@ -395,7 +412,11 @@ async def post_message(
     # だけ (`_pick_checked_choice` が現行 option 集合と付き合わせて安全に落とす)。
     original_content = ""
     original_freeform = ""
+    label_input = None
     if is_decision_post:
+        # ラベル入力。D-31 の再描画で保持するためにだけここで組み立てる
+        # (状態の主張には使わない — R-5)。書くのは回答が成立した後。
+        label_input = label_input_from_form(esc_label, esc_tags, esc_note, esc_target)
         # sentinel は user 視点で「選択肢なし」を意味する ∴ 復元時は sentinel の
         # まま渡し、template 側で「自由記述のみ」radio に checked が付く。
         # (空へ潰すと exhaustive fallback が働かず、次の submit で本来の
@@ -430,6 +451,7 @@ async def post_message(
                 content_value=original_content,
                 freeform_value=original_freeform,
                 next_participant_value=next_participant,
+                label_input=label_input,
                 error_message=NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE,
             )
 
@@ -444,6 +466,7 @@ async def post_message(
                 content_value=original_content,
                 freeform_value=original_freeform,
                 next_participant_value=next_participant,
+                label_input=label_input,
                 error_message=_error_envelope_message(envelope),
             )
         return _error_flash(envelope)
@@ -477,6 +500,7 @@ async def post_message(
                 content_value=original_content,
                 freeform_value=original_freeform,
                 next_participant_value=next_participant,
+                label_input=label_input,
                 error_message=_error_envelope_message(gate.error),
             )
         return _error_flash(gate.error)
@@ -495,9 +519,18 @@ async def post_message(
                 content_value=original_content,
                 freeform_value=original_freeform,
                 next_participant_value=next_participant,
+                label_input=label_input,
                 error_message=_next_participant_error_message(next_error),
             )
         return _error_flash(next_error)
+
+    # ラベル: 回答を書く**前に** thread と material を取り直す (msg-1407
+    # §3.2'')。書くのは回答成功の後。未ラベル (``none``) なら何も取らない。
+    prepared_label = (
+        await prepare_decision_label(project, thread_id, label_input)
+        if is_decision_post
+        else None
+    )
 
     adapter = _adapter()
     try:
@@ -528,6 +561,7 @@ async def post_message(
                         content_value=original_content,
                         freeform_value=original_freeform,
                         next_participant_value=next_participant,
+                        label_input=label_input,
                         error_message=_error_envelope_message(decision["envelope"]),
                     )
                 return _error_flash(decision["envelope"])
@@ -570,6 +604,7 @@ async def post_message(
                 content_value=original_content,
                 freeform_value=original_freeform,
                 next_participant_value=next_participant,
+                label_input=label_input,
                 error_message=_error_envelope_message(result),
             )
         return _error_flash(result)
@@ -580,10 +615,24 @@ async def post_message(
         # 遅延 import: `decisions._thread_page_url` は循環回避のためここで解決。
         from magickit.web.decisions import _thread_page_url
 
+        # 回答は成立済み。ラベルはその後に書き、何が起きても回答の成否を
+        # 変えない。L-1: 書くと判定したのに書けなかったときは成功の 303 を
+        # 返さず、ラベル画面へ理由と入力を持って 303 する。
+        label_outcome = await commit_decision_label(prepared_label)
+        if not label_outcome.ok and label_input is not None:
+            location = label_page_url(
+                project,
+                thread_id,
+                label_input.target or None,
+                error=label_outcome.error,
+                submitted=label_input,
+            )
+        else:
+            location = _thread_page_url(project, thread_id)
         return Response(
             status_code=303,
             headers={
-                "Location": _thread_page_url(project, thread_id),
+                "Location": location,
                 "Cache-Control": "no-store",
             },
         )

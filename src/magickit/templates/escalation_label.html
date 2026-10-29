@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{#
+  単独のラベル画面 — 回答後に付ける・付け直す・取り消す.
+  T-decision-page-escalation-feedback-label (msg-1407 §3.4 / L-1, msg-1448).
+
+  - 対象 msg が found のときだけフォームを出す. rejected / unverifiable は
+    理由だけを出し, 履歴は見せる.
+  - 書けなかった POST は 400 でこの画面に戻り, 入力を保持してバナーで理由を
+    出す (D-31 と同じ型).
+  - `|safe` は使わない.
+#}
+
+{% block title %}ラベル — {{ project }} / {{ thread_id }}{% endblock %}
+
+{% block head %}
+<style>
+  .label-container { max-width: 640px; margin: 0 auto; padding: 1rem; box-sizing: border-box; }
+  .label-container * { box-sizing: border-box; }
+  .label-product { font-size: 0.8125rem; font-weight: 600; color: #57606a; margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+  .label-error { background: #ffebe9; border: 1px solid #ff8182; color: #82071e; padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .label-saved { background: #dafbe1; border: 1px solid #4ac26b; color: #116329; padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .label-note { background: #f6f8fa; border: 1px solid #d0d7de; color: #57606a; padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .label-submit { margin-top: 1rem; width: 100%; padding: 0.75rem; font-size: 1rem; font-weight: 600; border: 0; border-radius: 6px; background: #1f883d; color: #ffffff; cursor: pointer; }
+  .label-history { margin-top: 1.5rem; }
+  .label-history ul { padding-left: 1.2rem; }
+  .label-history li { margin: 0.3rem 0; overflow-wrap: anywhere; }
+  .label-links { margin-top: 1rem; font-size: 0.95rem; color: #57606a; }
+  .label-links a { color: #0969da; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="label-container">
+  <p class="label-product">{{ project }}</p>
+  <h1>ラベル — <code>{{ thread_id }}</code></h1>
+
+  {% if error_message %}
+    <div class="label-error" role="alert">
+      <strong>保存できませんでした。</strong> {{ error_message }}
+    </div>
+  {% elif saved %}
+    <div class="label-saved" role="status">保存しました。</div>
+  {% endif %}
+
+  {% if fetch_failed %}
+    <div class="label-note" role="status">
+      スレッドを取得できませんでした. 対象を確認できないため, フォームを出しません.
+    </div>
+  {% elif fields %}
+    <form method="post" action="{{ post_url }}" accept-charset="UTF-8">
+      {% with esc = fields %}
+        {% include "partials/escalation_label_fields.html" %}
+      {% endwith %}
+      <button type="submit" class="label-submit">保存</button>
+    </form>
+  {% elif verdict == "unverifiable" %}
+    <div class="label-note" role="status">
+      対象 <code>{{ target_msg_id }}</code> をスレッドの取得範囲内で確認できませんでした.
+      付け直しの欄は出しません.
+    </div>
+  {% elif target_msg_id %}
+    <div class="label-note" role="status">
+      <code>{{ target_msg_id }}</code> はラベルの対象 (3 役が human に上げた msg) ではありません.
+    </div>
+  {% else %}
+    <div class="label-note" role="status">
+      このスレッドにはラベルを付けられるエスカレーションが見つかりません.
+    </div>
+  {% endif %}
+
+  {% if history %}
+    <div class="label-history">
+      <h2>履歴 (新しい順)</h2>
+      <ul>
+        {% for row in history %}
+          <li>
+            <code>{{ row.labeled_at }}</code>
+            — {{ display.get(row.label, row.label) }}
+            {% if row.reason_tags %}[{{ row.reason_tags | join(", ") }}]{% endif %}
+            {% if row.note %}「{{ row.note }}」{% endif %}
+            {% if row.tags_mismatch %}(タグ不整合){% endif %}
+            {% if row.target_moved %}(対象ずれ){% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <div class="label-links">
+    <a href="{{ decision_url }}">判断ページへ →</a><br>
+    <a href="{{ thread_ui_url }}">chatroom でスレッドを開く →</a>
+  </div>
+</div>
+{% endblock %}
