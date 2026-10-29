@@ -955,3 +955,13 @@ async def test_rules_hash_column_is_added_to_a_pre_existing_table(tmp_path):
     async with aiosqlite.connect(db) as conn:
         cursor = await conn.execute("PRAGMA table_info(decision_materials)")
         assert "rules_hash" in {row[1] for row in await cursor.fetchall()}
+
+
+@pytest.mark.asyncio
+async def test_label_page_unknown_error_code_is_not_echoed():
+    """PR #114 gate advisory: an unknown ``?error=`` is shown as a fixed
+    message, never echoed into the banner."""
+    r = await label_get(fake_adapter([esc("msg-2")]), "?msg=msg-2&error=SpoofedText")
+    assert r.status_code == 200
+    assert "SpoofedText" not in r.text
+    assert el.ERROR_UNKNOWN_MESSAGE in r.text

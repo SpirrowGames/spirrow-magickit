@@ -157,6 +157,9 @@ ERR_STORE = "store"
 ERR_INVALID_LABEL = "invalid_label"
 ERR_NOTE_TOO_LONG = "note_too_long"
 
+#: ``?error=`` に知らないコードが来たときの固定文言。
+ERROR_UNKNOWN_MESSAGE = "不明な理由で保存できませんでした。"
+
 ERROR_MESSAGES: dict[str, str] = {
     ERR_REJECTED: (
         "この msg はラベルの対象 (3 役が human に上げた msg) ではありません。"
@@ -757,7 +760,12 @@ async def _render_label_page(
         "thread_id": thread_id,
         "thread_ui_url": thread_ui_url,
         "decision_url": decision_url,
-        "error_message": ERROR_MESSAGES.get(error or "", error) if error else None,
+        # 知らないコードは素通しで表示しない (PR #114 gate advisory): query は
+        # 誰でも書けるので、任意の文言を「保存できませんでした」バナーに出せる
+        # 形にしない。既知のコードだけ文言に引き、それ以外は固定文言。
+        "error_message": (
+            ERROR_MESSAGES.get(error, ERROR_UNKNOWN_MESSAGE) if error else None
+        ),
         "saved": saved,
         "verdict": None,
         "target_msg_id": None,
