@@ -906,3 +906,52 @@ def test_chatroom_writes_carries_no_consumer_literal():
     """msg-072 §1: chatroom_writes.py に ``NEXT:`` 相当の literal を持ち込まない。"""
     text = (SRC / "web" / "chatroom_writes.py").read_text(encoding="utf-8")
     assert "NEXT: human" not in text
+
+
+@pytest.mark.asyncio
+async def test_rules_hash_column_is_added_to_a_pre_existing_table(tmp_path):
+    """PR #114 gate finding: a production DB already has ``decision_materials``
+    without ``rules_hash``. ``CREATE TABLE IF NOT EXISTS`` does not touch it, so
+    the column must come from ``_LATE_COLUMNS``' guarded ``ADD COLUMN`` — which
+    every read and write runs first. Old rows read back as ``None``."""
+    import aiosqlite
+
+    from magickit.core.decision_materials import DecisionMaterialStore
+
+    db = str(tmp_path / "old.db")
+    async with aiosqlite.connect(db) as conn:
+        # The schema as it stands on main before this PR (jev_json in, no rules_hash).
+        await conn.execute("""
+            CREATE TABLE decision_materials (
+                project TEXT NOT NULL, thread_id TEXT NOT NULL,
+                head_msg_id TEXT NOT NULL, signature TEXT, stop_reason TEXT,
+                parked_lane TEXT, operator_task TEXT, protocol_violation INTEGER,
+                jev_json TEXT, question TEXT, options_json TEXT,
+                recommendation TEXT, recommendation_reason TEXT,
+                unknowns_json TEXT, stored_at TEXT NOT NULL,
+                UNIQUE(project, thread_id)
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO decision_materials (project, thread_id, head_msg_id,"
+            " stored_at) VALUES ('p', 'T-old', 'msg-1', '2026-10-01T00:00:00Z')"
+        )
+        await conn.commit()
+
+    store = DecisionMaterialStore(db_path=db)
+    # Read first (the judgement page path), before any write has run.
+    old = await store.get_material(project="p", thread_id="T-old")
+    assert old is not None and old["rules_hash"] is None
+
+    await store.put_material(
+        project="p", thread_id="T-new", head_msg_id="msg-2", signature=None,
+        question=None, options=None, recommendation=None,
+        recommendation_reason=None, unknowns=None, rules_hash="sha256:new",
+    )
+    new = await store.get_material(project="p", thread_id="T-new")
+    assert new is not None and new["rules_hash"] == "sha256:new"
+    assert (await store.list_materials())  # board listing still reads
+
+    async with aiosqlite.connect(db) as conn:
+        cursor = await conn.execute("PRAGMA table_info(decision_materials)")
+        assert "rules_hash" in {row[1] for row in await cursor.fetchall()}
