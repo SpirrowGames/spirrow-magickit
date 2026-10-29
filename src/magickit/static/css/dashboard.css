@@ -1015,6 +1015,8 @@ textarea {
 .board-card-decision { box-shadow: inset 3px 0 0 var(--primary-color), var(--shadow); }
 .board-card-deploy   { box-shadow: inset 3px 0 0 var(--danger-color), var(--shadow); }
 .board-card-loop     { box-shadow: inset 3px 0 0 var(--warning-color), var(--shadow); }
+/* Summon: 人が割り込みで呼んだスレッド。立っている間は他が止まっている。 */
+.board-card-summon   { box-shadow: inset 3px 0 0 #7C3AED, var(--shadow); }
 
 .board-card-top {
     display: flex;
@@ -1034,6 +1036,7 @@ textarea {
 .board-kind-decision { background: #E0E7FF; color: #3730A3; }
 .board-kind-deploy   { background: #FEE2E2; color: #B91C1C; }
 .board-kind-loop     { background: #FEF3C7; color: #B45309; }
+.board-kind-summon   { background: #EDE9FE; color: #6D28D9; }
 /* 判断カードのうち判断ではないもの (parked_lane)。判断の藍と並べて見分ける。 */
 .board-ask-operator_work { background: #DCFCE7; color: #166534; }
 .board-ask-misroute      { background: #F3F4F6; color: #4B5563; }

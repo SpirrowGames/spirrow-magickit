@@ -33,6 +33,7 @@ from magickit.mcp.tools import (
     session,
     smart_read,
     specification,
+    summon,
     task,
 )
 from magickit.utils.logging import configure_logging, get_logger
@@ -155,6 +156,7 @@ rather than calling individual services separately.""",
     smart_read.register_tools(mcp, settings)
     chatroom.register_tools(mcp, settings)
     loop_control.register_tools(mcp, settings)
+    summon.register_tools(mcp, settings)
 
     # R-3: filing a deploy request is available everywhere; approving one
     # -- which is what actually restarts a service and applies migrations
