@@ -965,3 +965,55 @@ async def test_label_page_unknown_error_code_is_not_echoed():
     assert r.status_code == 200
     assert "SpoofedText" not in r.text
     assert el.ERROR_UNKNOWN_MESSAGE in r.text
+
+
+@pytest.mark.asyncio
+async def test_none_radio_reads_as_keep_when_current_label_exists(isolated_label_store):
+    """PR #114 gate finding 1: with a current label, ``none`` means "keep"
+    (§3.6), so it must not be shown as 未ラベル; clearing is ``cleared``."""
+    msgs = [esc("msg-2")]
+    r = await page_get(fake_adapter(msgs))
+    assert el.LABEL_DISPLAY[el.LABEL_NONE] in r.text
+    assert el.LABEL_NONE_KEEP_DISPLAY not in r.text
+    await isolated_label_store().append({
+        "project": PROJECT, "thread_id": THREAD, "target_msg_id": "msg-2",
+        "escalated_by": "Einstein", "label": el.LABEL_SHOULD_ASK,
+        "snapshot_source": el.SNAPSHOT_ABSENT,
+    })
+    for resp in (await page_get(fake_adapter(msgs)), await label_get(fake_adapter(msgs), "?msg=msg-2")):
+        assert el.LABEL_NONE_KEEP_DISPLAY in resp.text
+        assert el.LABEL_DISPLAY[el.LABEL_CLEARED] in resp.text
+    # none は書かない (変更しない) のまま: current は残る
+    r = await label_post(fake_adapter(msgs), {"_esc_label": el.LABEL_NONE, "_esc_target": "msg-2"})
+    assert r.status_code == 303
+    assert el._current(await history(isolated_label_store, "msg-2"))["label"] == el.LABEL_SHOULD_ASK
+
+
+@pytest.mark.asyncio
+async def test_d31_rerender_does_not_carry_input_to_a_moved_target(isolated_label_store):
+    """PR #114 gate finding 2: if the target moved between submit and the
+    D-31 re-render, the old target's input is not pre-filled on the new one."""
+    msgs = [esc("msg-2"), m("msg-3", "Bohr", "x\n\nNEXT: Einstein"), esc("msg-4")]
+    adapter = fake_adapter(msgs, post_ok=False)
+    r = await decision_post(adapter, {
+        "_esc_label": el.LABEL_SHOULD_NOT_ASK, "_esc_tags": ["impl_detail"],
+        "_esc_note": "古い対象へのメモ", "_esc_target": "msg-2",
+    })
+    assert r.status_code == 400
+    assert 'name="_esc_target" value="msg-4"' in r.text
+    assert "古い対象へのメモ" not in r.text
+    assert not re.search(r'value="impl_detail"\s+checked', r.text)
+    assert re.search(r'value="none"\s+checked', r.text)
+
+
+@pytest.mark.asyncio
+async def test_current_export_with_project_filter_ignores_other_projects(isolated_label_store):
+    s = isolated_label_store()
+    base = {"thread_id": THREAD, "target_msg_id": "msg-1", "snapshot_source": el.SNAPSHOT_ABSENT}
+    await s.append({**base, "project": PROJECT, "label": el.LABEL_SHOULD_ASK})
+    await s.append({**base, "project": "other", "label": el.LABEL_BORDERLINE})
+    await s.append({**base, "project": PROJECT, "label": el.LABEL_SHOULD_NOT_ASK})
+    rows = await s.list_labels(project=PROJECT)
+    assert [r["label"] for r in rows] == [el.LABEL_SHOULD_NOT_ASK]
+    rows = await s.list_labels(project="other", since="2000-01-01T00:00:00Z")
+    assert [r["label"] for r in rows] == [el.LABEL_BORDERLINE]

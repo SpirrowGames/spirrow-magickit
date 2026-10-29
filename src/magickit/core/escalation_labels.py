@@ -196,10 +196,13 @@ class EscalationLabelStore:
             where.append("project = ?")
             params.append(project)
         if not history:
-            where.append(
-                "id IN (SELECT MAX(id) FROM escalation_labels "
-                "GROUP BY project, thread_id, target_msg_id)"
-            )
+            # project の絞り込みはサブクエリの内側にも入れる。SQLite は相関の
+            # 無いサブクエリに外側の条件を押し込まない (PR #114 gate advisory)。
+            inner = "SELECT MAX(id) FROM escalation_labels"
+            if project:
+                inner += " WHERE project = ?"
+                params.append(project)
+            where.append(f"id IN ({inner} GROUP BY project, thread_id, target_msg_id)")
         if since:
             where.append("labeled_at >= ?")
             params.append(since)

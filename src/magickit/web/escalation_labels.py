@@ -119,6 +119,12 @@ LABEL_DISPLAY: dict[str, str] = {
     LABEL_CLEARED: "ラベルを取り消す",
 }
 
+#: current があるときの ``none`` の表示名。ワイヤ値の意味は §3.6 のとおり
+#: 「変更しない」で、取り消しは ``cleared`` が受け持つ。current があるのに
+#: 「未ラベル」と表示すると、選んだ人は取り消したつもりになるが何も書かれない
+#: (PR #114 gate finding 1) ∴ 表示だけを意味どおりに変える。
+LABEL_NONE_KEEP_DISPLAY = "変更しない（今のラベルのまま）"
+
 #: R2: ``should_not_ask`` のときの理由タグ。
 TAGS_SHOULD_NOT_ASK: tuple[tuple[str, str], ...] = (
     ("not_in_rules", "五ヶ条のどれにも当たらない"),
@@ -688,6 +694,7 @@ def _field_context(
         "target_msg_id": target_msg_id,
         "escalated_by": escalated_by,
         "none_value": LABEL_NONE,
+        "none_text": LABEL_NONE_KEEP_DISPLAY if show_cleared else LABEL_DISPLAY[LABEL_NONE],
         "cleared_value": LABEL_CLEARED,
         "labels": [(v, LABEL_DISPLAY[v]) for v in LABEL_VALUES],
         "display": LABEL_DISPLAY,
@@ -727,6 +734,11 @@ async def build_judgement_label_fields(
             "escalation label: current read raised on render",
             project=project, thread_id=thread_id, error=str(e),
         )
+    # D-31 の再描画で、送信から再描画までに対象が別の msg に移っていたら、
+    # 古い対象に向けて書いた入力を新しい対象へ持ち込まない (PR #114 gate
+    # finding 2)。新しい対象は current (無ければ none) から描く。
+    if submitted is not None and submitted.target != target_id:
+        submitted = None
     return _field_context(
         target_msg_id=target_id,
         escalated_by=_msg_author(target),

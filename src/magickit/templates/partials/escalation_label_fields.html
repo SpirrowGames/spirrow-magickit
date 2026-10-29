@@ -36,7 +36,7 @@
     <label class="esc-label-choice">
       <input type="radio" name="_esc_label" value="{{ esc.none_value }}"
              {% if esc.selected_label == esc.none_value %}checked{% endif %}>
-      {{ esc.display[esc.none_value] }}
+      {{ esc.none_text }}
     </label>
     {% for value, text in esc.labels %}
       <label class="esc-label-choice">
