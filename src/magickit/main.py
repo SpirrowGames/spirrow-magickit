@@ -42,6 +42,7 @@ from magickit.web import (
     decision_summary_router,
     decisions_router,
     deploys_router,
+    escalation_labels_router,
     ops_router,
     prs_router,
 )
@@ -294,6 +295,10 @@ def create_app() -> FastAPI:
     app.include_router(decisions_router)
     # 3 セグメント ∴ 判断ページ本体 (2) とも板 (1) とも衝突しない。
     app.include_router(decision_summary_router)
+    # 「聞くべきだったか」ラベル: ラベル画面 (`/{project}/{thread_id}/label`、
+    # 3 セグメント) と export (`/v1/escalation-labels`)。T-decision-page-
+    # escalation-feedback-label 単位 A。
+    app.include_router(escalation_labels_router)
 
     # The board: 「僕を待って止まっているもの」を 1 枚に。Claims
     # `/dashboard/decisions` itself, which used to be a 302 stub inside the

@@ -169,3 +169,29 @@ def owner_check_passes(monkeypatch):
     ``tests/unit/test_open_thread_owner_check.py``.
     """
     monkeypatch.setattr(chatroom_tools, "_check_owner_exists", AsyncMock(return_value=None))
+
+
+@pytest.fixture(autouse=True)
+def isolated_label_store(monkeypatch):
+    """Redirect ``escalation_labels._get_label_store`` to a per-test temp file.
+
+    Same shape as ``isolated_material_store``: the escalation label store
+    (T-decision-page-escalation-feedback-label) shares the SQLite file in
+    production, and an unpatched test would write into the repo's ``data/``.
+    Returns a callable yielding the store the handlers will see.
+    """
+    from magickit.core.escalation_labels import EscalationLabelStore
+    from magickit.web import escalation_labels as labels_module
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    store = EscalationLabelStore(db_path=db_path)
+    monkeypatch.setattr(labels_module, "_get_label_store", lambda: store)
+
+    yield lambda: store
+
+    if os.path.exists(db_path):
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass

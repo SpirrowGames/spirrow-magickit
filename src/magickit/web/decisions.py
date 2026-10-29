@@ -924,7 +924,7 @@ async def _render_decision_page(
     *,
     project: str,
     thread_id: str,
-    submitted: dict[str, str] | None = None,
+    submitted: dict[str, Any] | None = None,
     post_error_message: str | None = None,
 ) -> Response:
     """R-9 (msg-186 §2): single source of truth for the decision page render.
@@ -942,6 +942,9 @@ async def _render_decision_page(
     - ``content_value``: selected choice-button value (or the I-12 sentinel).
     - ``freeform_value``: the textarea contents.
     - ``next_participant_value``: the select's value.
+    - ``label_input``: the escalation-label fields (``LabelInput`` or
+      ``None``), so a D-31 re-render keeps the label the human picked
+      (T-decision-page-escalation-feedback-label, input preservation only).
 
     ``post_error_message`` is the reason the POST was rejected (populated
     together with ``submitted``). It surfaces as an "送信できませんでした"
@@ -975,6 +978,7 @@ async def _render_decision_page(
     submitted_content_value = submitted.get("content_value", "")
     submitted_freeform_value = submitted.get("freeform_value", "")
     submitted_next_participant_value = submitted.get("next_participant_value", "")
+    submitted_label = submitted.get("label_input")
     thread_ui_url = _thread_page_url(project, thread_id)
 
     adapter = chatroom_tools._adapter()
@@ -1084,6 +1088,7 @@ async def _render_decision_page(
         submitted_content_value=submitted_content_value,
         submitted_freeform_value=submitted_freeform_value,
         submitted_next_participant_value=submitted_next_participant_value,
+        submitted_label=submitted_label,
     )
 
 
@@ -1141,6 +1146,7 @@ async def _render_judgement_view(
     submitted_content_value: str,
     submitted_freeform_value: str,
     submitted_next_participant_value: str,
+    submitted_label: Any = None,
 ) -> Response:
     """Render the ``mode="judgement"`` branch for both GET and POST re-render.
 
@@ -1183,6 +1189,22 @@ async def _render_judgement_view(
     # を送れる穴 (Bohr §1 (b)(d)) が残る ∴ 弱い方の経路が結論を決めて
     # しまう。
     thread_write_state = _thread_write_state(thread_meta)
+
+    # 「聞くべきだったか」ラベル欄 (T-decision-page-escalation-feedback-label
+    # msg-1407 §3.1 / msg-1451)。対象が決まらなければ ``None`` で、欄を出さない。
+    # 遅延 import: escalation_labels はこの module の helper を使う。
+    esc_fields = None
+    if thread_write_state == "open":
+        from magickit.web.escalation_labels import build_judgement_label_fields
+
+        esc_fields = await build_judgement_label_fields(
+            project=project,
+            thread_id=thread_id,
+            messages=messages,
+            thread_meta=thread_meta,
+            material=material,
+            submitted=submitted_label if is_post_rerender else None,
+        )
 
     if is_post_rerender:
         # I-20 (msg-146 §3): keep the user's chosen target iff it survived
@@ -1244,6 +1266,7 @@ async def _render_judgement_view(
             # 同じ context を持たせる (2 箇所で別の規則を持たない)。
             "thread_write_state": thread_write_state,
             "thread_status": str(thread_meta.get("status") or ""),
+            "esc": esc_fields,
         },
         status_code=status_code,
         headers={"Cache-Control": _NO_STORE},
@@ -1347,6 +1370,12 @@ async def _render_not_waiting_view(
             # AND landed here (because the world moved past waiting-for-
             # human between submit and re-render) silently lost the error.
             "error_message": post_error_message,
+            # 「この件のラベルを付ける／直す」へのリンク 1 本 (msg-1393 §3.4)。
+            # D-26' の 4 分岐と URL 契約には触れない: 配下のパスを足すだけ。
+            "label_page_url": (
+                f"/dashboard/decisions/{quote(project, safe='')}"
+                f"/{quote(thread_id, safe='')}/label"
+            ),
         },
         status_code=status_code,
         headers={"Cache-Control": _NO_STORE},
@@ -1420,6 +1449,7 @@ async def _render_decision_error_page(
     next_participant_value: str,
     error_message: str,
     status_code: int = 400,
+    label_input: Any = None,
 ) -> Response:
     """D-31 POST-error re-render (back-compat shim over ``_render_decision_page``).
 
@@ -1445,6 +1475,7 @@ async def _render_decision_error_page(
             "content_value": content_value,
             "freeform_value": freeform_value,
             "next_participant_value": next_participant_value,
+            "label_input": label_input,
         },
         post_error_message=error_message,
     )
@@ -1682,6 +1713,16 @@ async def put_decision_material(
             "model_version": jev_raw["model_version"],
         }
 
+    # 五ヶ条ルールファイルの snapshot hash (T-decision-page-escalation-
+    # feedback-label msg-1407 §2 / msg-1411 §2)。optional string のまま受け、
+    # 届かなければ NULL。magickit 側で値を推測して埋めない。
+    rules_hash = body.get("rules_hash")
+    if rules_hash is not None and not isinstance(rules_hash, str):
+        return _bad_request(
+            "InvalidMaterialPayload",
+            "rules_hash must be a string when present",
+        )
+
     store = _get_material_store()
     try:
         result = await store.put_material(
@@ -1694,6 +1735,7 @@ async def put_decision_material(
             operator_task=operator_task,
             protocol_violation=protocol_violation,
             jev=jev,
+            rules_hash=rules_hash,
             question=question,
             options=options,
             recommendation=recommendation,

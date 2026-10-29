@@ -45,6 +45,10 @@ _LATE_COLUMNS = (
     ("operator_task", "TEXT"),
     ("protocol_violation", "INTEGER"),
     ("jev_json", "TEXT"),
+    # 五ヶ条ルールファイルの snapshot hash (T-decision-page-escalation-
+    # feedback-label msg-1407 §2 単位 A)。mindwire (単位 B) が送るまで NULL。
+    # 受け取って保存するだけで、magickit は値を解釈しない。
+    ("rules_hash", "TEXT"),
 )
 
 
@@ -108,6 +112,7 @@ class DecisionMaterialStore:
                 operator_task  TEXT,
                 protocol_violation INTEGER,
                 jev_json       TEXT,
+                rules_hash     TEXT,
                 question       TEXT,
                 options_json   TEXT,
                 recommendation TEXT,
@@ -145,6 +150,7 @@ class DecisionMaterialStore:
         operator_task: str | None = None,
         protocol_violation: bool | None = None,
         jev: dict[str, Any] | None = None,
+        rules_hash: str | None = None,
         options: list[dict[str, Any]] | None,
         recommendation: str | None,
         recommendation_reason: str | None,
@@ -186,9 +192,9 @@ class DecisionMaterialStore:
                 INSERT OR REPLACE INTO decision_materials (
                     project, thread_id, head_msg_id, signature, stop_reason,
                     parked_lane, operator_task, protocol_violation, jev_json,
-                    question, options_json, recommendation,
+                    rules_hash, question, options_json, recommendation,
                     recommendation_reason, unknowns_json, stored_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
@@ -200,6 +206,7 @@ class DecisionMaterialStore:
                     operator_task,
                     None if protocol_violation is None else int(protocol_violation),
                     jev_json,
+                    rules_hash,
                     question,
                     options_json,
                     recommendation,
@@ -236,7 +243,7 @@ class DecisionMaterialStore:
                 """
                 SELECT project, thread_id, head_msg_id, signature, stop_reason,
                        parked_lane, operator_task, protocol_violation, jev_json,
-                       question, options_json, recommendation,
+                       rules_hash, question, options_json, recommendation,
                        recommendation_reason, unknowns_json, stored_at
                 FROM decision_materials
                 WHERE project = ? AND thread_id = ?
@@ -260,6 +267,7 @@ class DecisionMaterialStore:
             # NULL (rows written before jev existed, or PUTs without it)
             # must not reach json.loads -- it would raise TypeError.
             "jev": json.loads(row["jev_json"]) if row["jev_json"] else None,
+            "rules_hash": row["rules_hash"],
             "question": row["question"],
             "options": (
                 json.loads(row["options_json"]) if row["options_json"] else None
