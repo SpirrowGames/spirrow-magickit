@@ -89,6 +89,7 @@ Adapter で抽象化。命名は class=PascalCase, 関数変数=snake_case, 定�
 | `reporting.py` | `generate_status_report` `generate_release_notes` `analyze_project_performance` |
 | `chatroom.py` | `chatroom_open_thread` `chatroom_post_message` `chatroom_close_thread` `chatroom_list_threads` `chatroom_get_thread` `chatroom_list_events` `chatroom_check_integrity` `chatroom_mark_read` `chatroom_my_unread` |
 | `loop_control.py` | `loop_control_get` `loop_control_set` `loop_control_report_observed` |
+| `summon.py` | `summon_set` `summon_clear` (人間専用。ループに渡さない) |
 | `document.py` | `smart_create_document` `smart_update_document` |
 | `document_maintenance.py` | `smart_delete_document` `detect_orphan_documents` `detect_orphan_knowledge` `detect_unused_document_types` `check_document_consistency` `cleanup_documents` |
 | `specification.py` | `start_specification` `generate_specification` `prepare_execution` `apply_permissions` |

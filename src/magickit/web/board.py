@@ -55,6 +55,12 @@
 - **止まったループ** — 稼働状況ページと **同じ** ``ops.classify`` で
   ``held`` / ``stalled`` と出たプロジェクト。判定を書き直さない: 2 箇所で
   別々に「停止」を定義したら、2 つのページが違うことを言い始める。
+- **Summon 中** — ``loop_control_get`` の ``active_summon`` が立っている
+  プロジェクト (T-human-call-summon-server-side, v1.2 / Fermi msg-1434)。
+  最上段 (deploy より上)。巻き添えで何本止まっているかは**出さない**:
+  その数は mindwire の sweep 設定 (``--summon-owner-project``) で決まり、
+  ここに写すと二重管理になる。値が契約違反なら消さずに「壊れています」
+  と出す ——— mindwire はそれを HOLD と読む。
 
 列は 2 種類の性質を持つ (ここが設計の要)
 ----------------------------------------
@@ -103,6 +109,7 @@ Conclair が読めないとき、判断待ちは「0 件」ではなく **判定
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -114,6 +121,7 @@ from fastapi.responses import HTMLResponse
 from magickit.adapters.chatroom import ChatroomAdapter
 from magickit.config import Settings, get_settings
 from magickit.core import pr_watch
+from magickit.core.active_summon import parse_active_summon
 from magickit.core.board_lanes import DEFAULT_LANE, LANES, BoardLaneStore, SeenItem
 from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.core.pr_watch import PrSnapshot
@@ -150,13 +158,16 @@ KIND_LABELS = {
     "deploy": "承認",
     "loop": "ループ",
     "merge": "マージ",
+    "summon": "Summon",
 }
 
 #: 列の中の並び。deploy を先頭に固定するのは、承認待ちだけが「本番が
 #: 止まって待っている」種類だから。同種の中は待たせている順 (古い順)。
 #: マージ は判断より下: 判断は「今の 1 手」で、マージは「あと 1 手で
 #: 終わる状態が溜まっているかどうか」という別の質量。
-_KIND_ORDER = {"deploy": 0, "decision": 1, "merge": 2, "loop": 3}
+#: Summon はさらに上 (-1): 立っている間、プロジェクトのループが丸ごと
+#: 止まっていて、解除できるのは人だけ。
+_KIND_ORDER = {"summon": -1, "deploy": 0, "decision": 1, "merge": 2, "loop": 3}
 
 #: 判断カードが「何を頼んでいるか」。``kind`` は ``"decision"`` のまま
 #: (key / lane 行 / 完了列の理由づけを共有する) で、変わるのはバッジと
@@ -662,6 +673,9 @@ async def _collect_loops(
         *(adapter.get_loop_control(project=row.project) for row in rows),
         return_exceptions=True,
     )
+    #: 読めた control だけ。読めなかった project は Summon の有無も判らない
+    #: ∴ カードを作らない (ループのほうのカードが「読めない」を言う)。
+    summon_controls: list[tuple[str, dict[str, Any]]] = []
     for row, control in zip(rows, controls):
         if isinstance(control, BaseException) or ops._is_error(control):
             row.control_error = (
@@ -675,8 +689,11 @@ async def _collect_loops(
             row.configured = bool(control.get("configured"))
             row.observed = control.get("observed_state")
             row.observed_at = parse_ts(control.get("observed_at"))
+            summon_controls.append((row.project, control))
         else:
             row.control_error = "conclair が control を返しませんでした"
+
+    await _collect_summons(adapter, summon_controls, live, now=now)
 
     stall_seconds = settings.ops_stall_minutes * 60
     for row in rows:
@@ -716,6 +733,128 @@ async def _collect_loops(
                     )
                 ],
                 fingerprint=f"{row.status}:{row.desired or ''}",
+            )
+        )
+
+
+# --- Summon 中 -------------------------------------------------------------
+
+
+#: カードの note に足す、呼び出し先が自分で止まったときの 1 行。
+_SUMMON_STOPPED_NOTE = "呼び出し先のスレッドは停止済み（{stop}）。解除するか close してください"
+
+#: 契約違反の値を出すときの題名。
+_SUMMON_MALFORMED_TITLE = "Summon: 値が壊れています（mindwire は HOLD 扱い）"
+
+
+def summon_elapsed_hours(since: datetime, now: datetime) -> str:
+    """``now - since`` を時間で、小数 1 桁 (四捨五入)。
+
+    浮動小数の ``format(.1f)`` は 0.05 刻みの境界で丸め方向が表現誤差に
+    左右される ∴ 秒を整数にしてから 360 秒 (0.1 時間) 単位で丸める。
+    時計のずれで ``since`` が未来なら 0.0 (負の経過は出さない)。
+    """
+    seconds = max(0, int((now - since).total_seconds()))
+    tenths = (seconds + 180) // 360
+    return f"{tenths // 10}.{tenths % 10}"
+
+
+def _stopped_marker(messages: list[dict[str, Any]]) -> str | None:
+    """最後の msg が ``NEXT: none`` で終わっていれば、その上の ``STOP:`` 行。
+
+    構造化 field (``next_participant``) は登録済み identity しか持てない
+    ∴ ``none`` はそこには来ず、本文の末尾行にしか無い。読むのは
+    **最後の msg の最後の非空行が ``NEXT: none`` ちょうど**という 1 形だけで、
+    mindwire の ``resolve_handoff`` の再実装はしない。読めない形はすべて
+    「停止済みではない」に倒す (Bohr v1.2: 読めなかったら警告を出さず、
+    カードは出す) ——— 警告は足し算で、無くてもカード自体は Summon を言う。
+    """
+    if not messages:
+        return None
+    content = str(messages[-1].get("content") or "")
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines or lines[-1] != "NEXT: none":
+        return None
+    if len(lines) >= 2 and lines[-2].startswith("STOP:"):
+        return lines[-2]
+    return "STOP: …"
+
+
+async def _collect_summons(
+    adapter: ChatroomAdapter,
+    controls: list[tuple[str, dict[str, Any]]],
+    live: _Live,
+    *,
+    now: datetime,
+) -> None:
+    """Summon が立っているプロジェクトを 1 枚ずつ、最上段に。
+
+    読むスレッドは**印の付いたスレッド 1 本だけ** (停止済みの警告のため)。
+    巻き添えのスレッドは読まない。読めなくてもカードは出す。
+    """
+    valid: list[tuple[str, Any]] = []
+    for project, control in controls:
+        summon = parse_active_summon(control)
+        if summon.kind == "none":
+            continue
+        if summon.kind == "malformed":
+            raw_repr = repr(control.get("active_summon"))
+            live.cards.append(
+                Card(
+                    key=f"summon:{project}",
+                    kind="summon",
+                    title=_SUMMON_MALFORMED_TITLE,
+                    href=f"/ui/projects/{project}/threads",
+                    note="active_summon が契約の形をしていません。Conclair の値を確認してください。",
+                    note_full=raw_repr,
+                    project=project,
+                    # 値から作る: 壊れ方が変わったら (例 thread_id=7 → "")
+                    # 「中身が変わった」と出す。``hash()`` は process ごとに
+                    # salt が変わり、保存した fingerprint と比べられない。
+                    fingerprint="malformed:"
+                    + hashlib.sha256(raw_repr.encode("utf-8")).hexdigest()[:16],
+                )
+            )
+            continue
+        valid.append((project, summon))
+
+    threads = await asyncio.gather(
+        *(
+            adapter.get_thread(project=project, thread_id=str(summon.thread_id))
+            for project, summon in valid
+        ),
+        return_exceptions=True,
+    )
+    for (project, summon), result in zip(valid, threads):
+        stop: str | None = None
+        if isinstance(result, BaseException) or ops._is_error(result):
+            logger.warning(
+                "board: summon thread unreadable, card without the stop check",
+                project=project,
+                thread_id=summon.thread_id,
+                error=str(result),
+            )
+        elif isinstance(result, dict):
+            stop = _stopped_marker(list(result.get("messages") or []))
+        note = f"経過 {summon_elapsed_hours(summon.since, now)} 時間"
+        if stop is not None:
+            note = f"{note} — {_SUMMON_STOPPED_NOTE.format(stop=stop)}"
+        live.cards.append(
+            Card(
+                key=f"summon:{project}",
+                kind="summon",
+                title=f"Summon 中: {summon.thread_id}",
+                href=f"/dashboard/decisions/{project}/{summon.thread_id}",
+                since=summon.since,
+                note=note,
+                note_full=note,
+                project=project,
+                thread_id=summon.thread_id,
+                detail=f"by {summon.by}",
+                fingerprint=(
+                    f"{summon.thread_id}:{summon.since.isoformat()}"
+                    f":{'stopped' if stop else 'open'}"
+                ),
             )
         )
 
@@ -1367,6 +1506,9 @@ def _gone_reason(row: dict[str, Any], live: _Live) -> str:
 
     if kind == "loop":
         return "ループが HOLD / 停止疑いでなくなりました"
+
+    if kind == "summon":
+        return "Summon が解除されました（または別のスレッドに移りました）"
 
     if kind == "merge":
         # マージ カードは PR が MERGED / CLOSED になれば live 集合から

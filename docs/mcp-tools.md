@@ -926,6 +926,36 @@ loop_control_report_observed(
 )
 ```
 
+### Summon / ヒューマンコール (`summon.py`)
+
+プロジェクトに「このスレッドを最優先で回せ」という印を 1 本だけ立てる / 外す 2 ツール。印は conclair の
+control 行 (`active_summon_thread_id` / `_since` / `_by`) に保存され、**読み口は `loop_control_get` の
+`active_summon`** (専用の get ツールは無い)。mindwire の sweep は印のスレッドを最優先で拾い、同じ
+プロジェクト (と repo owner を共有するプロジェクト) の他スレッドをラウンドの区切りで止める。
+
+| ツール | 用途 |
+|--------|------|
+| `summon_set` | 印を立てる。別スレッドが既に持っていれば 409 `summon_conflict` (上書きしない)。同じスレッドなら冪等 (`since` 不変) |
+| `summon_clear` | compare-and-clear。`thread_id` が現在の印と違えば 409 `summon_mismatch`。印が無ければ 200 no-op |
+
+**人間専用。** conductor / executor の allowlist に入れない — ループが印を外せると、人が止めたものを
+ループが再開できてしまう (`loop_control_set` と同じ理由で、権限は「ツールを渡さない」で表す)。
+`by` は `actor` と同じく**記録であって認証ではない**。空白だけの `thread_id` / `by` はツール側で 422
+`invalid_argument` にし、conclair を呼ばない。スレッドを resolve / close すると conclair 側で印が外れる。
+`STOP: done` では外れない (判断ページのカードが「停止済み。解除するか close してください」と出す)。
+
+**`active_summon` の契約**は mindwire が正本の `tests/data/summon/active_summon_contract.json`
+(本 repo にバイト一致のコピー。sha256 をテストで固定): キー無し / null = Summon なし、
+`{thread_id: 非空, since: 明示 offset 付き ISO 8601・小数 6 桁以内, by: 非空}` = Summon、それ以外は
+malformed で mindwire は HOLD に倒す。Magickit 側の読み手は `magickit.core.active_summon`。
+
+```python
+summon_set(project="spirrow-voxelworld", thread_id="T-X", by="takahito", note="今これだけ")
+# → {..., "active_summon": {"thread_id": "T-X", "since": "2026-10-29T01:02:03.000000+00:00", "by": "takahito"}}
+summon_clear(project="spirrow-voxelworld", thread_id="T-X", by="takahito")
+# → {..., "active_summon": null}
+```
+
 ### ドキュメント管理 (`document.py`)
 
 未登録のドキュメントタイプを自動処理するスマートドキュメント作成。

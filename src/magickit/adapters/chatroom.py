@@ -548,3 +548,41 @@ class ChatroomAdapter(BaseAdapter):
             f"/v1/projects/{project}/control/observed",
             json={"state": state, "actor": actor},
         )
+
+    # --- Summon (human call) ---------------------------------------------
+    #
+    # Operator-only, like `set_loop_control`. Conclair's 404 / 409 / 422
+    # envelopes (`summon_conflict`, `summon_mismatch`,
+    # `summon_thread_not_open`, `invalid_argument`) come back unaltered.
+
+    async def set_summon(
+        self,
+        *,
+        project: str,
+        thread_id: str,
+        by: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Mark ``thread_id`` as the project's active Summon."""
+        body: dict[str, Any] = {"thread_id": thread_id, "by": by}
+        if note is not None:
+            body["note"] = note
+        return await self._request_json(
+            "PUT", f"/v1/projects/{project}/control/summon", json=body
+        )
+
+    async def clear_summon(
+        self,
+        *,
+        project: str,
+        thread_id: str,
+        by: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare-and-clear: clears only if ``thread_id`` is the active mark."""
+        body: dict[str, Any] = {"thread_id": thread_id, "by": by}
+        if note is not None:
+            body["note"] = note
+        return await self._request_json(
+            "POST", f"/v1/projects/{project}/control/summon/clear", json=body
+        )

@@ -79,7 +79,14 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         Returns:
             {"project", "desired_state", "desired_actor", "desired_at",
              "observed_state", "observed_actor", "observed_at",
-             "configured"}.
+             "configured", "active_summon"}.
+
+            `active_summon` is passed through from conclair unaltered:
+            null (or absent, on an older conclair) means no Summon;
+            `{"thread_id", "since", "by"}` means that thread holds the
+            project's Summon (see `summon_set`). The shape is the contract
+            in `tests/data/summon/active_summon_contract.json`; a value
+            that breaks it is read by mindwire as HOLD.
 
             `configured=false` means nobody has set a state for this
             project; `desired_state` then carries the effective default
