@@ -109,6 +109,7 @@ Conclair が読めないとき、判断待ちは「0 件」ではなく **判定
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -797,6 +798,7 @@ async def _collect_summons(
         if summon.kind == "none":
             continue
         if summon.kind == "malformed":
+            raw_repr = repr(control.get("active_summon"))
             live.cards.append(
                 Card(
                     key=f"summon:{project}",
@@ -804,9 +806,13 @@ async def _collect_summons(
                     title=_SUMMON_MALFORMED_TITLE,
                     href=f"/ui/projects/{project}/threads",
                     note="active_summon が契約の形をしていません。Conclair の値を確認してください。",
-                    note_full=repr(control.get("active_summon")),
+                    note_full=raw_repr,
                     project=project,
-                    fingerprint="malformed",
+                    # 値から作る: 壊れ方が変わったら (例 thread_id=7 → "")
+                    # 「中身が変わった」と出す。``hash()`` は process ごとに
+                    # salt が変わり、保存した fingerprint と比べられない。
+                    fingerprint="malformed:"
+                    + hashlib.sha256(raw_repr.encode("utf-8")).hexdigest()[:16],
                 )
             )
             continue

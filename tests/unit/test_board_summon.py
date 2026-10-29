@@ -167,3 +167,19 @@ def test_elapsed_hours_rounding_boundaries(seconds, shown):
 def test_stopped_marker_reads_only_the_last_line(content, expected):
     assert board._stopped_marker([{"content": content}]) == expected
     assert board._stopped_marker([]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_fingerprint_follows_the_value(temp_db_path, monkeypatch):
+    """Two different breakages must not share a fingerprint (PR-gate advisory)."""
+    _no_deploys(monkeypatch)
+
+    async def _fp(value):
+        adapter = _adapter(control=_control(value))
+        (card,) = _summon_cards(await _collect(adapter, _settings(temp_db_path)))
+        return card.fingerprint
+
+    a = await _fp({"thread_id": 7, "since": "2026-10-09T01:02:03Z", "by": "x"})
+    b = await _fp({"thread_id": "", "since": "2026-10-09T01:02:03Z", "by": "x"})
+    again = await _fp({"thread_id": 7, "since": "2026-10-09T01:02:03Z", "by": "x"})
+    assert a.startswith("malformed:") and a != b and a == again
