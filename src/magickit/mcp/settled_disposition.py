@@ -73,8 +73,6 @@ SETTLED_DISPOSITION_KIND = "settled_disposition"
 # superseded, parked, or a status this code has never seen) is refused here.
 OPEN_STATUSES = frozenset({"active", "awaiting_reply"})
 
-DEFAULT_GRACE_SECONDS = 24 * 60 * 60
-
 # Refusal codes, carried in the error envelope's ``details.reason`` so a
 # client (mindwire settled_close) can classify without parsing prose.
 REASON_HEAD_MOVED = "head_moved"

@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from magickit.config import Settings
 from magickit.mcp import settled_disposition as sd
@@ -276,6 +277,51 @@ def test_yaml_without_the_block_keeps_it_closed(tmp_path: Any) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("mcp:\n  port: 8114\n", encoding="utf-8")
     assert Settings.from_yaml(path).settled_close_closers == []
+
+
+def _load(tmp_path: Any, body: str) -> Settings:
+    path = tmp_path / "config.yaml"
+    path.write_text(body, encoding="utf-8")
+    return Settings.from_yaml(path)
+
+
+def test_a_scalar_closer_is_refused_not_split_into_characters(tmp_path: Any) -> None:
+    """``closers: Fermi`` used to load as ['F', 'e', 'r', 'm', 'i'] (PR-gate at
+    5762255 §1): a valid list[str], so nothing complained and Fermi could not
+    close."""
+    with pytest.raises(ValidationError, match="settled_close_closers"):
+        _load(tmp_path, "settled_close:\n  closers: Fermi\n")
+
+
+@pytest.mark.parametrize("value", ["[Fermi, 1]", "{Fermi: x}", "['']", "[' Fermi']", "['Fermi ']"])
+def test_a_closer_list_that_cannot_match_is_refused(tmp_path: Any, value: str) -> None:
+    with pytest.raises(ValidationError, match="settled_close_closers"):
+        _load(tmp_path, f"settled_close:\n  closers: {value}\n")
+
+
+def test_an_empty_closers_key_is_the_empty_list(tmp_path: Any) -> None:
+    assert _load(tmp_path, "settled_close:\n  closers:\n").settled_close_closers == []
+
+
+@pytest.mark.parametrize("value", ["true", "false", "0", "-1", "1.5", "a day"])
+def test_a_grace_that_is_not_a_positive_integer_is_refused(tmp_path: Any, value: str) -> None:
+    """``true`` is the silent one: Pydantic's lax int reads it as 1 second."""
+    with pytest.raises(ValidationError, match="settled_close_grace_seconds"):
+        _load(tmp_path, f"settled_close:\n  grace_seconds: {value}\n")
+
+
+@pytest.mark.parametrize("value", ["[Fermi]", "Fermi", "closers", "1"])
+def test_a_settled_close_block_that_is_not_a_mapping_is_refused(tmp_path: Any, value: str) -> None:
+    """Without the check, ``in`` on a list or string skips the block (or
+    substring-matches ``closers``) and the carve-out loads closed silently."""
+    with pytest.raises(ValueError, match="settled_close must be a mapping"):
+        _load(tmp_path, f"settled_close: {value}\n")
+
+
+def test_an_empty_settled_close_block_keeps_the_defaults(tmp_path: Any) -> None:
+    settings = _load(tmp_path, "settled_close:\n")
+    assert settings.settled_close_closers == []
+    assert settings.settled_close_grace_seconds == 24 * 60 * 60
 
 
 # --------------------------------------------------------------------------- #
@@ -606,3 +652,71 @@ async def test_closeable_roles_still_gates_the_closer() -> None:
     result, adapter, _ = await _close(prismind=prismind, adapter=adapter)
     assert result["error_type"] == "RoleNotAllowedToClose"
     adapter.get_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_without_loaded_settings_the_carve_out_refuses() -> None:
+    """``_settings is None`` (PR-gate at 5762255 §2). Every other request with no
+    settings proceeds to Conclair's own owner check; this one must not."""
+    adapter = _adapter()
+    tools = _capture_tools(_settings())
+    with (
+        patch.object(chatroom_tools, "_settings", None),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+        patch.object(chatroom_tools, "_prismind_adapter", return_value=_prismind()),
+        patch.object(chatroom_tools, "_now", return_value=NOW),
+    ):
+        result = await tools["chatroom_close_thread"](
+            project=PROJECT,
+            thread_id=THREAD,
+            summary_content="settled",
+            author=CLOSER,
+            embodiment="terminal_coding_agent",
+            settled_head_msg_id="msg-3",
+        )
+    assert _reason(result) == sd.REASON_SETTINGS_UNAVAILABLE
+    adapter.get_thread.assert_not_awaited()
+    adapter.close_thread.assert_not_awaited()
+
+
+def _closer_answers_then(later: Any) -> MagicMock:
+    """CLOSER passes the closeable_roles stage, then answers ``later``.
+
+    Nothing caches the record between the two lookups, so a Prismind that
+    changes its answer (or goes down) mid-request reaches the carve-out's own
+    closer check, which the earlier stage otherwise hides.
+    """
+    prismind = _prismind()
+    first = prismind.get_identity.side_effect
+    calls = {"closer": 0}
+
+    async def get_identity(*, identity_name: str) -> Any:
+        if identity_name == CLOSER:
+            calls["closer"] += 1
+            if calls["closer"] > 1:
+                if isinstance(later, Exception):
+                    raise later
+                return later
+        return await first(identity_name=identity_name)
+
+    prismind.get_identity = AsyncMock(side_effect=get_identity)
+    return prismind
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("later", "reason"),
+    [
+        (RuntimeError("prismind down"), sd.REASON_CLOSER_LOOKUP_UNAVAILABLE),
+        ({"success": True}, sd.REASON_CLOSER_LOOKUP_UNAVAILABLE),
+        (
+            {"success": True, "found": False, "identity": None, "message": "none"},
+            sd.REASON_CLOSER_UNREGISTERED,
+        ),
+        (_identity(["naysayer"]), sd.REASON_CLOSER_UNREGISTERED),
+    ],
+)
+async def test_the_carve_out_rechecks_the_closer_itself(later: Any, reason: str) -> None:
+    result, adapter, _ = await _close(prismind=_closer_answers_then(later))
+    assert _reason(result) == reason
+    adapter.close_thread.assert_not_awaited()
