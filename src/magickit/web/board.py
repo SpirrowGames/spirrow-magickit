@@ -126,6 +126,7 @@ from magickit.core.board_lanes import DEFAULT_LANE, LANES, BoardLaneStore, SeenI
 from magickit.core.decision_materials import DecisionMaterialStore
 from magickit.core.pr_watch import PrSnapshot
 from magickit.deploy import records
+from magickit.mcp.disposition import KIND_BLOCKED_ON, KIND_DONE
 from magickit.mcp.pr_gate_ledger import (
     PR_GATE_THREAD_OWNER,
     PR_GATE_THREAD_TAG,
@@ -760,24 +761,63 @@ def summon_elapsed_hours(since: datetime, now: datetime) -> str:
 
 
 def _stopped_marker(messages: list[dict[str, Any]]) -> str | None:
-    """最後の msg が ``NEXT: none`` で終わっていれば、その上の ``STOP:`` 行。
+    """最後の msg が止まっていれば、その止まり方を 1 行で。止まっていなければ None。
 
-    構造化 field (``next_participant``) は登録済み identity しか持てない
-    ∴ ``none`` はそこには来ず、本文の末尾行にしか無い。読むのは
-    **最後の msg の最後の非空行が ``NEXT: none`` ちょうど**という 1 形だけで、
-    mindwire の ``resolve_handoff`` の再実装はしない。読めない形はすべて
-    「停止済みではない」に倒す (Bohr v1.2: 読めなかったら警告を出さず、
-    カードは出す) ——— 警告は足し算で、無くてもカード自体は Summon を言う。
+    **正本は最後の msg の構造化 field ``disposition``**
+    (spirrow-mindwire T-done-disposition-auto-close msg-8218 §3 1b-i)。
+    mindwire は ``STOP: done`` を ``NEXT:`` 行なしで書くようになる (境界 3)
+    ∴ 本文の ``NEXT: none`` だけを読んでいると、決着したスレッドに
+    「停止済み」が出なくなる。
+
+    - ``{kind: done}`` → ``STOP: done``
+    - ``{kind: blocked_on, trigger: {arm, ref}}`` → ``BLOCKED-ON: <arm> <ref>``
+      (旧形 ``STOP: blocked-on`` + ``NEXT: none`` も gateway が同じ値を
+      送っていたので、旧来どおり「停止済み」に数える)
+    - field はあるが上の形をしていない → None。field を持つ投稿の本文は
+      読み直さない (読めなかったら警告を出さず、カードは出す: Bohr v1.2)。
+    - field が無い (``None`` / 欠落) 投稿だけ、本文で読む fallback:
+      **最後の非空行が ``NEXT: none`` ちょうど**という 1 形だけで、
+      mindwire の ``resolve_handoff`` の再実装はしない。field 導入前の
+      投稿と、field を付けない書き手のための経路。
+
+    警告は足し算で、無くてもカード自体は Summon を言う。
     """
     if not messages:
         return None
-    content = str(messages[-1].get("content") or "")
+    last = messages[-1]
+    disposition = last.get("disposition")
+    if disposition is not None:
+        return _disposition_marker(disposition)
+    content = str(last.get("content") or "")
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     if not lines or lines[-1] != "NEXT: none":
         return None
     if len(lines) >= 2 and lines[-2].startswith("STOP:"):
         return lines[-2]
     return "STOP: …"
+
+
+def _disposition_marker(disposition: Any) -> str | None:
+    """保存済み ``disposition`` を ``_stopped_marker`` の 1 行に。読めなければ None。
+
+    ``parse_disposition`` (書き込み側の厳格な schema) は使わない: 保存値には
+    D-8 (3) の ``fallback`` のような system が足した key が載りうるが、
+    ここで要るのは kind と trigger だけだから。
+    """
+    if not isinstance(disposition, dict):
+        return None
+    kind = disposition.get("kind")
+    if kind == KIND_DONE:
+        return "STOP: done"
+    if kind != KIND_BLOCKED_ON:
+        return None
+    trigger = disposition.get("trigger")
+    if not isinstance(trigger, dict):
+        return None
+    arm, ref = trigger.get("arm"), trigger.get("ref")
+    if not (isinstance(arm, str) and arm.strip() and isinstance(ref, str) and ref.strip()):
+        return None
+    return f"BLOCKED-ON: {arm.strip()} {ref.strip()}"
 
 
 async def _collect_summons(
