@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -115,6 +115,46 @@ class Settings(BaseSettings):
     # this list are treated as the independent naysayer whose review the gate
     # requires.
     naysayer_identities: list[str] = Field(default_factory=lambda: ["Einstein"])
+
+    # Close carve-out (4) ``settled_disposition`` (mindwire
+    # T-done-disposition-auto-close msg-8185 / msg-8218 §3; see
+    # src/magickit/mcp/settled_disposition.py).
+    #
+    # ``settled_close_closers`` is the only switch, and it ships empty: with no
+    # closer named, every request for the carve-out is refused, whoever asks.
+    # It is not enough to leave the closer unregistered in Prismind -- the
+    # closeable_roles stage exempts unregistered authors for legacy traffic,
+    # so "nobody registered" would not have meant "nobody can". Naming a closer
+    # here is the Tier-C enablement decision (closes are not reopenable), and
+    # the carve-out additionally requires that closer to be a registered
+    # closeable_roles identity.
+    settled_close_closers: list[str] = Field(default_factory=list)
+    # How long a proposer's done must stand unanswered before it may be closed.
+    settled_close_grace_seconds: int = Field(default=24 * 60 * 60, gt=0)
+
+    @field_validator("settled_close_closers")
+    @classmethod
+    def _closers_are_exact_names(cls, value: list[str]) -> list[str]:
+        # The allowlist is matched by exact equality against the caller's
+        # author. A blank or space-padded entry can never match anyone, so it
+        # would leave the named closer silently unable to close: refuse it at
+        # load time instead.
+        for name in value:
+            if not name or name != name.strip():
+                raise ValueError(
+                    f"settled_close.closers entry {name!r} is blank or has "
+                    "surrounding whitespace; it would never match an author."
+                )
+        return value
+
+    @field_validator("settled_close_grace_seconds", mode="before")
+    @classmethod
+    def _grace_is_not_a_bool(cls, value: Any) -> Any:
+        # Pydantic's lax int accepts a bool (True -> 1), so
+        # ``grace_seconds: true`` would load as a one-second grace.
+        if isinstance(value, bool):
+            raise ValueError("settled_close.grace_seconds must be an integer, not a bool.")
+        return value
 
     # 判断ページの「次の担当」に出す identity。**スレッドの発言者ではなく、
     # Takahito が誰にタスクを回してよいかのリスト。** カードが彼に回った時点で
@@ -542,6 +582,27 @@ class Settings(BaseSettings):
                 flat_config["naysayer_gate_enabled"] = naysayer_gate.get("enabled")
             flat_config["naysayer_gate_tag"] = naysayer_gate.get("tag")
             flat_config["naysayer_identities"] = naysayer_gate.get("identities")
+
+        # Close carve-out (4). Keys are copied only when present, so an absent
+        # block keeps the closed-by-default field values above.
+        if (settled_close := yaml_config.get("settled_close")) is not None:
+            if not isinstance(settled_close, dict):
+                # ``settled_close: [Fermi]`` or ``settled_close: Fermi`` would
+                # otherwise be skipped (or substring-matched by ``in``) and
+                # the carve-out would load closed with no sign of why.
+                raise ValueError(
+                    "settled_close must be a mapping with closers / grace_seconds, "
+                    f"not {type(settled_close).__name__}."
+                )
+            if "closers" in settled_close:
+                raw = settled_close.get("closers")
+                # ``closers:`` with no value is the explicit empty list. Anything
+                # else goes to Pydantic as is, so a scalar is refused there
+                # (``list("Fermi")`` would have split it into characters, the
+                # same trap as board.pr_repo_allowlist -- PR-gate at 5762255 §1).
+                flat_config["settled_close_closers"] = [] if raw is None else raw
+            if "grace_seconds" in settled_close:
+                flat_config["settled_close_grace_seconds"] = settled_close.get("grace_seconds")
 
         # 判断ページ。`is not None` で見るのは deploy.approver_logins と同じ理由
         # ——— 「書いていない」と「空リストを明示した」を区別する。空を明示したら
