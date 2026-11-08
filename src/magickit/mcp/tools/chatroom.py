@@ -11,6 +11,7 @@ envelope (`{error_type, error, details}`) when the upstream returned
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NamedTuple
 
 import httpx
@@ -34,6 +35,23 @@ from magickit.mcp.pr_gate_ledger import (
     is_pr_gate_ledger_thread,
     ledger_close_sanction,
     parse_pr_ref,
+)
+from magickit.mcp.settled_disposition import (
+    REASON_CLOSER_LOOKUP_UNAVAILABLE,
+    REASON_CLOSER_NOT_CONFIGURED,
+    REASON_CLOSER_UNREGISTERED,
+    REASON_GATE_DISABLED,
+    REASON_HUMAN_CALLER,
+    REASON_OWNER_HUMAN,
+    REASON_OWNER_IS_AUTHOR,
+    REASON_OWNER_LOOKUP_UNAVAILABLE,
+    REASON_OWNER_UNRESOLVED,
+    REASON_SETTINGS_UNAVAILABLE,
+    REASON_THREAD_UNREADABLE,
+    assess_settled_disposition,
+    format_settled_close_note,
+    settled_close_reason,
+    settled_close_sanction,
 )
 from magickit.utils.logging import get_logger
 
@@ -534,6 +552,87 @@ def _format_owner_override_note(author: str, thread_owner: str | None, reason: s
     )
 
 
+def _now() -> datetime:
+    """The clock the settled-disposition grace is measured against (patchable)."""
+    return datetime.now(UTC)
+
+
+def _settled_refusal(reason: str, detail: str, **details: Any) -> dict[str, Any]:
+    """Refusal envelope for close carve-out (4) ``settled_disposition``.
+
+    ``details.reason`` is the machine-readable code (the ``REASON_*`` constants
+    in :mod:`magickit.mcp.settled_disposition`); the prose is for a human.
+    """
+    return {
+        "action": "block",
+        "envelope": _gate_error(
+            "SettledDispositionNotClosableError",
+            f"this thread cannot be closed as settled: {detail}",
+            reason=reason,
+            **details,
+        ),
+    }
+
+
+async def _settled_identity_refusal(*, author: str, owner: str) -> dict[str, Any] | None:
+    """The Prismind half of carve-out (4): who closes, and whose thread it is.
+
+    - the closer must be a *registered* identity able to act as a closeable
+      role. The closeable_roles stage that already ran exempts unregistered
+      authors (legacy traffic); this carve-out does not inherit that.
+    - the owner must be a registered identity that is not the human. A human
+      owner closes with one force-close (msg-8172 §3), so the machine never
+      closes their thread; an owner the registry cannot place is not provably
+      non-human, so it is refused too.
+
+    Any lookup that does not answer is a refusal (fail-closed).
+    """
+    closer = await _lookup_identity(author)
+    if closer.is_unavailable:
+        return _settled_refusal(
+            REASON_CLOSER_LOOKUP_UNAVAILABLE,
+            f"the closer {author!r} could not be looked up ({closer.reason_or_raise()}).",
+            author=author,
+        )
+    if not closer.found or not (set(closer.allowed_roles) & set(CLOSEABLE_ROLES)):
+        return _settled_refusal(
+            REASON_CLOSER_UNREGISTERED,
+            f"the closer {author!r} is not a registered identity able to act as one "
+            f"of {list(CLOSEABLE_ROLES)}.",
+            author=author,
+        )
+
+    if owner in HUMAN_IDENTITY_NAMES or normalize_identity_key(owner) in HUMAN_IDENTITY_NAMES:
+        return _settled_refusal(
+            REASON_OWNER_HUMAN,
+            f"the owner {owner!r} is the human; a human-owned thread is never "
+            "closed by the machine.",
+            owner=owner,
+        )
+    lookup = await _lookup_identity_normalized(owner)
+    if lookup.is_unavailable:
+        return _settled_refusal(
+            REASON_OWNER_LOOKUP_UNAVAILABLE,
+            f"the owner {owner!r} could not be looked up ({lookup.reason_or_raise()}).",
+            owner=owner,
+        )
+    if not lookup.found:
+        return _settled_refusal(
+            REASON_OWNER_UNRESOLVED,
+            f"the owner {owner!r} is not a registered identity, so it cannot be "
+            "shown not to be the human.",
+            owner=owner,
+        )
+    if "human" in lookup.allowed_roles:
+        return _settled_refusal(
+            REASON_OWNER_HUMAN,
+            f"the owner {owner!r} is registered with the human role; a "
+            "human-owned thread is never closed by the machine.",
+            owner=owner,
+        )
+    return None
+
+
 async def _enforce_close_policies(
     adapter: ChatroomAdapter,
     *,
@@ -543,10 +642,11 @@ async def _enforce_close_policies(
     body_content: str,
     naysayer_override_reason: str,
     owner_override_reason: str,
+    settled_head_msg_id: str = "",
 ) -> dict[str, Any]:
     """Apply the naysayer gate AND the ownership policies for a close/decide.
 
-    Three independent policies on the same close path, in this order:
+    Four independent policies on the same close path, in this order:
 
     1. **naysayer gate (#9)** — a gated thread needs a fresh approving review
        or a human gate-override. Unchanged semantics. It runs *first* so that
@@ -559,8 +659,17 @@ async def _enforce_close_policies(
        PR-review thread* when GitHub proves the PR merged with an APPROVED
        review at the merged head. See :mod:`magickit.mcp.pr_gate_ledger` for
        why the artifact — not the relayed critique text — is the evidence.
+    4. **settled-disposition carve-out (mindwire T-done-disposition-auto-close
+       msg-8185 / msg-8218 §3)** — only when the caller names the head it
+       judged (``settled_head_msg_id``). A configured, registered closer may
+       close a non-human-owned thread whose current head is a proposer's
+       stored ``done`` that has stood unanswered for the grace. Conclair
+       re-checks the head under its row lock. Anything unprovable refuses with
+       ``SettledDispositionNotClosableError``; it never falls back to the
+       owner check, because the caller asked for this carve-out by name. See
+       :mod:`magickit.mcp.settled_disposition`.
 
-    (2) and (3) are the same mechanism (set ``owner_override``) reached by two
+    (2), (3) and (4) are the same mechanism (set ``owner_override``) reached by two
     different proofs: "you are the human" and "the state is provable". (3) is
     scoped so narrowly that it cannot widen (2): it requires the driver's own
     owner *and* tag, and it refuses on any uncertainty.
@@ -584,6 +693,30 @@ async def _enforce_close_policies(
     # (Conclair only records a bypass when author != owner).
     owner_override = is_human
 
+    # 4) is opt-in by argument: an empty value leaves every path below exactly
+    #    as it was. A supplied one -- even blank -- is a request for the
+    #    carve-out, and every way it can fail is a refusal (fail-closed).
+    settled_requested = settled_head_msg_id != ""
+    if settled_requested:
+        if is_human:
+            return _settled_refusal(
+                REASON_HUMAN_CALLER,
+                "the human closes with owner_override_reason, not this carve-out.",
+                author=author,
+            )
+        if _settings is None:
+            return _settled_refusal(
+                REASON_SETTINGS_UNAVAILABLE, "magickit settings are not loaded."
+            )
+        if author not in _settings.settled_close_closers:
+            # Ships empty: no closer is configured until the Tier-C enablement.
+            return _settled_refusal(
+                REASON_CLOSER_NOT_CONFIGURED,
+                f"{author!r} is not a configured settled_close closer "
+                f"(configured: {list(_settings.settled_close_closers)}).",
+                author=author,
+            )
+
     # The thread is needed to run the gate, to resolve a human force-close, and
     # to recognise a PR-gate ledger thread — which is every non-trivial case,
     # so the read is now unconditional (it used to be skipped for a non-human
@@ -597,6 +730,12 @@ async def _enforce_close_policies(
 
     view = await adapter.get_thread(project=project, thread_id=thread_id, mode="full")
     if "error_type" in view:
+        if settled_requested:
+            return _settled_refusal(
+                REASON_THREAD_UNREADABLE,
+                f"the thread could not be read ({view.get('error_type')}).",
+                upstream_error_type=view.get("error_type"),
+            )
         if gate_enabled or is_human:
             # fail-closed: a gated/forced close must prove its preconditions.
             return {"action": "block", "envelope": view}
@@ -694,6 +833,64 @@ async def _enforce_close_policies(
         content = content + _format_approved_close_note(
             author, approved_review_msg_id, naysayer_override_reason
         )
+
+    # 4) settled-disposition carve-out. Reached only after the gate (1) has
+    #    allowed the close, so it is an owner bypass and never a gate bypass
+    #    (ADR-2026-06-04-19 D-5). The human never gets here (refused above),
+    #    and a PR-gate ledger thread is refused by the predicate, so (3) below
+    #    is never reached on this request.
+    if settled_requested:
+        assert _settings is not None  # checked when the request was recognised
+        owner = thread.get("owner")
+        if gated and not gate_enabled:
+            # The tag says this thread needs a fresh APPROVE, and with the gate
+            # off nothing checked one. Do not let the carve-out be the reason a
+            # gated thread closes unreviewed.
+            return _settled_refusal(
+                REASON_GATE_DISABLED,
+                f"the thread carries {gate_tag!r} but the naysayer gate is disabled, "
+                "so no approving review was checked.",
+            )
+        if isinstance(owner, str) and owner == author:
+            return _settled_refusal(
+                REASON_OWNER_IS_AUTHOR,
+                "the closer owns this thread and needs no carve-out; close it "
+                "without settled_head_msg_id.",
+                author=author,
+            )
+        grace = timedelta(seconds=_settings.settled_close_grace_seconds)
+        settled = assess_settled_disposition(
+            thread=thread,
+            messages=messages,
+            head_msg_id=settled_head_msg_id,
+            is_ledger_thread=is_pr_gate_ledger_thread(thread),
+            now=_now(),
+            grace=grace,
+        )
+        if not settled.closable:
+            return _settled_refusal(
+                settled.reason,
+                settled.detail,
+                head_msg_id=settled.head_msg_id,
+                last_msg_id=thread.get("last_msg_id"),
+            )
+        assert settled.head_msg_id is not None and settled.owner is not None
+        identity_refusal = await _settled_identity_refusal(author=author, owner=settled.owner)
+        if identity_refusal is not None:
+            return identity_refusal
+        return {
+            "action": "proceed",
+            "content": content
+            + format_settled_close_note(
+                author=author,
+                owner=settled.owner,
+                head_msg_id=settled.head_msg_id,
+                grace=grace,
+            ),
+            "owner_override": True,
+            "owner_override_reason": settled_close_reason(settled.head_msg_id, grace),
+            "close_sanction": settled_close_sanction(settled.head_msg_id),
+        }
 
     # 3) PR-gate ledger carve-out (T-pr-gate-ledger-debt msg-1001 §2). Only for
     #    a non-human closing someone else's thread — the human already has (2),
@@ -2536,6 +2733,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
         role: str = "",
         naysayer_override_reason: str = "",
         owner_override_reason: str = "",
+        settled_head_msg_id: str = "",
     ) -> dict[str, Any]:
         """Close an active thread by posting a decide msg (owner-only).
 
@@ -2613,9 +2811,26 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 naysayer_override_reason; a gated tag with the gate disabled
                 does not exempt the reason). Recorded
                 in the decide msg + Conclair audit event. Has no effect for
-                non-human authors — their only route past ownership is the
-                PR-gate ledger carve-out, which supplies its own machine-
-                derived reason and takes no caller-provided one.
+                non-human authors — their routes past ownership are the
+                PR-gate ledger carve-out and the settled-disposition
+                carve-out, both of which supply their own machine-derived
+                reason and take no caller-provided one.
+            settled_head_msg_id: request the settled-disposition carve-out
+                (mindwire T-done-disposition-auto-close). The msg_id of the
+                head the caller judged settled. Empty (default) changes
+                nothing. When set, the close proceeds only if the author is a
+                configured (``settled_close.closers``, empty by default) and
+                registered closeable identity, the thread is open, not a
+                PR-gate ledger thread and not human-owned, and its current
+                head is exactly this msg: a ``role=proposer`` post storing
+                ``disposition.kind == "done"`` with no next_participant, older
+                than ``settled_close.grace_seconds`` (24h). The naysayer gate
+                runs first. Every other outcome is
+                ``SettledDispositionNotClosableError`` with a machine-readable
+                ``details.reason`` (e.g. ``head_moved``, ``grace_pending``,
+                ``closer_not_configured``). Conclair re-checks the head under
+                its row lock and answers 422 ``head_moved`` if it changed in
+                between.
 
         Returns:
             On success: {"thread": {... status=resolved ...},
@@ -2631,7 +2846,9 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
             NaysayerOverrideForbiddenError, owner-override reason missing ->
             OwnerOverrideReasonRequiredError, PR-review thread without a
             provable APPROVE at its merged head ->
-            PrGateLedgerNotClosableError, non-owner (non-human) -> 403,
+            PrGateLedgerNotClosableError, settled_head_msg_id not provably
+            settled -> SettledDispositionNotClosableError, non-owner
+            (non-human) -> 403,
             already resolved -> 409, etc.): error_type envelope.
         """
         # close_thread emits a decide msg internally; same mandatory
@@ -2658,6 +2875,7 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 body_content=summary_content,
                 naysayer_override_reason=naysayer_override_reason,
                 owner_override_reason=owner_override_reason,
+                settled_head_msg_id=settled_head_msg_id,
             )
             if policy["action"] == "block":
                 return policy["envelope"]

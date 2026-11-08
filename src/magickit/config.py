@@ -116,6 +116,22 @@ class Settings(BaseSettings):
     # requires.
     naysayer_identities: list[str] = Field(default_factory=lambda: ["Einstein"])
 
+    # Close carve-out (4) ``settled_disposition`` (mindwire
+    # T-done-disposition-auto-close msg-8185 / msg-8218 §3; see
+    # src/magickit/mcp/settled_disposition.py).
+    #
+    # ``settled_close_closers`` is the only switch, and it ships empty: with no
+    # closer named, every request for the carve-out is refused, whoever asks.
+    # It is not enough to leave the closer unregistered in Prismind -- the
+    # closeable_roles stage exempts unregistered authors for legacy traffic,
+    # so "nobody registered" would not have meant "nobody can". Naming a closer
+    # here is the Tier-C enablement decision (closes are not reopenable), and
+    # the carve-out additionally requires that closer to be a registered
+    # closeable_roles identity.
+    settled_close_closers: list[str] = Field(default_factory=list)
+    # How long a proposer's done must stand unanswered before it may be closed.
+    settled_close_grace_seconds: int = Field(default=24 * 60 * 60, gt=0)
+
     # 判断ページの「次の担当」に出す identity。**スレッドの発言者ではなく、
     # Takahito が誰にタスクを回してよいかのリスト。** カードが彼に回った時点で
     # 彼は誰にでも回せる ∴ 出どころはスレッドの状態ではなく設定。
@@ -542,6 +558,14 @@ class Settings(BaseSettings):
                 flat_config["naysayer_gate_enabled"] = naysayer_gate.get("enabled")
             flat_config["naysayer_gate_tag"] = naysayer_gate.get("tag")
             flat_config["naysayer_identities"] = naysayer_gate.get("identities")
+
+        # Close carve-out (4). Keys are copied only when present, so an absent
+        # block keeps the closed-by-default field values above.
+        if (settled_close := yaml_config.get("settled_close")) is not None:
+            if "closers" in settled_close:
+                flat_config["settled_close_closers"] = list(settled_close.get("closers") or [])
+            if "grace_seconds" in settled_close:
+                flat_config["settled_close_grace_seconds"] = settled_close.get("grace_seconds")
 
         # 判断ページ。`is not None` で見るのは deploy.approver_logins と同じ理由
         # ——— 「書いていない」と「空リストを明示した」を区別する。空を明示したら
