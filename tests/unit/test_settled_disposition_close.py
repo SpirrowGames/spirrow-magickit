@@ -293,10 +293,29 @@ def test_a_scalar_closer_is_refused_not_split_into_characters(tmp_path: Any) -> 
         _load(tmp_path, "settled_close:\n  closers: Fermi\n")
 
 
-@pytest.mark.parametrize("value", ["[Fermi, 1]", "{Fermi: x}", "['']", "[' Fermi']", "['Fermi ']"])
-def test_a_closer_list_that_cannot_match_is_refused(tmp_path: Any, value: str) -> None:
-    with pytest.raises(ValidationError, match="settled_close_closers"):
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        # Pydantic v2's lax ``str`` does not coerce numbers (that needs
+        # ``coerce_numbers_to_str``, which Settings does not set), so YAML's
+        # int 1 is refused by the field type itself -- not loaded as "1".
+        ("[Fermi, 1]", "string_type"),
+        ("[Fermi, null]", "string_type"),
+        ("{Fermi: x}", "list_type"),
+        # These are valid list[str] and only _closers_are_exact_names refuses them.
+        ("['']", "value_error"),
+        ("[' Fermi']", "value_error"),
+        ("['Fermi ']", "value_error"),
+    ],
+)
+def test_a_closer_list_that_cannot_match_is_refused(
+    tmp_path: Any, value: str, error_type: str
+) -> None:
+    with pytest.raises(ValidationError, match="settled_close_closers") as excinfo:
         _load(tmp_path, f"settled_close:\n  closers: {value}\n")
+    errors = excinfo.value.errors()
+    assert [e["type"] for e in errors] == [error_type]
+    assert errors[0]["loc"][0] == "settled_close_closers"
 
 
 def test_an_empty_closers_key_is_the_empty_list(tmp_path: Any) -> None:
