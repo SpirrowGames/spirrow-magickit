@@ -4,8 +4,9 @@ What the card must say, and what it must not:
 
 - a valid ``active_summon`` gives one card, above deploy, with the elapsed
   hours (one decimal) and a link to the thread's judgement page;
-- if the called-in thread ended on ``NEXT: none`` the card adds the
-  "停止済み — 解除するか close" line;
+- if the called-in thread's last msg stopped -- its stored ``disposition``
+  is ``done`` / ``blocked_on``, or (field absent) its body ends on
+  ``NEXT: none`` -- the card adds the "停止済み — 解除するか close" line;
 - a malformed value is *shown* (mindwire treats it as HOLD), never dropped;
 - no Summon: no card; Conclair unreadable: the existing 判定不能 notice;
 - no "N 本停止中" count anywhere (Fermi msg-1434 removed it).
@@ -166,7 +167,79 @@ def test_elapsed_hours_rounding_boundaries(seconds, shown):
 )
 def test_stopped_marker_reads_only_the_last_line(content, expected):
     assert board._stopped_marker([{"content": content}]) == expected
+    assert board._stopped_marker([{"content": content, "disposition": None}]) == expected
     assert board._stopped_marker([]) is None
+
+
+_BLOCKED_PR = {"kind": "blocked_on", "trigger": {"arm": "pr", "ref": "o/r#1"}, "wake": "Bohr"}
+#: The D-8 (3) rewrite stores an extra ``fallback`` key the write-side schema refuses.
+_OWNER_UNRESOLVED = {
+    "kind": "blocked_on",
+    "trigger": {"arm": "human", "ref": "T-call"},
+    "wake": "human",
+    "fallback": {"reason": "owner_unresolved", "owner": "ghost", "declared": "done"},
+}
+
+
+@pytest.mark.parametrize(
+    ("disposition", "content", "expected"),
+    [
+        # The new settled form: no NEXT line at all. Only the field says it stopped.
+        ({"kind": "done"}, "x\nSTOP: done\n", "STOP: done"),
+        ({"kind": "done"}, "x", "STOP: done"),
+        # The new wait form names who wakes; it is still a stop, as the old
+        # ``STOP: blocked-on`` + ``NEXT: none`` (same stored value) was.
+        (_BLOCKED_PR, "x\nBLOCKED-ON: pr o/r#1\nNEXT: Bohr", "BLOCKED-ON: pr o/r#1"),
+        (_BLOCKED_PR, "x\nSTOP: blocked-on pr:o/r#1 wake:Bohr\nNEXT: none", "BLOCKED-ON: pr o/r#1"),
+        (_OWNER_UNRESOLVED, "x\nSTOP: done", "BLOCKED-ON: human T-call"),
+        # A field that is there but unreadable is "not stopped": the body is
+        # not consulted as a second opinion, even when it says NEXT: none.
+        ({"kind": "malformed"}, "x\nNEXT: none", None),
+        ("done", "x\nNEXT: none", None),
+        ({"kind": "blocked_on", "wake": "Bohr"}, "x\nNEXT: none", None),
+        ({"kind": "blocked_on", "trigger": {"arm": "pr", "ref": " "}}, "x\nNEXT: none", None),
+        ({"kind": "blocked_on", "trigger": "pr o/r#1"}, "x\nNEXT: none", None),
+    ],
+    ids=[
+        "done-stop-line",
+        "done-no-control-line",
+        "blocked-new-form",
+        "blocked-legacy-form",
+        "owner-unresolved-fallback",
+        "unknown-kind",
+        "not-a-dict",
+        "blocked-no-trigger",
+        "blocked-blank-ref",
+        "blocked-trigger-not-a-dict",
+    ],
+)
+def test_stopped_marker_reads_the_stored_disposition_first(disposition, content, expected):
+    assert board._stopped_marker([{"content": content, "disposition": disposition}]) == expected
+
+
+def test_stopped_marker_reads_the_last_msg_only():
+    done = {"content": "x\nSTOP: done", "disposition": {"kind": "done"}}
+    reply = {"content": "an objection\n\nNEXT: Bohr", "disposition": None}
+    assert board._stopped_marker([done, reply]) is None
+    assert board._stopped_marker([reply, done]) == "STOP: done"
+
+
+@pytest.mark.asyncio
+async def test_a_called_thread_settled_without_a_next_line_says_so(temp_db_path, monkeypatch):
+    # The shape mindwire posts once it writes ``STOP: done`` with no NEXT line
+    # (T-done-disposition-auto-close 境界 3): the body has no ``NEXT: none``.
+    _no_deploys(monkeypatch)
+    settled = {
+        "msg_id": "msg-4",
+        "author": "Bohr",
+        "content": "決着。\n\nSTOP: done\n",
+        "disposition": {"kind": "done"},
+    }
+    adapter = _adapter(control=_control(_summon()), messages={"T-call": [settled]})
+    (card,) = _summon_cards(await _collect(adapter, _settings(temp_db_path)))
+
+    assert "呼び出し先のスレッドは停止済み（STOP: done）。解除するか close してください" in card.note
+    assert card.fingerprint.endswith(":stopped")
 
 
 @pytest.mark.asyncio
