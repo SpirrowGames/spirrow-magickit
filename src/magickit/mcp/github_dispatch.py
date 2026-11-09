@@ -142,10 +142,24 @@ def _resolve_pat(role_env: str) -> str:
     Raises:
         _UpstreamError: neither the role PAT nor the legacy fallback is set.
     """
-    pat = os.environ.get(role_env) or os.environ.get(_LEGACY_PAT_ENV)
-    if not pat:
-        raise _UpstreamError(f"{role_env} (and {_LEGACY_PAT_ENV} fallback) unset")
-    return pat
+    return _resolve_pat_with_source(role_env)[0]
+
+
+def _resolve_pat_with_source(role_env: str) -> tuple[str, str]:
+    """Like :func:`_resolve_pat`, plus the name of the variable that supplied it.
+
+    The one place the role-then-legacy fallback order lives. Callers that need
+    to *report* which credential would be used (e.g. ``service_health``) read
+    the source from here instead of re-deriving the order themselves.
+
+    Raises:
+        _UpstreamError: neither the role PAT nor the legacy fallback is set.
+    """
+    for name in (role_env, _LEGACY_PAT_ENV):
+        pat = os.environ.get(name)
+        if pat:
+            return pat, name
+    raise _UpstreamError(f"{role_env} (and {_LEGACY_PAT_ENV} fallback) unset")
 
 
 def _pat_for_operation(operation: str) -> str:

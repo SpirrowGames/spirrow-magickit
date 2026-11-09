@@ -70,6 +70,7 @@ no path here that grants a close it could not prove.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -257,6 +258,97 @@ def _first_json_payload(result: Any) -> Any:
         return None
 
 
+# --------------------------------------------------------------------------- #
+# The proof credential
+# --------------------------------------------------------------------------- #
+#
+# T-pr-review-threads-outlive-their-prs msg-8630 / msg-8632. The carve-out
+# needs two *reads* (``pull_request_read`` get + get_reviews) and nothing else.
+# The no-auth tailnet instance (:8117, ``MAGICKIT_AUTH_DISABLED=1``) carries no
+# GitHub PAT on purpose: any PAT that ``github_dispatch`` recognises would turn
+# on the full ``github`` dispatcher (35 operations) on an endpoint nobody has
+# to authenticate to. So the proof path has its own variable, read here and
+# nowhere else. It is deliberately NOT one of ``_resolve_pat`` /
+# ``_pat_for_operation`` / ``_any_pat_configured``'s variables: setting it
+# leaves ``install_github_dispatch`` a no-op and ``tools/list`` unchanged.
+# The intended token is a fine-grained PAT with read-only pull-request access.
+#
+# This is safe because ``github_dispatch._mcp_call`` is a stateless httpx
+# client straight to ``GITHUB_MCP_URL``; it never goes through magickit's own
+# tool registry, so the proof path does not need the dispatcher installed.
+
+LEDGER_PROOF_PAT_ENV = "MAGICKIT_LEDGER_PROOF_PAT"
+
+
+# Report labels for the fallback variables ``github_dispatch`` resolves. Only
+# the *labels* live here; the fallback *order* lives in
+# ``github_dispatch._resolve_pat_with_source``. A variable this map does not
+# know is still reported (as ``configured`` with its raw name as ``source``),
+# so a fallback added upstream can never make the health entry say
+# ``disabled`` while the proof read authenticates.
+_FALLBACK_SOURCE_LABELS = {
+    "GITHUB_MCP_PAT_IMPLEMENTER": "implementer",
+    "GITHUB_MCP_PAT": "legacy",
+}
+
+
+def _resolve_ledger_proof_pat_with_source() -> tuple[str, str]:
+    """The PAT for the two proof reads, plus a label for where it came from.
+
+    ``MAGICKIT_LEDGER_PROOF_PAT`` (``proof_pat``) if set; otherwise exactly the
+    behaviour that predates it (``_resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")``,
+    via ``_resolve_pat_with_source``), so an instance that never sets the new
+    variable (:8114) is unchanged.
+
+    Raises:
+        _UpstreamError: no proof PAT and no implementer/legacy fallback.
+    """
+    pat = os.environ.get(LEDGER_PROOF_PAT_ENV)
+    if pat:
+        return pat, "proof_pat"
+    from magickit.mcp.github_dispatch import _resolve_pat_with_source  # noqa: PLC0415
+
+    pat, env_name = _resolve_pat_with_source("GITHUB_MCP_PAT_IMPLEMENTER")
+    return pat, _FALLBACK_SOURCE_LABELS.get(env_name, env_name)
+
+
+def _resolve_ledger_proof_pat() -> str:
+    """The PAT for the two proof reads (see ``_resolve_ledger_proof_pat_with_source``)."""
+    return _resolve_ledger_proof_pat_with_source()[0]
+
+
+def _ledger_proof_pat_source() -> str | None:
+    """Which variable the proof read would use, or None if none is set.
+
+    Derived from the same resolver ``fetch_ledger_verdict`` uses, so the
+    health report and the actual read cannot disagree.
+    """
+    from magickit.mcp.github_dispatch import _UpstreamError  # noqa: PLC0415
+
+    try:
+        return _resolve_ledger_proof_pat_with_source()[1]
+    except _UpstreamError:
+        return None
+
+
+def ledger_proof_status() -> dict[str, str]:
+    """``service_health``'s ``ledger_proof`` entry. Never contains a token.
+
+    ``disabled`` when no proof credential can be found; otherwise
+    ``configured`` plus ``source`` naming which variable it came from. This
+    reports configuration only (no network): whether github-mcp answers is
+    ``github_mcp``'s job, and on the no-auth instance that entry stays
+    ``disabled`` by design even when this one is ``configured``.
+    """
+    source = _ledger_proof_pat_source()
+    if source is None:
+        return {
+            "status": "disabled",
+            "reason": f"no {LEDGER_PROOF_PAT_ENV} / GITHUB_MCP_PAT_IMPLEMENTER / GITHUB_MCP_PAT configured",
+        }
+    return {"status": "configured", "source": source}
+
+
 async def fetch_ledger_verdict(pr: PrRef) -> LedgerVerdict:
     """Read ``pr``'s merge state and reviews from github-mcp, then judge.
 
@@ -268,23 +360,23 @@ async def fetch_ledger_verdict(pr: PrRef) -> LedgerVerdict:
     # Imported lazily: github_dispatch reads its PATs from the environment at
     # call time, and the chatroom tools must stay importable on a deployment
     # that has no GitHub credentials configured at all.
-    from magickit.mcp.github_dispatch import _mcp_call, _resolve_pat  # noqa: PLC0415
+    from magickit.mcp.github_dispatch import _mcp_call  # noqa: PLC0415
 
     args = {"owner": pr.owner, "repo": pr.repo, "pullNumber": pr.number}
     try:
-        pat = _resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")
+        pat = _resolve_ledger_proof_pat()
         pr_payload = _first_json_payload(
             await _mcp_call(
                 "tools/call",
                 {"name": "pull_request_read", "arguments": {"method": "get", **args}},
-                pat,
+                pat=pat,  # the proof credential, sent as Bearer
             )
         )
         reviews_payload = _first_json_payload(
             await _mcp_call(
                 "tools/call",
                 {"name": "pull_request_read", "arguments": {"method": "get_reviews", **args}},
-                pat,
+                pat=pat,  # the proof credential, sent as Bearer
             )
         )
     except Exception as exc:  # noqa: BLE001 — any lookup failure is "unproven"

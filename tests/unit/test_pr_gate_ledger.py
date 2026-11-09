@@ -210,7 +210,10 @@ async def test_github_failure_yields_refusal_not_an_exception() -> None:
         raise RuntimeError("github-mcp unreachable")
 
     with (
-        patch("magickit.mcp.github_dispatch._resolve_pat", return_value="pat"),
+        patch(
+            "magickit.mcp.github_dispatch._resolve_pat_with_source",
+            return_value=("pat", "GITHUB_MCP_PAT_IMPLEMENTER"),
+        ),
         patch("magickit.mcp.github_dispatch._mcp_call", new=_boom),
     ):
         verdict = await pr_gate_ledger.fetch_ledger_verdict(
@@ -223,7 +226,10 @@ async def test_github_failure_yields_refusal_not_an_exception() -> None:
 @pytest.mark.asyncio
 async def test_missing_pat_yields_refusal() -> None:
     """A deployment with no GitHub credentials refuses rather than crashes."""
-    with patch("magickit.mcp.github_dispatch._resolve_pat", side_effect=RuntimeError("PAT unset")):
+    with patch(
+        "magickit.mcp.github_dispatch._resolve_pat_with_source",
+        side_effect=RuntimeError("PAT unset"),
+    ):
         verdict = await pr_gate_ledger.fetch_ledger_verdict(
             pr_gate_ledger.PrRef("SpirrowGames", "spirrow-mindwire", 143)
         )
