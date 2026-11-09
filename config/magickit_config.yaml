@@ -86,6 +86,23 @@ deploy:
   approver_logins:
     - "takayan0908@gmail.com"
 
+# close の carve-out (4) settled_disposition の closer allowlist。
+#
+# - Tier-C 裁定: mindwire T-done-disposition-auto-close msg-8589 (Takahito)。
+#   置き場所を本番の作業ツリーの手編集ではなく repo の設定にしたのは同スレッド
+#   msg-8612 O-2 (本番 deploy は origin/main への ff なので、dirty にならない)。
+# - 名前は mindwire `identity/classification.py::SETTLED_CLOSER` と一致させる
+#   (完全一致で照合される。綴りが違えば closer_not_configured で拒否される)。
+# - ここに書いた値は env `MAGICKIT_SETTLED_CLOSE_CLOSERS` に優先する
+#   (from_yaml は値を init 引数として渡す ∴ env より強い。空の `closers:` でも
+#   env は黙って消える。実測は同スレッド msg-8612 / msg-8613 §2-2)。
+# - closers に載せるだけでは close は起きない。closer が Prismind に登録され
+#   (未登録は closer_unregistered で拒否)、かつ mindwire sweep.json の
+#   settled_close.enabled が立って初めて動く。
+# - grace_seconds は書かない (既定の 86400 = 24h)。
+settled_close:
+  closers: [settled-closer]
+
 # チャットルーム要約 (digest)
 #
 # producer は Magickit、保管と表示は Conclair。messages は append-only ∴
