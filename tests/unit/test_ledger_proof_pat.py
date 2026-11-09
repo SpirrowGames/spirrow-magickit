@@ -150,15 +150,20 @@ async def test_fetch_ledger_verdict_hands_the_proof_pat_to_mcp_call(
 
     async def _spy(method: str, params: dict[str, Any], pat: str) -> Any:
         seen.append({"method": method, "params": params, "pat": pat})
-        return {"content": []}
+        # Well-formed payloads (as the sidecar would return them), so the test
+        # does not depend on how fetch_ledger_verdict handles missing ones.
+        if params["arguments"]["method"] == "get":
+            return _text_result({"merged": True, "state": "closed", "head": {"sha": _HEAD}})
+        return _text_result([{"id": 42, "state": "APPROVED", "commit_id": _HEAD}])
 
     with patch.object(github_dispatch, "_mcp_call", new=_spy):
-        await pr_gate_ledger.fetch_ledger_verdict(
+        verdict = await pr_gate_ledger.fetch_ledger_verdict(
             PrRef("SpirrowGames", "spirrow-mindwire", 358)
         )
 
     assert [c["params"]["arguments"]["method"] for c in seen] == ["get", "get_reviews"]
     assert [c["pat"] for c in seen] == ["proof-token", "proof-token"]
+    assert verdict.closable is True
 
 
 @pytest.mark.asyncio
