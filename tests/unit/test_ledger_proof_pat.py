@@ -136,6 +136,32 @@ async def test_proof_pat_alone_proves_a_ledger_without_the_dispatcher(
 
 
 @pytest.mark.asyncio
+async def test_fetch_ledger_verdict_hands_the_proof_pat_to_mcp_call(
+    _clean_env: pytest.MonkeyPatch,
+) -> None:
+    """The resolved proof PAT is the ``pat`` argument of both ``_mcp_call`` calls.
+
+    Pins the wiring at the call site itself (gate round 1-2 asked whether the
+    resolved token reaches ``_mcp_call``): ``_mcp_call`` is spied on directly,
+    with no httpx in between, and must receive ``pat="proof-token"`` twice.
+    """
+    _clean_env.setenv(LEDGER_PROOF_PAT_ENV, "proof-token")
+    seen: list[dict[str, Any]] = []
+
+    async def _spy(method: str, params: dict[str, Any], pat: str) -> Any:
+        seen.append({"method": method, "params": params, "pat": pat})
+        return {"content": []}
+
+    with patch.object(github_dispatch, "_mcp_call", new=_spy):
+        await pr_gate_ledger.fetch_ledger_verdict(
+            PrRef("SpirrowGames", "spirrow-mindwire", 358)
+        )
+
+    assert [c["params"]["arguments"]["method"] for c in seen] == ["get", "get_reviews"]
+    assert [c["pat"] for c in seen] == ["proof-token", "proof-token"]
+
+
+@pytest.mark.asyncio
 async def test_then_installing_the_dispatcher_still_registers_nothing(
     _clean_env: pytest.MonkeyPatch,
 ) -> None:

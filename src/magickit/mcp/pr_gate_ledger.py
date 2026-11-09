@@ -369,14 +369,14 @@ async def fetch_ledger_verdict(pr: PrRef) -> LedgerVerdict:
             await _mcp_call(
                 "tools/call",
                 {"name": "pull_request_read", "arguments": {"method": "get", **args}},
-                pat,
+                pat=pat,  # the proof credential, sent as Bearer
             )
         )
         reviews_payload = _first_json_payload(
             await _mcp_call(
                 "tools/call",
                 {"name": "pull_request_read", "arguments": {"method": "get_reviews", **args}},
-                pat,
+                pat=pat,  # the proof credential, sent as Bearer
             )
         )
     except Exception as exc:  # noqa: BLE001 — any lookup failure is "unproven"
