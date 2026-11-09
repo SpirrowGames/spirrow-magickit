@@ -245,6 +245,47 @@ def test_ledger_proof_status_reports_each_state(
         assert v not in status.values()
 
 
+# --------------------------------------------------------------------------- #
+# one source for the fallback order (PR #119 gate round 1, advisory 2)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({_IMPLEMENTER_PAT_ENV: "i", _LEGACY_PAT_ENV: "l"}, ("i", _IMPLEMENTER_PAT_ENV)),
+        ({_LEGACY_PAT_ENV: "l"}, ("l", _LEGACY_PAT_ENV)),
+    ],
+)
+def test_resolve_pat_with_source_names_the_variable(
+    _clean_env: pytest.MonkeyPatch, env: dict[str, str], expected: tuple[str, str]
+) -> None:
+    for k, v in env.items():
+        _clean_env.setenv(k, v)
+    assert github_dispatch._resolve_pat_with_source(_IMPLEMENTER_PAT_ENV) == expected
+    assert github_dispatch._resolve_pat(_IMPLEMENTER_PAT_ENV) == expected[0]
+
+
+def test_resolve_pat_with_source_raises_when_unset(_clean_env: pytest.MonkeyPatch) -> None:
+    with pytest.raises(github_dispatch._UpstreamError):
+        github_dispatch._resolve_pat_with_source(_IMPLEMENTER_PAT_ENV)
+
+
+def test_health_follows_an_upstream_fallback_it_does_not_know(
+    _clean_env: pytest.MonkeyPatch,
+) -> None:
+    """If github_dispatch grows a new fallback variable, the health entry and
+    the proof read still agree: both come from ``_resolve_pat_with_source``."""
+
+    def _new_fallback(role_env: str) -> tuple[str, str]:
+        return "n", "GITHUB_MCP_PAT_SOMETHING_NEW"
+
+    with patch.object(github_dispatch, "_resolve_pat_with_source", _new_fallback):
+        assert pr_gate_ledger._resolve_ledger_proof_pat() == "n"
+        status = pr_gate_ledger.ledger_proof_status()
+    assert status == {"status": "configured", "source": "GITHUB_MCP_PAT_SOMETHING_NEW"}
+
+
 @pytest.mark.asyncio
 async def test_service_health_carries_ledger_proof_outside_the_ratio(
     _clean_env: pytest.MonkeyPatch,

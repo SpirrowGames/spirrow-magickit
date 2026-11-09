@@ -280,43 +280,55 @@ def _first_json_payload(result: Any) -> Any:
 LEDGER_PROOF_PAT_ENV = "MAGICKIT_LEDGER_PROOF_PAT"
 
 
-def _ledger_proof_pat_source() -> str | None:
-    """Which variable the proof read would use, or None if none is set.
-
-    ``proof_pat`` (``MAGICKIT_LEDGER_PROOF_PAT``) first; otherwise the
-    pre-existing fallback order of ``_resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")``:
-    ``implementer``, then ``legacy`` (``GITHUB_MCP_PAT``).
-    """
-    from magickit.mcp.github_dispatch import (  # noqa: PLC0415
-        _IMPLEMENTER_PAT_ENV,
-        _LEGACY_PAT_ENV,
-    )
-
-    if os.environ.get(LEDGER_PROOF_PAT_ENV):
-        return "proof_pat"
-    if os.environ.get(_IMPLEMENTER_PAT_ENV):
-        return "implementer"
-    if os.environ.get(_LEGACY_PAT_ENV):
-        return "legacy"
-    return None
+# Report labels for the fallback variables ``github_dispatch`` resolves. Only
+# the *labels* live here; the fallback *order* lives in
+# ``github_dispatch._resolve_pat_with_source``. A variable this map does not
+# know is still reported (as ``configured`` with its raw name as ``source``),
+# so a fallback added upstream can never make the health entry say
+# ``disabled`` while the proof read authenticates.
+_FALLBACK_SOURCE_LABELS = {
+    "GITHUB_MCP_PAT_IMPLEMENTER": "implementer",
+    "GITHUB_MCP_PAT": "legacy",
+}
 
 
-def _resolve_ledger_proof_pat() -> str:
-    """The PAT for the two proof reads.
+def _resolve_ledger_proof_pat_with_source() -> tuple[str, str]:
+    """The PAT for the two proof reads, plus a label for where it came from.
 
-    ``MAGICKIT_LEDGER_PROOF_PAT`` if set; otherwise exactly the behaviour that
-    predates it (``_resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")``), so an
-    instance that never sets the new variable (:8114) is unchanged.
+    ``MAGICKIT_LEDGER_PROOF_PAT`` (``proof_pat``) if set; otherwise exactly the
+    behaviour that predates it (``_resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")``,
+    via ``_resolve_pat_with_source``), so an instance that never sets the new
+    variable (:8114) is unchanged.
 
     Raises:
         _UpstreamError: no proof PAT and no implementer/legacy fallback.
     """
     pat = os.environ.get(LEDGER_PROOF_PAT_ENV)
     if pat:
-        return pat
-    from magickit.mcp.github_dispatch import _resolve_pat  # noqa: PLC0415
+        return pat, "proof_pat"
+    from magickit.mcp.github_dispatch import _resolve_pat_with_source  # noqa: PLC0415
 
-    return _resolve_pat("GITHUB_MCP_PAT_IMPLEMENTER")
+    pat, env_name = _resolve_pat_with_source("GITHUB_MCP_PAT_IMPLEMENTER")
+    return pat, _FALLBACK_SOURCE_LABELS.get(env_name, env_name)
+
+
+def _resolve_ledger_proof_pat() -> str:
+    """The PAT for the two proof reads (see ``_resolve_ledger_proof_pat_with_source``)."""
+    return _resolve_ledger_proof_pat_with_source()[0]
+
+
+def _ledger_proof_pat_source() -> str | None:
+    """Which variable the proof read would use, or None if none is set.
+
+    Derived from the same resolver ``fetch_ledger_verdict`` uses, so the
+    health report and the actual read cannot disagree.
+    """
+    from magickit.mcp.github_dispatch import _UpstreamError  # noqa: PLC0415
+
+    try:
+        return _resolve_ledger_proof_pat_with_source()[1]
+    except _UpstreamError:
+        return None
 
 
 def ledger_proof_status() -> dict[str, str]:
