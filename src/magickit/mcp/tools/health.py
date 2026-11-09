@@ -17,6 +17,7 @@ from magickit.adapters.prismind import PrismindAdapter
 from magickit.adapters.lexora import LexoraAdapter
 from magickit.config import Settings
 from magickit.mcp.github_dispatch import upstream_health as _github_upstream_health
+from magickit.mcp.pr_gate_ledger import ledger_proof_status
 from magickit.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -91,6 +92,11 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 active_count += 1
                 if result.get("status") == "healthy":
                     healthy_count += 1
+
+        # Configuration report for the PR-gate ledger proof credential
+        # (T-pr-review-threads-outlive-their-prs msg-8630). Not a liveness
+        # probe, so it never counts toward the health ratio.
+        results["services"]["ledger_proof"] = ledger_proof_status()
 
         # Determine overall status (over active, non-disabled services)
         if active_count == 0 or healthy_count == active_count:
