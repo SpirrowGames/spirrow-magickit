@@ -1,9 +1,10 @@
 """ADR-2026-10-09-23 D13 (unit 4): reservation MCP tools.
 
-The tools call the pool store directly. Each test shares one store (temp
-SQLite file, fake clock) between the MCP tools and the HTTP app, so a
-reservation made over MCP is seen by ``POST /turn-requests`` and the other
-way round.
+The tools call the pool store directly. Each test gives the MCP tools and
+the HTTP app separate store instances on one temp SQLite file (with a shared
+fake clock), the way the two processes run in production. So a reservation
+made over MCP is seen by ``POST /turn-requests`` only through the database,
+and the other way round.
 """
 
 from __future__ import annotations
@@ -104,9 +105,13 @@ class Env:
 async def env(monkeypatch, tmp_path: Path):
     db = str(tmp_path / "pool.db")
     clock = Clock()
-    store = ExecutorPoolStore(db, clock=clock)
-    monkeypatch.setattr(api_module, "_get_store", lambda: store)
-    monkeypatch.setattr(executor_tools, "_make_store", lambda settings: store)
+    # Two store instances on one SQLite file, as in production (the HTTP app
+    # and the MCP server are separate processes, each with its own store).
+    http_store = ExecutorPoolStore(db, clock=clock)
+    mcp_store = ExecutorPoolStore(db, clock=clock)
+    assert http_store is not mcp_store
+    monkeypatch.setattr(api_module, "_get_store", lambda: http_store)
+    monkeypatch.setattr(executor_tools, "_make_store", lambda settings: mcp_store)
     settings = Settings(executor_pool_enabled=True, db_path=db)
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     tools = _capture(settings)
