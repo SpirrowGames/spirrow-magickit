@@ -486,8 +486,15 @@ class ExecutorPoolStore:
         self, *, executor: str, reserved_by: str, reason: str, ttl_minutes: int
     ) -> dict[str, Any]:
         """Reserve ``executor``; reject its ``queued`` requests in the same
-        transaction and return their ids. Refuses if one is in force."""
+        transaction and return their ids. Refuses if one is in force.
+
+        ``ValueError`` (nothing written) on a bad TTL or an empty
+        ``reserved_by`` / ``reason``. The empty check lives here, not only in
+        the HTTP model, so every caller (HTTP and MCP) gets the same rule:
+        only the empty string is refused; whitespace is kept as given, as
+        the HTTP model's ``min_length=1`` always has."""
         _check_ttl(ttl_minutes)
+        _check_non_empty(reserved_by=reserved_by, reason=reason)
         async with self._tx() as (conn, now):
             cur = await conn.execute(
                 _ACTIVE_RESERVATION, {"executor": executor, "now": now}
@@ -559,6 +566,12 @@ def _check_ttl(ttl_minutes: int) -> None:
         or not 1 <= ttl_minutes <= MAX_TTL_MINUTES
     ):
         raise ValueError(f"ttl_minutes must be 1..{MAX_TTL_MINUTES}")
+
+
+def _check_non_empty(**fields: str) -> None:
+    for name, value in fields.items():
+        if not isinstance(value, str) or value == "":
+            raise ValueError(f"{name} must be a non-empty string")
 
 
 def _report_dict(row: aiosqlite.Row) -> dict[str, Any]:

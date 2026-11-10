@@ -180,9 +180,14 @@ def test_off_mcp_tool_list_is_unchanged():
     mcp = MagicMock()
     executor_tools.register_tools(mcp, Settings())
     mcp.tool.assert_not_called()
-    # This unit adds no MCP tool at all: nothing under mcp/ reaches the pool.
-    src = Path(executor_tools.__file__).resolve().parents[1]
+    # Unit 3 added no MCP tool. Unit 4's reservation tools reach the pool
+    # from mcp/tools/executor.py only, inside register_tools after the
+    # setting check; no other file under mcp/ may import it.
+    own = Path(executor_tools.__file__).resolve()
+    src = own.parents[1]
     for path in src.rglob("*.py"):
+        if path.resolve() == own:
+            continue
         assert "magickit.executor_pool" not in path.read_text(encoding="utf-8"), path
 
 
