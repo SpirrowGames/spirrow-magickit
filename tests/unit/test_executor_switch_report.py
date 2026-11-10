@@ -305,7 +305,10 @@ def test_records_are_only_appended(store):
 
 def test_no_edit_or_delete_tool_exists():
     names = set(_capture_executor(Settings(executor_pool_enabled=True)))
-    assert names == {"executor_tag_create", "deploy_report_executor_switch"}
+    # The reservation tools act on reservations, not on switch records.
+    assert names == {"executor_tag_create", "deploy_report_executor_switch",
+                     "executor_reserve", "executor_reservation_extend",
+                     "executor_reservation_release"}
 
 
 # --- refusals: nothing written ---------------------------------------------

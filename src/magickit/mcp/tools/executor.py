@@ -5,9 +5,20 @@ registers nothing. Not registered-and-refusing -- absent -- so the MCP
 tool list is identical to the one before this unit existed, and no
 GitHub call can be made from here.
 
-Today the module carries D10's tag path (``executor_tag_create``) and
-D12's switch report (``deploy_report_executor_switch``). The reservation
-tools (D13) land here behind the same setting.
+The module carries D10's tag path (``executor_tag_create``), D12's
+switch report (``deploy_report_executor_switch``) and D13's reservation
+tools (``executor_reserve``, ``executor_reservation_extend``,
+``executor_reservation_release``).
+
+The reservation tools call :class:`magickit.executor_pool.store.
+ExecutorPoolStore` directly, not the HTTP surface: the MCP server is its
+own process, and going through the store keeps it independent of whether
+the main app's HTTP endpoint is reachable. Both processes share the one
+SQLite file, and the store's ``BEGIN IMMEDIATE`` + ``busy_timeout`` is what
+makes that safe. Every rule is the store's (TTL, non-empty fields) or
+``executor_switch``'s (executor name form); nothing is re-checked here.
+The store is imported and built on the first reservation call, so with
+the setting off it is never imported and no table is created.
 """
 
 from __future__ import annotations
@@ -28,6 +39,13 @@ def _make_api(pat_env: str) -> executor_tags.HttpxTagApi:
     from magickit.mcp.github_dispatch import _resolve_pat  # noqa: PLC0415
 
     return executor_tags.HttpxTagApi(_resolve_pat(pat_env))
+
+
+def _make_store(settings: Settings) -> Any:
+    """The pool store on the shared SQLite file. Tests patch this."""
+    from magickit.executor_pool.store import ExecutorPoolStore  # noqa: PLC0415
+
+    return ExecutorPoolStore(settings.db_path)
 
 
 def register_tools(mcp: FastMCP, settings: Settings) -> None:
@@ -153,5 +171,121 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 )
         except executor_tags.ExecutorTagError as exc:
             return {"ok": False, "error_type": exc.error_type, "message": exc.message}
+
+    # --- D13 reservations -------------------------------------------------
+
+    store_holder: list[Any] = []
+
+    def _store() -> Any:
+        if not store_holder:
+            store_holder.append(_make_store(settings))
+        return store_holder[0]
+
+    def _refused(error_type: str, message: str) -> dict[str, Any]:
+        return {"ok": False, "error_type": error_type, "message": message}
+
+    async def _reservation_call(executor: str, call: Any) -> dict[str, Any]:
+        from magickit.executor_pool.store import PoolConflictError  # noqa: PLC0415
+
+        try:
+            executor_switch.validate_executor_name(executor)
+        except executor_tags.ExecutorTagError as exc:
+            return _refused(exc.error_type, exc.message)
+        try:
+            return await call(_store())
+        except PoolConflictError as exc:
+            return _refused(exc.error, exc.error)
+
+    def _ttl_error(exc: ValueError) -> dict[str, Any]:
+        return _refused("invalid_ttl", str(exc))
+
+    @mcp.tool()
+    async def executor_reserve(
+        executor: str, reserved_by: str, reason: str, ttl_minutes: int
+    ) -> dict[str, Any]:
+        """Reserve an executor for exclusive use; it expires on its own (D13).
+
+        USE THIS WHEN: a person or job needs an executor to itself (e.g.
+        maintenance). While the reservation is in force no new turn request
+        is accepted for that executor, and its queued requests are rejected
+        (`executor_reserved`) at the moment of reserving.
+
+        Args:
+            executor: the executor's name (letters, digits, `_`, `-`).
+            reserved_by: who reserves. Non-empty.
+            reason: why. Non-empty.
+            ttl_minutes: required, 1..1440. The reservation lapses after it.
+
+        Returns:
+            {"ok": true, "reservation": {...}, "rejected_request_ids": [...]}
+            On refusal (nothing written): {"ok": false, "error_type",
+            "message"} with `error_type` in {"invalid_executor",
+            "invalid_ttl", "invalid_argument", "already_reserved"}.
+        """
+
+        async def call(store: Any) -> dict[str, Any]:
+            try:
+                row = await store.create_reservation(
+                    executor=executor,
+                    reserved_by=reserved_by,
+                    reason=reason,
+                    ttl_minutes=ttl_minutes,
+                )
+            except ValueError as exc:
+                if str(exc).startswith("ttl_minutes"):
+                    return _ttl_error(exc)
+                return _refused("invalid_argument", str(exc))
+            rejected = row.pop("rejected_request_ids")
+            return {"ok": True, "reservation": row, "rejected_request_ids": rejected}
+
+        return await _reservation_call(executor, call)
+
+    @mcp.tool()
+    async def executor_reservation_extend(
+        executor: str, ttl_minutes: int
+    ) -> dict[str, Any]:
+        """Extend the reservation in force on `executor` (D13).
+
+        The new expiry is now + `ttl_minutes`, counted from now, never added
+        to the old expiry.
+
+        Args:
+            executor: the executor's name.
+            ttl_minutes: required, 1..1440.
+
+        Returns:
+            {"ok": true, "reservation": {...}}
+            On refusal: {"ok": false, "error_type", "message"} with
+            `error_type` in {"invalid_executor", "invalid_ttl",
+            "reservation_not_active"} (none in force: never made, released,
+            or expired).
+        """
+
+        async def call(store: Any) -> dict[str, Any]:
+            try:
+                row = await store.extend_reservation(executor, ttl_minutes=ttl_minutes)
+            except ValueError as exc:
+                return _ttl_error(exc)
+            return {"ok": True, "reservation": row}
+
+        return await _reservation_call(executor, call)
+
+    @mcp.tool()
+    async def executor_reservation_release(executor: str) -> dict[str, Any]:
+        """Release the reservation in force on `executor` (D13).
+
+        Args:
+            executor: the executor's name.
+
+        Returns:
+            {"ok": true, "reservation": {...}} with `released_at` set.
+            On refusal: {"ok": false, "error_type", "message"} with
+            `error_type` in {"invalid_executor", "reservation_not_active"}.
+        """
+
+        async def call(store: Any) -> dict[str, Any]:
+            return {"ok": True, "reservation": await store.release_reservation(executor)}
+
+        return await _reservation_call(executor, call)
 
     logger.info("Executor tools registered", repo=repo)

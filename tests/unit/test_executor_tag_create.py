@@ -152,7 +152,9 @@ def test_server_wires_executor_tools_only_through_register_tools():
 
 def test_on_registers_executor_tag_create():
     registered, _ = _capture(Settings(executor_pool_enabled=True))
-    assert set(registered) == {"executor_tag_create", "deploy_report_executor_switch"}
+    assert set(registered) == {"executor_tag_create", "deploy_report_executor_switch",
+                               "executor_reserve", "executor_reservation_extend",
+                               "executor_reservation_release"}
 
 
 def test_tool_reports_refusal_as_error_dict(monkeypatch):
