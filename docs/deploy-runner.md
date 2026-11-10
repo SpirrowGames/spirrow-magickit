@@ -137,6 +137,26 @@ runner の順序が変わります: **待機面で pin → backup → agent → 
 
 **エージェントに警告している罠**: venv に焼き込まれた絶対パスは**安定 symlink 側**（`…/spirrow-cognilens/venv`）なので、待機面で `source venv/bin/activate` すると **live 面の venv が有効になります**。待機面の検証には絶対パスを使う必要があり、brief で明示しています。
 
+## 4.6 再起動の前後の hook（`pre_restart_script` / `post_restart_script`、2026-11-10）
+
+対象ごとに、再起動の直前と直後に repo のスクリプトを 1 本ずつ走らせられる（`registry.py`）。
+手順を持たない原則（§2）は変えない: hook の中身は対象の repo が持ち、runner は「いつ・どの環境変数で呼ぶか」と
+「結果をどう扱うか」だけを持つ。
+
+| hook | いつ | 失敗したら | 渡す環境変数 |
+|---|---|---|---|
+| `pre_restart_script` | 切り替えの後、`systemctl restart` の直前 | **記録するだけ**。deploy は止めない | `MAGICKIT_DEPLOY_REQUEST_ID` |
+| `post_restart_script` | 再起動の後、health が通ってから | **deploy を `failed` にする**。`service_state` は `running_new` のまま、`error` に hook の最後の出力 | 上に加えて `MAGICKIT_DEPLOY_RESTART_STARTED_AT` / `_FINISHED_AT`（ISO-8601 UTC、マイクロ秒） |
+
+- スクリプトは**切り替え後の面**（= これから動くコード）のものを `target.repo_path` 経由で実行する。backup だけは
+  live 面のものを使う（§4.5）のと逆で、hook は新しいコードの一部だから。
+- registry が名前を挙げているのにスクリプトが無ければ失敗として扱う（skip しない）。
+- post-restart の失敗では診断エージェントを起動しない。サービスは動いていて、何が足りないかは hook 自身が出力する。
+- 使っているのは spirrow-lexora だけ。naysayer が codex 専用になった（Gemini への fallback を止めた）ので、
+  リリースは codex が開いた状態で終わる必要がある。pre は実行中の codex run が終わるのを待ち、post は再起動が
+  latch させたものだけを解除して `verify_codex` を取り直す（lexora `deploy/RUNBOOK.md` §11）。
+  きっかけは 2026-11-08 の lexora#108 の deploy で、再起動が codex を 2 日間閉じたままにした。
+
 ## 5. R-5: 何を許可し、何を許可しなかったか
 
 **本当の境界（カーネル）**

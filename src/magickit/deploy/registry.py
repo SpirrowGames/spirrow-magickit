@@ -101,6 +101,19 @@ class DeployTarget:
             conclair's unit runs ``alembic upgrade head`` as
             ``ExecStartPre`` with ``TimeoutStartSec=120``, so a restart
             is not instant.
+        pre_restart_script: path *relative to the repo*, run (from the
+            release being deployed) right before the restart. Advisory:
+            its exit status is recorded and never stops the deploy. For
+            lexora it waits until no codex run is in flight, because a
+            restart kills one and latches codex closed.
+        post_restart_script: path *relative to the repo*, run after the
+            restart once the service is healthy. Part of the deploy: a
+            non-zero exit makes it ``failed`` (the service is up on the
+            new code; what is missing is whatever the script restores).
+            It gets ``MAGICKIT_DEPLOY_RESTART_STARTED_AT`` /
+            ``MAGICKIT_DEPLOY_RESTART_FINISHED_AT`` (ISO-8601 UTC) and
+            ``MAGICKIT_DEPLOY_REQUEST_ID``. For lexora it reopens codex
+            after the restart (lexora deploy/RUNBOOK.md §11, 2026-11-10).
     """
 
     name: str
@@ -109,6 +122,8 @@ class DeployTarget:
     health_url: str | None
     backup_script: Path | None = None
     health_grace_s: float = 120.0
+    pre_restart_script: Path | None = None
+    post_restart_script: Path | None = None
     #: Set when this target uses two release directories and a symlink
     #: (see :mod:`magickit.deploy.releases`). ``repo_path`` stays the
     #: path systemd names either way -- for a release target it is the
@@ -165,6 +180,12 @@ _TARGETS: dict[str, DeployTarget] = {
         backup_script=Path("scripts/backup.sh"),
         health_grace_s=180.0,
         releases_root=SERVICES_ROOT / "releases" / "spirrow-lexora",
+        # The naysayer tier is codex-only since 2026-11-10 (no Gemini behind
+        # it), so a release must end with codex open: wait for in-flight
+        # codex runs, restart, then clear what the restart latched and
+        # re-verify (the 2026-11-08 #108 deploy left codex closed 2 days).
+        pre_restart_script=Path("scripts/pre_restart.sh"),
+        post_restart_script=Path("scripts/post_restart.sh"),
     ),
     "spirrow-cognilens": DeployTarget(
         name="spirrow-cognilens",

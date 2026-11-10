@@ -809,3 +809,103 @@ def test_an_unknown_target_fails_without_touching_anything(store, wiring, monkey
     assert result.ok is False
     assert result.status == STATUS_FAILED
     wiring.pin_mod.pin.assert_not_called()
+
+
+# ── pre/post-restart hooks (lexora codex recovery, 2026-11-10) ───
+
+
+def _hook_target(target: DeployTarget, tmp_path: Path, *, pre: str, post: str) -> DeployTarget:
+    """``target`` with real pre/post-restart scripts that log what they saw."""
+    from dataclasses import replace as dc_replace
+
+    scripts = target.repo_path / "scripts"
+    log = tmp_path / "hooks.log"
+    (scripts / "pre.sh").write_text(f'echo "pre $MAGICKIT_DEPLOY_REQUEST_ID" >> {log}\n{pre}\n')
+    (scripts / "post.sh").write_text(
+        f'echo "post $MAGICKIT_DEPLOY_REQUEST_ID $MAGICKIT_DEPLOY_RESTART_STARTED_AT '
+        f'$MAGICKIT_DEPLOY_RESTART_FINISHED_AT" >> {log}\n{post}\n'
+    )
+    return dc_replace(
+        target,
+        pre_restart_script=Path("scripts/pre.sh"),
+        post_restart_script=Path("scripts/post.sh"),
+    )
+
+
+def test_hooks_run_around_the_restart_with_the_window(
+    store, wiring, monkeypatch, target, tmp_path
+):
+    hooked = _hook_target(target, tmp_path, pre="echo waited", post="echo 'result: open'")
+    monkeypatch.setattr(runner, "resolve_target", lambda name: hooked)
+    request = _approved(store)
+
+    result = runner.run(request.request_id, store=store)
+
+    assert result.ok is True and result.status == STATUS_SUCCEEDED
+    names = [s["name"] for s in result.steps]
+    assert names.index("pre-restart") < names.index("restart") < names.index("post-restart")
+    post = next(s for s in result.steps if s["name"] == "post-restart")
+    assert post["ok"] is True and "result: open" in post["detail"]
+    lines = (tmp_path / "hooks.log").read_text().splitlines()
+    assert lines[0] == f"pre {request.request_id}"
+    _, rid, started, finished = lines[1].split(" ")
+    assert rid == request.request_id
+    from datetime import datetime
+
+    t0, t1 = datetime.fromisoformat(started), datetime.fromisoformat(finished)
+    assert t0.tzinfo is not None and t0 <= t1
+
+
+def test_a_failing_pre_restart_hook_does_not_stop_the_deploy(
+    store, wiring, monkeypatch, target, tmp_path
+):
+    hooked = _hook_target(target, tmp_path, pre="exit 1", post="true")
+    monkeypatch.setattr(runner, "resolve_target", lambda name: hooked)
+    result = runner.run(_approved(store).request_id, store=store)
+
+    assert result.ok is True
+    pre = next(s for s in result.steps if s["name"] == "pre-restart")
+    assert pre["ok"] is False
+    runner._restart.assert_called_once()
+
+
+def test_a_failing_post_restart_hook_fails_the_deploy_without_a_diagnosis(
+    store, wiring, monkeypatch, target, tmp_path
+):
+    post = "echo 'result: needs-human -- 1 latch item'; exit 3"
+    hooked = _hook_target(target, tmp_path, pre="true", post=post)
+    monkeypatch.setattr(runner, "resolve_target", lambda name: hooked)
+    result = runner.run(_approved(store).request_id, store=store)
+
+    assert result.ok is False and result.status == STATUS_FAILED
+    # The service is up on the new code: only what the hook restores is missing.
+    assert result.service_state == SERVICE_UP_NEW
+    assert result.deployed_sha == NEW_SHA
+    assert "post-restart step" in result.error and "needs-human" in result.error
+    runner._diagnose.assert_not_called()
+
+
+def test_post_restart_does_not_run_when_the_service_did_not_come_back(
+    store, wiring, monkeypatch, target, tmp_path
+):
+    hooked = _hook_target(target, tmp_path, pre="true", post="true")
+    monkeypatch.setattr(runner, "resolve_target", lambda name: hooked)
+    monkeypatch.setattr(runner, "_poll_health", lambda url, grace_s: (False, "500"))
+    result = runner.run(_approved(store).request_id, store=store)
+
+    assert result.ok is False
+    assert "post-restart" not in [s["name"] for s in result.steps]
+    runner._diagnose.assert_called_once()
+
+
+def test_a_declared_hook_that_is_missing_is_a_failure(tmp_path):
+    ok, detail = runner._run_hook(tmp_path / "nope.sh", tmp_path, timeout_s=5, env={})
+    assert ok is False and "not there" in detail
+
+
+def test_lexora_declares_its_codex_recovery_hooks():
+    from magickit.deploy.registry import resolve_target
+
+    lexora = resolve_target("spirrow-lexora")
+    assert lexora.pre_restart_script == Path("scripts/pre_restart.sh")
+    assert lexora.post_restart_script == Path("scripts/post_restart.sh")

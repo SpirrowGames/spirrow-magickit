@@ -44,10 +44,12 @@ escalate" from an instruction into a kernel refusal.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -78,6 +80,10 @@ logger = get_logger(__name__)
 
 BACKUP_TIMEOUT_S = 900.0
 RESTART_TIMEOUT_S = 300.0
+#: lexora's pre-restart waits up to 300s for in-flight codex runs.
+PRE_RESTART_TIMEOUT_S = 360.0
+#: lexora's post-restart may run verify_codex (seconds) and polls status.
+POST_RESTART_TIMEOUT_S = 600.0
 HEALTH_POLL_INTERVAL_S = 2.0
 #: One attempt. lexora's /health is known to take 20-30s sometimes, and
 #: a timeout shorter than that turns a slow service into a failed deploy.
@@ -479,7 +485,20 @@ def _run_locked(
         steps.record("switch", True, f"{slots.current} -> {slots.standby}")
 
     # ── 6. restart (the runner's step) ───────────────────────────
+    if target.pre_restart_script is not None:
+        # Advisory: recorded, never stops the deploy (registry docstring).
+        pre_ok, pre_detail = _run_hook(
+            target.repo_path / target.pre_restart_script,
+            target.repo_path,
+            timeout_s=PRE_RESTART_TIMEOUT_S,
+            env={"MAGICKIT_DEPLOY_REQUEST_ID": request.request_id},
+        )
+        steps.record("pre-restart", pre_ok, pre_detail)
+    # Microsecond precision, not the audit's seconds: the post-restart hook
+    # tells runs of the old process from runs of the new one by these.
+    restart_started_at = datetime.now(UTC).isoformat()
     restart_ok, restart_detail = _restart(target)
+    restart_finished_at = datetime.now(UTC).isoformat()
     steps.record("restart", restart_ok, restart_detail)
 
     # ── 7. verify ────────────────────────────────────────────────
@@ -490,8 +509,28 @@ def _run_locked(
     deployed_sha = _safe_head(target.repo_path)
 
     ok = restart_ok and (health_ok is not False) and deployed_sha == pinned.sha
+    post_restart_error: str | None = None
+    if ok and target.post_restart_script is not None:
+        # ── 7b. post-restart (part of the deploy) ────────────────
+        post_ok, post_detail = _run_hook(
+            target.repo_path / target.post_restart_script,
+            target.repo_path,
+            timeout_s=POST_RESTART_TIMEOUT_S,
+            env={
+                "MAGICKIT_DEPLOY_REQUEST_ID": request.request_id,
+                "MAGICKIT_DEPLOY_RESTART_STARTED_AT": restart_started_at,
+                "MAGICKIT_DEPLOY_RESTART_FINISHED_AT": restart_finished_at,
+            },
+        )
+        steps.record("post-restart", post_ok, post_detail)
+        if not post_ok:
+            ok = False
+            post_restart_error = (
+                f"the service restarted on {deployed_sha} and is healthy, but the post-restart "
+                f"step ({target.post_restart_script}) failed: {post_detail}"
+            )
     diagnosis = ""
-    if not ok:
+    if not ok and post_restart_error is None:
         diagnosis = _diagnose(
             store,
             request,
@@ -524,7 +563,12 @@ def _run_locked(
         agent_summary=outcome.summary,
         agent_denials=outcome.denials,
         diagnosis=diagnosis,
-        error=None if ok else _terminal_error(restart_ok, health_ok, deployed_sha, pinned.sha),
+        error=None
+        if ok
+        else (
+            post_restart_error
+            or _terminal_error(restart_ok, health_ok, deployed_sha, pinned.sha)
+        ),
         started_at=request.started_at,
         finished_at=utcnow(),
     )
@@ -669,6 +713,35 @@ def _run_backup(script: Path, repo: Path) -> tuple[bool, str]:
     if proc.returncode != 0:
         return False, f"exit {proc.returncode}: {output[-600:]}"
     return True, output.splitlines()[-1][:400] if output else "ok"
+
+
+def _run_hook(
+    script: Path, repo: Path, *, timeout_s: float, env: dict[str, str]
+) -> tuple[bool, str]:
+    """Run a target's pre/post-restart script. ``(ok, last lines of output)``.
+
+    A missing script is a failure, not a skip: the registry names it, so
+    its absence means the release being deployed is not the one the
+    registry was written for.
+    """
+    if not script.exists():
+        return False, f"{script} is declared by the registry and is not there"
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", str(script)],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env={**os.environ, **env},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"{script.name} did not complete: {exc}"
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    tail = "\n".join(output.splitlines()[-6:])[-1200:] if output else ""
+    if proc.returncode != 0:
+        return False, f"exit {proc.returncode}: {tail}"
+    return True, tail or "ok"
 
 
 def _restart(target: DeployTarget) -> tuple[bool, str]:
