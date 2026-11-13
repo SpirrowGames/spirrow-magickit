@@ -183,6 +183,19 @@ _NOT_FOUND_MARKERS = ("not_found", "notfound", "does_not_exist", "doesnotexist")
 _NEXT_KEYWORD = "NEXT:"
 _NEXT_LINE_RE = re.compile(rf"^\s*{re.escape(_NEXT_KEYWORD)}\s", re.IGNORECASE)
 
+#: I-20 (T-done-disposition-auto-close msg-9235 §4) が見る 2 つの書き方。
+#:
+#: - 決着の終端形: 本文の最後の行 (空行を除く) が、字下げなしでちょうどこの 1 行。
+#:   その後に単独行の handoff-target は無い (最後の行なので在り得ない)。mindwire の
+#:   conductor がこれを「決着」と読む。字下げした行は制御行ではない ∴ 該当させない。
+#: - 廃止した決着の書き方: 単独行 handoff-target の**最後の 1 行**の宛先がこの語。
+#:   mindwire は境界 5 (cutoff) 以降これを malformed として拒否する。
+_STOP_DONE_LINE = "STOP: done"
+_RETIRED_NONE_TARGET = "none"
+_NEXT_TARGET_RE = re.compile(
+    rf"^\s*{re.escape(_NEXT_KEYWORD)}\s+(?P<target>\S+)", re.IGNORECASE
+)
+
 #: 「駐機扱い」と読む human identity 名。CLAUDE.md の HUMAN_IDENTITY_NAMES と
 #: 揃える (現状 `("human",)`)。ここに列挙する ∴ chatroom_tools 側が広がれば
 #: そちらの定数を直接使うか、両者を揃える。
@@ -223,6 +236,63 @@ def _has_standalone_next_line(body: str) -> bool:
         if _NEXT_LINE_RE.match(line):
             return True
     return False
+
+
+def _ends_with_stop_done(body: str) -> bool:
+    """本文が決着の終端形 (最後の行が字下げなしの ``STOP: done``) で終わるか。
+
+    行末の空白と、その後ろの空行は許す。行頭の空白は許さない: 字下げした行は
+    制御行ではなく、mindwire は ``indented_terminal_form`` として拒否する。
+    """
+    for line in reversed(body.splitlines()):
+        if not line.strip():
+            continue
+        return line.rstrip() == _STOP_DONE_LINE
+    return False
+
+
+def _last_next_target(body: str) -> str | None:
+    """単独行 handoff-target の最後の 1 行が名指す語。その行が無ければ ``None``。
+
+    「単独行 handoff-target」は :func:`_has_standalone_next_line` と同じ規則で数える
+    ∴ この関数が ``None`` を返すのは、あちらが ``False`` を返すときに限る。
+
+    consumer は last-wins で読む ∴ 見るのは最後の 1 行だけ。語の前後の Markdown
+    装飾 (``*`` / ``_`` / `` ` ``) と末尾の句読点は落として比べる。
+    """
+    target: str | None = None
+    for line in body.splitlines():
+        if not _NEXT_LINE_RE.match(line):
+            continue
+        # 語の無い行 (キーワードと空白だけ) も「最後の 1 行」になる ∴ 空文字で上書きする。
+        match = _NEXT_TARGET_RE.match(line)
+        target = match.group("target").strip("*_`.,;:!。、") if match is not None else ""
+    return target
+
+
+def no_target_refusal(body: str) -> str | None:
+    """I-20: 「宛先を送らない」を選んだ投稿を拒否する理由。通すなら ``None``。
+
+    T-done-disposition-auto-close msg-9235 §4 の 1 と 2。判定順:
+
+    1. 本文が決着の終端形 (``STOP: done`` が最後の行) で終わる → 通す。
+       「このスレッドは決着した」は宛先の代わりになる書き方で、黙って止まる
+       投稿ではない。これを通さないと、人が判断ページで決着を書く方法が無い。
+    2. 単独行 handoff-target が 1 行も無い → 拒否 (従来の I-20)。
+    3. 最後の単独行 handoff-target が廃止した ``none`` → 拒否。直し方は 2 つ。
+    4. それ以外 (``NEXT: <名前>``) → 通す。
+
+    1 を 3 より先に見る: 本文の途中に古い ``NEXT: none`` を引用していても、最後の
+    行が ``STOP: done`` なら consumer は決着と読む。
+    """
+    if _ends_with_stop_done(body):
+        return None
+    target = _last_next_target(body)
+    if target is None:
+        return NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE
+    if target.casefold() == _RETIRED_NONE_TARGET:
+        return RETIRED_NONE_HANDOFF_MESSAGE
+    return None
 
 
 def _compose_decision_body(content: str, freeform: str) -> str:
@@ -351,6 +421,17 @@ NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE = (
     "宛先が指定されていません。"
     "select で送り先を選ぶか、"
     f"自由記述に単独行で ``{_NEXT_KEYWORD} <名前>`` を書いてください。"
+)
+
+#: I-20 error message for a body whose last standalone handoff-target line
+#: names the retired ``none`` (T-done-disposition-auto-close msg-9235 §4-1).
+#: mindwire refuses that form from its boundary-5 cutoff on, so the page
+#: refuses it at the source and names the two ways to write it instead.
+RETIRED_NONE_HANDOFF_MESSAGE = (
+    f"``{_NEXT_KEYWORD} {_RETIRED_NONE_TARGET}`` は廃止した書き方で、送信できません。"
+    f"決着なら最後の行を ``{_STOP_DONE_LINE}`` にして、"
+    f"その後に ``{_NEXT_KEYWORD}`` 行を書かないでください。"
+    f"次に動く人がいるなら ``{_NEXT_KEYWORD} <名前>`` を書いてください。"
 )
 
 #: I-12 sentinel for the "自由記述だけで送る" radio (spec §3.1a).
@@ -1805,6 +1886,7 @@ __all__ = [
     "router",
     "_is_parked_to_human",
     "_has_standalone_next_line",
+    "no_target_refusal",
     "_is_not_found",
     "_render_decision_error_page",
     "_render_decision_page",

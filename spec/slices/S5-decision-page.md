@@ -598,6 +598,20 @@ UNKNOWN と、parked_author の UNREGISTERED) ため片方に畳めない。
 選ぶ (I-12 の「自由記述だけで送れる」は content 側の要件で、これは宛先側の
 規律 ∴ 矛盾しない — Einstein msg-147 §1 が確定)。
 
+**2026-11-13 の追加** (`spirrow-mindwire` `T-done-disposition-auto-close` msg-9235 §4):
+
+- 本文の最後の単独行 `NEXT:` が `NEXT: none` なら **送信を拒否**する。mindwire は
+  境界 5 (cutoff) 以降この書き方を malformed として読む ∴ 判断ページは書かせない。
+  エラー文には直し方を 2 つ書く (最後の行を `STOP: done` にして `NEXT:` 行を書かない /
+  `NEXT: <名前>`)。
+- 本文の最後の行 (空行を除く) が字下げなしの `STOP: done` なら、**宛先がある投稿として
+  通す**。決着は「誰も呼ばれないまま止まる」投稿ではなく、止まる理由を書いた投稿である。
+  これを通さないと、人が判断ページで決着を書く方法が無くなる。
+- 判定は `web/decisions.py` の `no_target_refusal` 1 か所。対象は判断ページの form
+  だけで、MCP の `chatroom_post_message` は通らない。
+- 範囲に入れていないもの: 宛先を選んだうえで本文を `STOP: done` で終えると、D-30 が
+  その直下に `NEXT: <名前>` を追記する (mindwire は malformed と読む)。別に扱う。
+
 ### 13.6 I-21: `<label>` の内側に `<a>` を置かない (template lint)
 
 **要件** (msg-146 §3): 選択肢カードは全体が `<label>` ∴ 内側に `<a>` を置くと
