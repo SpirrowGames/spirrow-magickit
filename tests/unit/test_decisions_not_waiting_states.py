@@ -530,7 +530,7 @@ async def test_page_shows_answered_verdict_with_evidence(isolated_material_store
         # last msg is not parked to human (thread moved on) — but there IS
         # a human decide in between.
         _msg("msg-101", author="human", type="decide",
-             timestamp="2026-08-23T12:34:56Z", next_participant="none"),
+             timestamp="2026-08-23T12:34:56Z", next_participant="Bohr"),
         _msg("msg-102", author="Bohr", next_participant="Einstein"),
     ])
     adapter = _adapter_returning(payload)
@@ -743,7 +743,7 @@ async def test_form_is_present_in_all_three_states(isolated_material_store):
         payload_answered = _thread_payload([
             _msg("msg-100", author="Bohr", next_participant="human"),
             _msg("msg-101", author="human", type="decide",
-                 next_participant="none"),
+                 next_participant="Bohr"),
         ])
         with patch.object(
             chatroom_tools, "_adapter",
@@ -1048,7 +1048,7 @@ async def test_answered_evidence_is_html_escaped(isolated_material_store):
     )
     payload = _thread_payload([
         _msg("msg-100", author="Bohr", next_participant="human"),
-        _msg("msg-101", author="human", type="decide", next_participant="none"),
+        _msg("msg-101", author="human", type="decide", next_participant="Bohr"),
     ])
     payload["thread"]["title"] = "T<script>alert(1)</script>"
     adapter = _adapter_returning(payload)
@@ -1088,7 +1088,7 @@ async def test_old_body_only_explanation_line_is_gone(isolated_material_store):
         _thread_payload([
             _msg("msg-100", author="Bohr", next_participant="human"),
             _msg("msg-101", author="human", type="decide",
-                 next_participant="none"),
+                 next_participant="Bohr"),
         ]),
         # advanced
         _thread_payload([
@@ -1128,7 +1128,7 @@ async def test_chatroom_link_present_in_all_states(isolated_material_store):
         _thread_payload([
             _msg("msg-100", author="Bohr", next_participant="human"),
             _msg("msg-101", author="human", type="decide",
-                 next_participant="none"),
+                 next_participant="Bohr"),
         ]),
         _thread_payload([
             _msg("msg-100", author="Bohr"),

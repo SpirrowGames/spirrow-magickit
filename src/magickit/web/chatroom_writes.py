@@ -42,10 +42,9 @@ from magickit.utils.logging import get_logger
 # 書かない)。judgement page は決定 UI 特化の別ファイル ∴ そこに集約するのが妥当。
 from magickit.web.decisions import (
     _FREEFORM_ONLY_VALUE,
-    NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE,
     _compose_decision_body,
-    _has_standalone_next_line,
     _maybe_append_next,
+    no_target_refusal,
 )
 # 「聞くべきだったか」ラベル (T-decision-page-escalation-feedback-label)。
 # 判定はすべて escalation_labels 側にあり、ここは呼ぶだけ (上と同じ語彙制約)。
@@ -444,7 +443,13 @@ async def post_message(
         # ケースがここに落ちる ∴ 本文で宛先が指定されていることを要求する。
         # 代替は「宛先が 1 つも無い投稿」= 「誰も呼ばれないまま止まる」で、
         # 本スレッドが 4 回踏んだ静かな失敗の族そのもの (spec §3 I-20 逐語)。
-        if not next_participant and not _has_standalone_next_line(content):
+        #
+        # T-done-disposition-auto-close msg-9235 §4 で 2 点を足した。判定と文面は
+        # decision-page 側の ``no_target_refusal`` に集約している (語彙の制約):
+        #   - 決着の終端形で終わる本文は「宛先がある」として通す。
+        #   - 最後の handoff-target が廃止した書き方なら、直し方を添えて拒否する。
+        refusal = None if next_participant else no_target_refusal(content)
+        if refusal is not None:
             return await _render_decision_error(
                 request,
                 project=project, thread_id=thread_id,
@@ -452,7 +457,7 @@ async def post_message(
                 freeform_value=original_freeform,
                 next_participant_value=next_participant,
                 label_input=label_input,
-                error_message=NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE,
+                error_message=refusal,
             )
 
     if _embodiment_missing(msg_type=type, author=author, embodiment=embodiment):

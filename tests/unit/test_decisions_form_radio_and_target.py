@@ -767,6 +767,132 @@ async def test_i20_no_target_and_no_body_next_line_is_rejected():
     assert "NEXT:" in r.text
 
 
+# --- I-20: the retired ``NEXT: none`` is refused, ``STOP: done`` is a target ---
+#
+# T-done-disposition-auto-close msg-9235 §4. mindwire refuses a ``NEXT: none``
+# posted from its boundary-5 cutoff on; the page refuses it at the source. The
+# same PR has to let ``STOP: done`` through, or a person would have no way to
+# write "this thread is settled" on the page.
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # 決着の終端形: 最後の行が字下げなしの ``STOP: done``。
+        ("決着です。\n\nSTOP: done", None),
+        ("決着です。\n\nSTOP: done\n", None),
+        ("決着です。\n\nSTOP: done  \n\n", None),
+        ("STOP: done", None),
+        # 途中に古い行を引用していても、最後の行が終端形なら決着。
+        ("> NEXT: none と書いていた\n\nSTOP: done", None),
+        ("x\nNEXT: none\n\nSTOP: done", None),
+        # 宛先がある。
+        ("考慮の結果\n\nNEXT: Einstein", None),
+        ("NEXT: none\n\nやはり戻す\n\nNEXT: Bohr", None),
+        ("NEXT: nonexistent-persona", None),  # ``none`` で始まる別の語は対象外
+        # 廃止した書き方 (最後の handoff-target が none)。
+        ("決着\n\nNEXT: none", "retired"),
+        ("決着\n\nSTOP: done\nNEXT: none", "retired"),
+        ("決着\n\nNEXT: None", "retired"),
+        ("決着\n\n  NEXT: none", "retired"),
+        ("決着\n\nNEXT: **none**", "retired"),
+        ("決着\n\nNEXT: none.", "retired"),
+        ("NEXT: Bohr\n\nやめた\n\nNEXT: none", "retired"),
+        ("決着\n\nNEXT: none — これで終わり", "retired"),
+        # 語の無い handoff-target 行: 従来どおり「行はある」として通す (この PR で変えない)。
+        ("考慮の結果\n\nNEXT: ", None),
+        ("NEXT: none\n\n書き直す\n\nNEXT: ", None),
+        # ``STOP: done`` の後ろに handoff-target がある: 終端形ではない。
+        ("STOP: done\n\nNEXT: none", "retired"),
+        # 終端形に見えて終端形でないもの → 宛先なし。
+        ("just prose", "no-target"),
+        ("", "no-target"),
+        ("決着\n\n    STOP: done", "no-target"),  # 字下げ = 制御行ではない
+        ("決着\n\nSTOP: Done", "no-target"),
+        ("決着\n\nSTOP: done (close 待ち)", "no-target"),
+        ("STOP: done\n\nその後の文章", "no-target"),
+        ("文中で STOP: done と書いただけ", "no-target"),
+    ],
+)
+def test_i20_no_target_refusal_reads_the_last_control_line(body, expected):
+    messages = {
+        None: None,
+        "retired": decision_page.RETIRED_NONE_HANDOFF_MESSAGE,
+        "no-target": decision_page.NO_TARGET_AND_NO_BODY_HANDOFF_MESSAGE,
+    }
+    assert decision_page.no_target_refusal(body) == messages[expected]
+    # 「宛先なし」の判定は従来の I-20 (単独行 handoff-target の有無) から動かしていない。
+    if not decision_page._ends_with_stop_done(body):
+        assert (expected == "no-target") is (
+            not decision_page._has_standalone_next_line(body)
+        )
+
+
+def test_i20_retired_none_message_names_both_remedies():
+    message = decision_page.RETIRED_NONE_HANDOFF_MESSAGE
+    assert "NEXT: none" in message
+    assert "STOP: done" in message
+    assert "NEXT: <名前>" in message
+
+
+async def _post_no_target(freeform: str):
+    """「宛先を送らない」+ 自由記述だけ、で判断ページから送る。"""
+    adapter = AsyncMock()
+    adapter.post_message = AsyncMock(
+        return_value={"msg": {"msg_id": "posted", "type": "decide"}}
+    )
+    adapter.get_thread = AsyncMock(return_value={
+        "thread": {"title": "T", "status": "active"},
+        "messages": [{"author": "Bohr", "content": "please decide",
+                       "next_participant": "human"}],
+        "mode": "full",
+    })
+    adapter.close = AsyncMock()
+    with (
+        patch.object(chatroom_tools, "_check_role_allowed", _passing_gate()),
+        patch.object(chatroom_tools, "_check_next_participant", AsyncMock(return_value=None)),
+        patch.object(chatroom_tools, "_adapter", return_value=adapter),
+    ):
+        r = await _post(
+            f"/ui/projects/{PROJECT}/threads/{THREAD}/messages",
+            {
+                "type": "decide",
+                "author": "human",
+                "_decision_form": "1",
+                "content": "(自由記述のみ)",
+                "_freeform": freeform,
+                "next_participant": "",
+            },
+        )
+    return r, adapter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "freeform",
+    ["これで決着です。\n\nNEXT: none", "これで決着です。\n\nSTOP: done\nNEXT: none"],
+)
+async def test_i20_retired_next_none_is_rejected_with_the_two_remedies(freeform):
+    r, adapter = await _post_no_target(freeform)
+    assert r.status_code == 400
+    adapter.post_message.assert_not_called()
+    # 直し方 2 つ。D-31: 入力は再描画に残る。
+    assert "STOP: done" in r.text
+    assert "NEXT: &lt;名前&gt;" in r.text or "NEXT: <名前>" in r.text
+    assert "これで決着です。" in r.text
+
+
+@pytest.mark.asyncio
+async def test_i20_stop_done_as_the_final_line_is_accepted_as_written():
+    freeform = "これで決着です。\n\nSTOP: done"
+    r, adapter = await _post_no_target(freeform)
+    assert r.status_code == 303
+    kwargs = adapter.post_message.call_args.kwargs
+    # 本文は 1 文字も変えない。D-30 の追記も無い (宛先を送っていない)。
+    assert kwargs["content"] == freeform
+    assert not kwargs.get("next_participant")
+
+
 # --- I-21: no <a> inside a decision-choice <label> -----------------------
 
 
