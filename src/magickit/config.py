@@ -608,14 +608,17 @@ class Settings(BaseSettings):
         # ——— 「書いていない」と「空リストを明示した」を区別する。空を明示したら
         # 候補は sentinel だけになる、が意図どおり効くようにする。
         if (decisions_cfg := yaml_config.get("decisions")) is not None:
-            if "next_participant_choices" in decisions_cfg:
-                flat_config["decision_next_participant_choices"] = list(
-                    decisions_cfg.get("next_participant_choices") or []
-                )
-            if "escalation_label_authors" in decisions_cfg:
-                flat_config["escalation_label_authors"] = list(
-                    decisions_cfg.get("escalation_label_authors") or []
-                )
+            # 値は ``list(...)`` で包まずに Pydantic へ渡す。``list("Bohr")`` は
+            # ``["B", "o", "h", "r"]`` に化けて list[str] の検証を素通りする
+            # (board.pr_repo_allowlist と同じ罠 — PR-gate at d1bae13 advisory)。
+            # 値の無いキー (YAML の None) だけは「空リストを明示した」として [] にする。
+            for yaml_key, field in (
+                ("next_participant_choices", "decision_next_participant_choices"),
+                ("escalation_label_authors", "escalation_label_authors"),
+            ):
+                if yaml_key in decisions_cfg:
+                    raw = decisions_cfg.get(yaml_key)
+                    flat_config[field] = [] if raw is None else raw
             for yaml_key, field in (
                 ("summary_enabled", "decision_summary_enabled"),
                 ("summary_timeout_seconds", "decision_summary_timeout_seconds"),

@@ -1017,3 +1017,45 @@ async def test_current_export_with_project_filter_ignores_other_projects(isolate
     assert [r["label"] for r in rows] == [el.LABEL_SHOULD_NOT_ASK]
     rows = await s.list_labels(project="other", since="2000-01-01T00:00:00Z")
     assert [r["label"] for r in rows] == [el.LABEL_BORDERLINE]
+
+
+# --- PR-gate advisory at d1bae13: ``list("Bohr")`` split a scalar into chars ---
+
+
+_DECISION_LIST_KEYS = (
+    ("next_participant_choices", "decision_next_participant_choices"),
+    ("escalation_label_authors", "escalation_label_authors"),
+)
+
+
+def _write_decisions_yaml(tmp_path: Path, decisions: dict[str, Any]) -> Path:
+    import yaml as yaml_mod
+
+    cfg_path = tmp_path / "magickit_config.yaml"
+    cfg_path.write_text(yaml_mod.safe_dump({"decisions": decisions}), encoding="utf-8")
+    return cfg_path
+
+
+@pytest.mark.parametrize(("yaml_key", "field"), _DECISION_LIST_KEYS)
+def test_decisions_list_key_rejects_a_scalar_string(tmp_path, yaml_key, field):
+    """A bare string must be refused by Pydantic, not split into characters."""
+    from pydantic import ValidationError
+
+    cfg_path = _write_decisions_yaml(tmp_path, {yaml_key: "Bohr"})
+    with pytest.raises(ValidationError):
+        Settings.from_yaml(cfg_path)
+
+
+@pytest.mark.parametrize(("yaml_key", "field"), _DECISION_LIST_KEYS)
+def test_decisions_list_key_accepts_a_list(tmp_path, yaml_key, field):
+    cfg_path = _write_decisions_yaml(tmp_path, {yaml_key: ["Bohr", "Fermi"]})
+    assert getattr(Settings.from_yaml(cfg_path), field) == ["Bohr", "Fermi"]
+
+
+@pytest.mark.parametrize(("yaml_key", "field"), _DECISION_LIST_KEYS)
+def test_decisions_list_key_with_no_value_is_the_explicit_empty_list(
+    tmp_path, yaml_key, field
+):
+    """``key:`` with no value stays the explicit empty list, as before."""
+    cfg_path = _write_decisions_yaml(tmp_path, {yaml_key: None})
+    assert getattr(Settings.from_yaml(cfg_path), field) == []
