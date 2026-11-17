@@ -38,7 +38,11 @@ from magickit.deploy.records import (
 )
 from magickit.deploy.registry import DeployTarget
 
-from ._deploy_marks import requires_real_flock, requires_symlink_atomic_replace
+from ._deploy_marks import (
+    requires_bin_bash,
+    requires_real_flock,
+    requires_symlink_atomic_replace,
+)
 
 NEW_SHA = "a" * 40
 OLD_SHA = "b" * 40
@@ -832,6 +836,7 @@ def _hook_target(target: DeployTarget, tmp_path: Path, *, pre: str, post: str) -
     )
 
 
+@requires_bin_bash
 def test_hooks_run_around_the_restart_with_the_window(
     store, wiring, monkeypatch, target, tmp_path
 ):
@@ -856,6 +861,7 @@ def test_hooks_run_around_the_restart_with_the_window(
     assert t0.tzinfo is not None and t0 <= t1
 
 
+@requires_bin_bash
 def test_a_failing_pre_restart_hook_does_not_stop_the_deploy(
     store, wiring, monkeypatch, target, tmp_path
 ):
@@ -869,6 +875,7 @@ def test_a_failing_pre_restart_hook_does_not_stop_the_deploy(
     runner._restart.assert_called_once()
 
 
+@requires_bin_bash
 def test_a_failing_post_restart_hook_fails_the_deploy_without_a_diagnosis(
     store, wiring, monkeypatch, target, tmp_path
 ):

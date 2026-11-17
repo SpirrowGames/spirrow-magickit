@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -74,4 +75,19 @@ requires_symlink_atomic_replace = pytest.mark.skipif(
 requires_systemctl = pytest.mark.skipif(
     shutil.which("systemctl") is None,
     reason="systemctl is not on PATH; the deploy runner has nothing to talk to",
+)
+
+# ``runner._run_hook`` runs a target's pre/post-restart script as
+# ``["/bin/bash", script]``: the deploy targets are Linux hosts, and the
+# registry promises nothing about running hooks anywhere else, so the
+# runner is right to name the interpreter outright. A host without
+# ``/bin/bash`` (Windows, even with Git Bash on PATH -- ``/bin/bash``
+# is not a path Windows resolves) cannot execute the hooks these tests
+# assert on. Keyed on the file the runner actually execs, not on the OS.
+requires_bin_bash = pytest.mark.skipif(
+    not Path("/bin/bash").is_file(),
+    reason=(
+        "the deploy runner execs hooks as /bin/bash <script>; this host "
+        "has no /bin/bash, so the hooks cannot run here"
+    ),
 )
