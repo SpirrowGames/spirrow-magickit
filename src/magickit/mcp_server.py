@@ -22,6 +22,7 @@ from magickit.mcp.tools import (
     executor,
     generation,
     health,
+    host,
     lifecycle,
     loop_control,
     orchestration,
@@ -163,6 +164,11 @@ rather than calling individual services separately.""",
     # -- is registered only where the caller had to authenticate. On the
     # tailnet instance the approval tool simply does not exist.
     deploy.register_tools(mcp, settings, allow_approval=not auth_disabled())
+
+    # Host tasks, step 1 (T-host-task-request-with-human-approval): typed,
+    # read-only probes. Registered on both instances: nothing here changes
+    # the host, and the cost is bounded by hosts.limits.
+    host.register_tools(mcp, settings)
 
     # ADR-2026-10-09-23 unit 4 (Magickit side). INV-0: registers nothing
     # unless settings.executor_pool_enabled is true.
