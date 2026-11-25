@@ -1298,3 +1298,51 @@ service_health()
 #      "github_mcp": {"status": "healthy", "operation_count": 35, ...}}}
 # github_mcp は GITHUB_MCP_PAT 未設定時 status="disabled"（表示はするが健全性比率からは除外）
 ```
+
+### ホストの調査 (`host.py`)
+
+サービスホスト（`{{HOST_SERVICES}}`）の状態を、ssh を開けずに見るための 2 ツール。
+設計は chatroom `spirrow-magickit` / `T-host-task-request-with-human-approval`
+（msg-1750〜msg-1777）。ここにあるのはその手順 1 で、設定変更の依頼・承認・適用はまだ無い。
+仕組みと実測は [`docs/host-tasks.md`](host-tasks.md)。
+
+| ツール | 用途 |
+|--------|------|
+| `host_task_targets` | host・target・登録ファイル（名前だけ）とプローブの一覧 |
+| `host_probe` | 型付きの読み取り専用プローブを 1 つ実行する。承認なし。両方の MCP インスタンス（無認証の tailnet 面を含む）にある |
+
+**シェルではない。** プローブは固定の一覧から選ぶ。引数は registry の名前か、上限付きの整数だけで、
+パス・unit 名・正規表現・コマンド断片は渡せない。一覧に無い調査が要るなら、それはプローブを足す PR の合図。
+
+**ログ本文は返さない**（裁定 2、msg-1770）。`journal_summary` が返すのは値を検証した構造化フィールド
+（時刻・priority・pid・MESSAGE_ID・exit status）と件数だけ。env ファイルはキー名だけ。
+値は形式を検証して組み立て直したもので、通らなかった値は落として `omitted` に件数を出す。
+
+| プローブ | target | params | 返すもの |
+|---|---|---|---|
+| `unit_state` | 要 | — | `systemctl show` の固定プロパティ（ActiveState / SubState / MainPID / NRestarts / 終了コード / 時刻 / メモリ / CPU / tasks） |
+| `journal_summary` | 要 | `since_minutes` (1〜4320, 既定 60), `limit` (0〜200, 既定 50) | priority 別・時間別の件数と、新しい順の `{ts, priority, pid, message_id, exit_status}` |
+| `env_keys` | 要 | `file`（登録名） | キー名・重複数・継続行数。値は伏せ字でもハッシュでも返さない |
+| `deployed_sha` | 要（deploy 対象のみ） | — | live tree の commit と live の slot（a / b） |
+| `health` | 要 | — | loopback の health URL のステータスコード（ステータス行だけ読む） |
+| `listening` | 要 | — | 登録ポートが LISTEN かどうか |
+| `resources` | 不要 | — | メモリ・load average・登録ファイルシステムの空き・GPU |
+
+```python
+host_task_targets()
+# -> {"ok": true, "hosts": [{"name": "services", "targets": [...]}], "probes": [...]}
+
+host_probe(host="services", probe="journal_summary", target="spirrow-lexora",
+           params={"since_minutes": 120, "limit": 20})
+# -> {"ok": true, "result": {"units": [{"unit": "spirrow-lexora.service", "scanned": 51,
+#      "partial": false, "counts_by_priority": {"6": 51}, "counts_by_hour": [...],
+#      "entries": [{"ts": "...", "priority": 6, "pid": 2900597}, ...]}]},
+#      "omitted": {}, "trimmed_to_fit": false}
+
+host_probe(host="services", probe="env_keys", target="spirrow-conclair", params={"file": "env"})
+# -> {"ok": true, "result": {"file": "env", "keys": ["DATABASE_URL", ...], "changeable_keys": {}}}
+```
+
+失敗は `{"ok": false, "error_type", "message"}`。`rate_limited` のときは `retry_after_s` が付く
+（全体 30 回/分・300 回/時、`journal_summary` は別に 6 回/分・60 回/時、`health` は 12 回/分）。
+`out_of_scope` は magickit 自身を target にしたとき（R-4）。

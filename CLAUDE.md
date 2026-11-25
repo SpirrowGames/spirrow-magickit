@@ -55,6 +55,8 @@ src/magickit/
 │                   decisions(判断ページ) / chatroom_dashboard /
 │                   chatroom_proxy / chatroom_writes / chatroom_digest /
 │                   mojibake / deps
+├── hosts/          ホスト作業の依頼 (手順 1): registry(host→targets) / probes /
+│                   fields / fs / execution / limits / secretscan
 ├── templates/ static/
 └── utils/logging.py
 ```
@@ -100,6 +102,7 @@ Adapter で抽象化。命名は class=PascalCase, 関数変数=snake_case, 定�
 | `orchestration.py` | `intelligent_route` `orchestrate_workflow` |
 | `github_dispatch.py` | `github` `github_operations` |
 | `health.py` | `service_health` |
+| `host.py` | `host_task_targets` `host_probe` (ホストの型付き調査。承認なし・両インスタンス) |
 
 `service_health` は Cognilens / Prismind / Lexora / Conclair / github-mcp を一括チェック。
 github-mcp は PAT 未設定時 `status="disabled"` で、表示はするが健全性比率からは除外する。
@@ -436,6 +439,28 @@ merge はどこからでもできるが、live にできるのは systemd と al
   されたファイルは dirty 判定に出ない。**lexora/cognilens/prismind は systemd が実行する
   `start.sh` を ignore している** ∴ pin は blob hash で検出して拒否する
   (`pin.would_silently_overwrite`)。内容同一なら通す
+
+## ホストの調査 (`hosts/`, `mcp/tools/host.py`)
+
+開発環境から ssh なしでサービスホストを調べる口。設計は chatroom `T-host-task-request-with-human-approval`
+(msg-1750〜1777、裁定 msg-1770)。**今あるのは手順 1 (調査) だけ**で、設定変更の依頼・承認・適用は無い。
+詳細と実測は [`docs/host-tasks.md`](docs/host-tasks.md)。
+
+- **「読み取りだけ」は分類ではなく構造で言う** (R-1)。プローブは `PROBES` の固定関数、引数は registry の名前か
+  上限付き整数だけ、実行は固定 argv をシェルなしで。**自由文の調査・grep・パス引数を足さない** —
+  足した瞬間に承認なしの口が承認の要る口に変わる。一覧に無い調査はプローブを足す PR の合図
+- **出力は通さず組み立て直す** (msg-1772 Obj-2-2)。field 名は中身を保証しない (アプリは `MESSAGE_ID` に
+  何でも書ける。注入して実測)。`fields` の検証を通らない値は落として `omitted` に件数。`secretscan` は
+  最後の検査であって境界ではない
+- **ログ本文は返さない** (裁定 2)。本文を返す口は Takahito が実測 (msg-1778) を見て決めるまで作らない。
+  grep も入れない — 本文を伏せたまま一致件数を返すと本文の oracle になる
+- **host は論理名 `services`** (実ホスト名ではない)。出力にもパス・アドレスを出さない — プローブの出力は
+  エージェント文脈に入り、chatroom / PR 本文へ流れる
+- **magickit 自身は target にならない** (R-4)。名前の接頭辞で表より先に拒否 (`deploy` の self carve-out と同じ形)
+- **登録ファイルは `/` から 1 要素ずつ `O_NOFOLLOW` で辿る** (`hosts/fs.py`)。1 回の `open(O_NOFOLLOW)` は
+  最後の要素しか守らない。pytest の `tmp_path` は world-writable の `/tmp` 配下なので、テストは `base=` を渡す
+- **無認証面に載る** ∴ 頻度上限 (`hosts/limits.py`) がある。拒否した呼び出しは上限を消費しない
+- ホストでしか回せない試験 (journal 注入・サービスと同じ sandbox) は `tests/host/`、`MAGICKIT_HOST_TESTS=1` で opt-in
 
 ## やること board (`web/board.py`)
 
@@ -905,6 +930,7 @@ Phase 2 以降として掲げていたもの: マルチプロジェクト対応�
 
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — MCP ツールの引数・使用例・レスポンス形
 - [`docs/deploy-runner.md`](docs/deploy-runner.md) — deploy 実行の設計・権限の実測値・運用手順
+- [`docs/host-tasks.md`](docs/host-tasks.md) — ホストの調査 (手順 1) の設計・上限・ホストでの実測
 - [`docs/deploy-hardening.md`](docs/deploy-hardening.md) — deploy エージェントの専用ユーザ分離。**当面やらないと決定済み(2026-08-16)**、受容した内容・受容していない例外(Claude OAuth トークンだけはどのサービスも持たない)・再判断条件を §2.5 に明記
 - `docs/DESIGN.md` — 詳細設計
 - `docs/PROJECT_WORKFLOW_GUIDE.md` — プロジェクト運用ガイド
