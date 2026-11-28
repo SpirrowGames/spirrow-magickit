@@ -4,11 +4,16 @@ Thread: spirrow-magickit T-magickit-product-owner-role, design v3 (Bohr
 msg-1801 / msg-1803, approved by Einstein in reply to msg-1803). Each test names the design item
 it pins: D(a) .. D(h).
 
-What is deliberately *not* pinned: that a caller declaring ``author="human"``
-gets the embodiment exemption. It does today, because the exemption key is the
-caller-declared author string, and ADR-2026-11-28-25 D-5 (server-resolved
-identity only) is unmet in Magickit and was returned as such (msg-1801 §A).
-Fixing that as specified behaviour would harden the gap.
+What D(a) pins, and what it does not: D(a) pins that the identity ``human``
+keeps its embodiment exemption (compatibility; the human-ruling path must not
+break). Magickit cannot tell the real identity ``human`` from another caller
+that declares ``author="human"`` — the exemption key is the caller-declared
+author string, and ADR-2026-11-28-25 D-5 (server-resolved identity only) is
+unmet in Magickit and was returned as such (msg-1801 §A). So D(a) necessarily
+also passes for a spoofed ``author="human"``; that is a side effect of the open
+gap, not specified behaviour. No test here asserts the spoofing path as a
+feature, and a future server-side identity check that refuses a spoofed
+``author="human"`` is expected to keep D(a) green by resolving to ``human``.
 """
 
 from __future__ import annotations
