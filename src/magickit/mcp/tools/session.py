@@ -14,6 +14,7 @@ from fastmcp.exceptions import ToolError
 from magickit.adapters.cognilens import CognilensAdapter
 from magickit.adapters.prismind import PrismindAdapter
 from magickit.config import Settings
+from magickit.core.identity_normalize import normalize_identity_key
 from magickit.utils.logging import get_logger
 from magickit.utils.user import get_current_user
 
@@ -1176,6 +1177,29 @@ def register_tools(mcp: FastMCP, settings: Settings) -> None:
                 "identity": None,
                 "created": False,
                 "message": "identity_name is required",
+            }
+
+        # ADR-2026-11-28-25 D-4 stage 1: role ``human`` is granted to the
+        # identity ``human`` (ADR-11 key) and to no other. Refused here, before
+        # Prismind, and whatever ``keep_allowed_roles`` says: the combination
+        # keep=True + allowed_roles=[...] is meant to be refused upstream, but
+        # this guard does not depend on Prismind ignoring the list
+        # (Einstein msg-1800, Bohr msg-1801 C-3). ``keep_allowed_roles=True``
+        # with ``allowed_roles`` omitted grants nothing new, so it passes; that
+        # is what keeps an identity which still holds ``human`` updatable
+        # until it is removed. The identity ``human``'s own ``["human"]`` is
+        # untouched.
+        if "human" in (allowed_roles or []) and normalize_identity_key(
+            identity_name
+        ) != "human":
+            return {
+                "success": False,
+                "identity": None,
+                "created": False,
+                "message": (
+                    f"role 'human' may only be granted to the identity 'human', "
+                    f"not to {identity_name!r} (ADR-2026-11-28-25)"
+                ),
             }
 
         prismind = PrismindAdapter(

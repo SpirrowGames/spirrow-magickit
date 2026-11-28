@@ -513,10 +513,13 @@ async def test_human_own_role_passes(wired) -> None:
 
 def test_closeable_roles_is_the_decided_set() -> None:
     """msg-003 D-3 / msg-005. Pinned as a set, not as behaviour, so a silent
-    widening (e.g. adding "human" instead of exempting it) shows up here."""
+    widening (e.g. adding "human" instead of exempting it) shows up here.
+    ``product_owner`` joined it in T-magickit-product-owner-role
+    (ADR-2026-11-28-25); ``human`` still must not."""
     assert set(chatroom_tools.CLOSEABLE_ROLES) == {
-        "implementer", "integrator", "proposer",
+        "implementer", "integrator", "product_owner", "proposer",
     }
+    assert "human" not in chatroom_tools.CLOSEABLE_ROLES
 
 
 @pytest.mark.asyncio
@@ -534,7 +537,7 @@ async def test_naysayer_only_identity_cannot_close(wired) -> None:
     assert result["error_type"] == "RoleNotAllowedToClose"
     assert result["details"]["allowed_roles"] == ["naysayer"]
     assert result["details"]["closeable_roles"] == [
-        "implementer", "integrator", "proposer",
+        "implementer", "integrator", "product_owner", "proposer",
     ]
     chat.close_thread.assert_not_awaited()
 
