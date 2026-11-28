@@ -66,7 +66,30 @@ _settings: Settings | None = None
 # above-loop approval layer"); they normally act via Bohr / Heisenberg /
 # Einstein. The set is intentionally tiny -- if other actor classes
 # need the exemption later, treat that as a separate ADR.
+#
+# What the key is (T-magickit-product-owner-role, Bohr msg-1801 §A): an exact
+# match on the *caller-declared* ``author`` string -- not role, not
+# independence_class, and not an identity the server resolved. Magickit has no
+# server-side resolution of the chatroom author (``magickit/auth`` is the API
+# v2 JWT and is not bound to it), so ADR-2026-11-28-25 D-5's "server-resolved
+# identity ``human`` only" is NOT met here and has been returned as unmet to
+# spirrow-mindwire T-human-role-registry. Every site that tests membership of
+# this tuple inherits that limit: the MCP post / close embodiment checks, the
+# web ``_embodiment_missing``, and the I-8 close exemption.
 HUMAN_IDENTITY_NAMES = ("human",)
+
+# The role reserved for the identity ``human`` (ADR-2026-11-28-25 D-4 stage 1 /
+# D-6). No other identity may newly claim it on a write (``_check_role_allowed``)
+# or be granted it (``upsert_identity`` in ``session.py``). Already-stored
+# messages that carry it stay readable: nothing on the read path checks roles.
+HUMAN_ROLE = "human"
+
+# Roles whose holder's thread is never closed by the machine, alongside the
+# identity ``human`` itself and ``independence_class == "human"``. The same
+# protection keys as spirrow-mindwire#615's ``settled_close``. Compared
+# verbatim: ADR-2026-11-28-25 D-2 makes role names exact lowercase matches.
+HUMAN_PROTECTED_ROLES = ("product_owner", HUMAN_ROLE)
+HUMAN_INDEPENDENCE_CLASS = "human"
 
 # msg types whose post requires an embodiment declaration (state-
 # transitioning per msg-325 §4 N-2 取り込み). close_thread emits a
@@ -110,7 +133,17 @@ MANDATORY_EMBODIMENT_MSG_TYPES = ("handoff", "ack", "decide")
 # cover; it does not stop a dishonest one, and no wording here should suggest
 # otherwise. Authenticating `author` is a separate, pre-existing concern and
 # is deliberately not in this change's scope.
-CLOSEABLE_ROLES = ("implementer", "integrator", "proposer")
+#
+# `product_owner` (T-magickit-product-owner-role, ADR-2026-11-28-25) is the
+# role that is to succeed `human` for the person who owns the product. It is
+# added here so that a holder can close, and it is granted to no identity by
+# this change, so today it changes no traffic. That is not a reversal of the
+# rule above: `human` itself is still NOT in this set and still must never be.
+# Note the double effect -- this set is read for closer capability (here and in
+# `_settled_identity_refusal`), while `product_owner` on an *owner* is a
+# protection key (`HUMAN_PROTECTED_ROLES`) that stops the machine closing the
+# holder's thread.
+CLOSEABLE_ROLES = ("implementer", "integrator", "product_owner", "proposer")
 
 
 # --- close detection (T-close-detection-truthiness-seam) --------------
@@ -608,6 +641,7 @@ async def _settled_identity_refusal(*, author: str, owner: str) -> dict[str, Any
             f"the owner {owner!r} is the human; a human-owned thread is never "
             "closed by the machine.",
             owner=owner,
+            protection_keys=["identity_name"],
         )
     lookup = await _lookup_identity_normalized(owner)
     if lookup.is_unavailable:
@@ -623,14 +657,39 @@ async def _settled_identity_refusal(*, author: str, owner: str) -> dict[str, Any
             "shown not to be the human.",
             owner=owner,
         )
-    if "human" in lookup.allowed_roles:
+    protection_keys = _human_protection_keys(lookup)
+    if protection_keys:
         return _settled_refusal(
             REASON_OWNER_HUMAN,
-            f"the owner {owner!r} is registered with the human role; a "
-            "human-owned thread is never closed by the machine.",
+            f"the owner {owner!r} is registered as the human "
+            f"({', '.join(protection_keys)}); a human-owned thread is never "
+            "closed by the machine.",
             owner=owner,
+            protection_keys=protection_keys,
         )
     return None
+
+
+def _human_protection_keys(lookup: _IdentityLookup) -> list[str]:
+    """Which recorded attributes mark this owner as the human, if any.
+
+    The same keys as spirrow-mindwire#615's ``settled_close`` (Bohr msg-1799
+    §5): ``independence_class == "human"``, or ``allowed_roles`` holding one
+    of ``HUMAN_PROTECTED_ROLES``. The identity-name key is checked by the
+    caller before any lookup. Either recorded key is enough, which is what
+    keeps an owner such as Fermi protected both before and after ``human`` is
+    removed from its ``allowed_roles`` (its record carries
+    ``independence_class=human``).
+
+    A record with no readable ``independence_class`` (``None``) does not
+    match that key and is judged on the other one (Einstein msg-1800).
+    """
+    keys: list[str] = []
+    if lookup.independence_class == HUMAN_INDEPENDENCE_CLASS:
+        keys.append("independence_class")
+    held = sorted(set(lookup.allowed_roles) & set(HUMAN_PROTECTED_ROLES))
+    keys.extend(f"allowed_roles:{role}" for role in held)
+    return keys
 
 
 async def _enforce_close_policies(
@@ -1119,6 +1178,29 @@ def _role_not_allowed_error(
     }
 
 
+def _human_role_reserved_error(*, author: str) -> dict[str, Any]:
+    """Role ``human`` claimed by an identity other than ``human``.
+
+    Same ``error_type`` as any other refused role claim, so callers that
+    already branch on ``RoleNotAllowed`` need nothing new; ``details.reason``
+    tells this case apart from "not in your allowed_roles", which matters
+    because this one is refused whatever the record says.
+    """
+    return {
+        "error_type": "RoleNotAllowed",
+        "error": (
+            f"identity {author!r} may not act as role {HUMAN_ROLE!r}: that role "
+            "is reserved for the identity 'human' (ADR-2026-11-28-25). Post "
+            "under another role, or omit role."
+        ),
+        "details": {
+            "author": author,
+            "role": HUMAN_ROLE,
+            "reason": "human_role_reserved",
+        },
+    }
+
+
 def _role_validation_unavailable_error(*, author: str, role: str, reason: str) -> dict[str, Any]:
     """The gate could not run, so the write is refused rather than waved through.
 
@@ -1274,6 +1356,11 @@ class _IdentityLookup(NamedTuple):
     unavailable_reason: str | None
     found: bool
     allowed_roles: tuple[str, ...]
+    # The record's ``independence_class`` when it is a string, else None. Read
+    # only by ``_human_protection_keys``; unlike ``allowed_roles`` it is not a
+    # gate input, so a missing or odd value is not a contract violation here
+    # (it simply does not match ``"human"``).
+    independence_class: str | None = None
 
     @property
     def is_unavailable(self) -> bool:
@@ -1510,7 +1597,13 @@ async def _lookup_identity(author: str) -> _IdentityLookup:
                 field="allowed_roles", undetermined=_ROLES_UNDETERMINED
             )
         )
-    return _IdentityLookup(None, True, tuple(allowed_roles))
+    independence_class = identity.get("independence_class")
+    return _IdentityLookup(
+        None,
+        True,
+        tuple(allowed_roles),
+        independence_class if isinstance(independence_class, str) else None,
+    )
 
 
 async def _check_role_allowed(
@@ -1556,6 +1649,15 @@ async def _check_role_allowed(
     """
     if not role:
         return _ALLOW_WITHOUT_ROLE
+
+    # ADR-2026-11-28-25 D-4 stage 1: only the identity ``human`` may newly
+    # claim role ``human``. Checked before the record is read, so an identity
+    # whose ``allowed_roles`` still holds ``human`` (Fermi, until it is
+    # removed) is refused too, and no Prismind round-trip is spent on it. The
+    # key is ADR-11's, so ``Human`` is the same identity. Same caller-declared
+    # ``author`` limit as ``HUMAN_IDENTITY_NAMES``.
+    if role == HUMAN_ROLE and normalize_identity_key(author) not in HUMAN_IDENTITY_NAMES:
+        return _RoleDecision(_human_role_reserved_error(author=author), None)
 
     if lookup is None:
         lookup = await _lookup_identity(author)
@@ -1719,6 +1821,12 @@ async def _check_close_permitted(*, author: str, role: str) -> _RoleDecision:
         return await _check_role_allowed(
             author=author, role=role, lookup=human_lookup
         )
+
+    # The role-``human`` reservation (see ``_check_role_allowed``) answers
+    # before the lookup here too, so the verdict never depends on the record
+    # and a Prismind outage cannot turn it into a different envelope.
+    if role == HUMAN_ROLE and normalize_identity_key(author) not in HUMAN_IDENTITY_NAMES:
+        return _RoleDecision(_human_role_reserved_error(author=author), None)
 
     lookup = await _lookup_identity(author)
 
